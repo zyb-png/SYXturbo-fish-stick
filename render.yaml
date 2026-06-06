@@ -1,0 +1,31 @@
+services:
+  - type: web
+    name: manfei-seedance
+    runtime: docker
+    plan: starter
+    healthCheckPath: /healthz
+    envVars:
+      - key: PORT
+        value: 4177
+      - key: MANFEI_API_BASE
+        sync: false
+      - key: MANFEI_API_TOKEN
+        sync: false
+      - key: TOS_ACCESS_KEY_ID
+        sync: false
+      - key: TOS_SECRET_ACCESS_KEY
+        sync: false
+      - key: TOS_REGION
+        value: cn-beijing
+      - key: TOS_ENDPOINT
+        value: tos-cn-beijing.volces.com
+      - key: TOS_BUCKET
+        sync: false
+      - key: TOS_UPLOAD_PREFIX
+        value: manfei-assets/20260605
+      - key: TOS_SIGNED_URL_EXPIRES
+        value: 604800
+      - key: APP_USERNAME
+        value: manfei
+      - key: APP_PASSWORD
+        generateValue: true
