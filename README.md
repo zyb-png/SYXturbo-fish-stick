@@ -64,6 +64,35 @@ TOS_SIGNED_URL_EXPIRES=604800
 
 不要把 `.env` 提交到 Git 仓库；生产密钥应填写到托管平台的环境变量。
 
+## 火山引擎 ECS 部署
+
+推荐使用北京地域、Ubuntu 22.04、2 核 4GB、40GB 系统盘，并分配弹性公网 IP。
+安全组至少放行 TCP `22`（仅管理 IP）和 TCP `80`（用户访问）。
+
+首次登录服务器后执行：
+
+```bash
+git clone https://github.com/zyb-png/SYXturbo-fish-stick.git /opt/manfei-seedance
+sh /opt/manfei-seedance/deploy/volcengine/setup.sh
+```
+
+脚本会安装 Docker、创建 `/opt/manfei-seedance/.env` 并停止等待。填写环境变量后执行：
+
+```bash
+cd /opt/manfei-seedance
+docker compose up -d --build
+```
+
+以后更新原地址：
+
+```bash
+cd /opt/manfei-seedance
+git pull --ff-only
+docker compose up -d --build
+```
+
+资源组数据保存在 `/opt/manfei-seedance/data`，重新构建容器不会删除。
+
 ## 资源库持久化
 
 资源组和素材会同时保存到浏览器 `localStorage` 与服务端 `.data/app-state.json`。
