@@ -3,10 +3,20 @@ services:
     name: manfei-seedance
     runtime: docker
     plan: starter
+    region: singapore
+    repo: https://github.com/zyb-png/SYXturbo-fish-stick
+    branch: main
+    autoDeploy: true
     healthCheckPath: /healthz
+    disk:
+      name: manfei-data
+      mountPath: /var/data
+      sizeGB: 1
     envVars:
       - key: PORT
         value: 4177
+      - key: APP_STATE_FILE
+        value: /var/data/app-state.json
       - key: MANFEI_API_BASE
         sync: false
       - key: MANFEI_API_TOKEN
@@ -28,4 +38,4 @@ services:
       - key: APP_USERNAME
         value: manfei
       - key: APP_PASSWORD
-        generateValue: true
+        sync: false
