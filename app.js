@@ -259,16 +259,34 @@ function setupPromptMentions() {
   });
   prompt.addEventListener('input', () => {
     syncMentionBindings();
-    updateMentionMenu();
+    scheduleMentionMenuUpdate();
   });
   prompt.addEventListener('click', updateMentionMenu);
-  prompt.addEventListener('keydown', handleMentionKeys);
+  prompt.addEventListener('keydown', event => {
+    handleMentionKeys(event);
+    if (event.key === '@' && !event.metaKey && !event.ctrlKey && !event.altKey) {
+      scheduleMentionMenuUpdate();
+    }
+  });
+  prompt.addEventListener('beforeinput', event => {
+    if (event.inputType === 'insertText' && event.data === '@') {
+      scheduleMentionMenuUpdate();
+    }
+  });
   prompt.addEventListener('paste', event => {
     event.preventDefault();
     document.execCommand('insertText', false, event.clipboardData.getData('text/plain'));
   });
   prompt.addEventListener('blur', () => {
     window.setTimeout(hideMentionMenu, 140);
+  });
+}
+
+let mentionUpdateFrame = 0;
+function scheduleMentionMenuUpdate() {
+  cancelAnimationFrame(mentionUpdateFrame);
+  mentionUpdateFrame = requestAnimationFrame(() => {
+    mentionUpdateFrame = requestAnimationFrame(updateMentionMenu);
   });
 }
 
