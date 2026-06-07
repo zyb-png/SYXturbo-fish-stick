@@ -264,13 +264,11 @@ function setupPromptMentions() {
   prompt.addEventListener('click', updateMentionMenu);
   prompt.addEventListener('keydown', event => {
     handleMentionKeys(event);
-    if (event.key === '@' && !event.metaKey && !event.ctrlKey && !event.altKey) {
-      scheduleMentionMenuUpdate();
-    }
   });
   prompt.addEventListener('beforeinput', event => {
     if (event.inputType === 'insertText' && event.data === '@') {
-      scheduleMentionMenuUpdate();
+      event.preventDefault();
+      insertMentionTrigger();
     }
   });
   prompt.addEventListener('paste', event => {
@@ -288,6 +286,32 @@ function scheduleMentionMenuUpdate() {
   mentionUpdateFrame = requestAnimationFrame(() => {
     mentionUpdateFrame = requestAnimationFrame(updateMentionMenu);
   });
+}
+
+function insertMentionTrigger() {
+  const prompt = $('prompt');
+  prompt.focus();
+  const selection = window.getSelection();
+  const range = document.createRange();
+
+  if (selection.rangeCount && prompt.contains(selection.anchorNode)) {
+    const activeRange = selection.getRangeAt(0);
+    range.setStart(activeRange.startContainer, activeRange.startOffset);
+    range.setEnd(activeRange.endContainer, activeRange.endOffset);
+    range.deleteContents();
+  } else {
+    range.selectNodeContents(prompt);
+    range.collapse(false);
+  }
+
+  const trigger = document.createTextNode('@');
+  range.insertNode(trigger);
+  range.setStart(trigger, 1);
+  range.collapse(true);
+  selection.removeAllRanges();
+  selection.addRange(range);
+  syncMentionBindings();
+  scheduleMentionMenuUpdate();
 }
 
 function getMentionableResources() {
