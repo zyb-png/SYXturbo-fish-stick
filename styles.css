@@ -193,55 +193,83 @@ button:disabled {
 
 .submit-meteor {
   position: absolute;
-  top: 8%;
-  left: -24%;
-  width: min(52vw, 760px);
-  height: 3px;
+  top: 6vh;
+  left: -25vw;
+  width: clamp(190px, 28vw, 430px);
+  height: 2px;
   border-radius: 50%;
   opacity: 0;
-  background: linear-gradient(90deg, transparent 0%, rgba(207, 139, 28, 0.08) 24%, rgba(255, 194, 65, 0.42) 68%, #fff7d4 94%, #fff 100%);
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(190, 121, 17, 0.04) 22%,
+    rgba(232, 161, 39, 0.16) 52%,
+    rgba(255, 207, 103, 0.52) 80%,
+    #fff0b9 96%,
+    #fffdf2 100%
+  );
   box-shadow:
-    0 0 8px rgba(255, 244, 202, 0.92),
-    0 0 24px rgba(255, 196, 74, 0.72),
-    0 0 52px rgba(224, 147, 26, 0.42);
-  transform: rotate(-17deg);
+    0 0 5px rgba(255, 239, 186, 0.64),
+    0 0 15px rgba(255, 190, 61, 0.38);
+  filter: drop-shadow(0 0 10px rgba(226, 151, 34, 0.26));
+  transform: rotate(12deg);
   transform-origin: right center;
+  will-change: opacity, transform;
 }
 
 .submit-meteor::before {
   position: absolute;
-  right: -7px;
+  right: -5px;
   top: 50%;
-  width: 13px;
-  height: 13px;
+  width: 9px;
+  height: 9px;
   border-radius: 50%;
-  background: #fff9df;
+  background: radial-gradient(circle at 38% 35%, #fff 0 18%, #fff7d1 35%, #ffd36f 68%, rgba(226, 144, 24, 0.3) 100%);
   box-shadow:
-    0 0 9px #fff,
-    0 0 22px #ffd577,
-    0 0 48px rgba(255, 171, 37, 0.9);
+    0 0 7px rgba(255, 255, 245, 0.95),
+    0 0 18px rgba(255, 211, 111, 0.78),
+    0 0 34px rgba(238, 158, 31, 0.46);
   content: "";
   transform: translateY(-50%);
 }
 
+.submit-meteor::after {
+  position: absolute;
+  right: 2%;
+  top: 50%;
+  width: 78%;
+  height: 10px;
+  border-radius: 50%;
+  opacity: 0.48;
+  background: linear-gradient(90deg, transparent, rgba(223, 147, 25, 0.08) 36%, rgba(255, 205, 91, 0.38));
+  content: "";
+  filter: blur(7px);
+  transform: translateY(-50%);
+}
+
 .submit-meteor-effect.is-active .submit-meteor {
-  animation: meteor-cross 2.2s cubic-bezier(0.12, 0.66, 0.23, 1) both;
+  animation: meteor-cross 2.75s cubic-bezier(0.18, 0.58, 0.2, 1) both;
 }
 
 @keyframes meteor-cross {
   0% {
     opacity: 0;
-    transform: translate3d(0, 0, 0) rotate(-17deg) scaleX(0.42);
+    transform: translate3d(-8vw, -3vh, 0) rotate(11deg) scaleX(0.58);
   }
-  10% {
-    opacity: 0.95;
+  12% {
+    opacity: 0.72;
   }
-  62% {
-    opacity: 1;
+  38% {
+    opacity: 0.94;
+    transform: translate3d(56vw, 12vh, 0) rotate(16deg) scaleX(0.9);
+  }
+  68% {
+    opacity: 0.82;
+    transform: translate3d(102vw, 31vh, 0) rotate(20deg) scaleX(1);
   }
   100% {
     opacity: 0;
-    transform: translate3d(142vw, 48vh, 0) rotate(-17deg) scaleX(1);
+    transform: translate3d(151vw, 57vh, 0) rotate(23deg) scaleX(0.86);
   }
 }
 
