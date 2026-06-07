@@ -311,7 +311,14 @@ function insertMentionTrigger() {
   selection.removeAllRanges();
   selection.addRange(range);
   syncMentionBindings();
-  scheduleMentionMenuUpdate();
+
+  const replaceRange = document.createRange();
+  replaceRange.setStart(trigger, 0);
+  replaceRange.setEnd(trigger, 1);
+  state.mentionRange = { query: '', replaceRange };
+  state.mentionResults = getMentionableResources();
+  state.mentionIndex = 0;
+  renderMentionMenu();
 }
 
 function getMentionableResources() {
