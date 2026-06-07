@@ -21,6 +21,23 @@ const state = {
 const $ = (id) => document.getElementById(id);
 let resourceSaveChain = Promise.resolve(true);
 
+function createId() {
+  if (globalThis.crypto?.randomUUID) {
+    return globalThis.crypto.randomUUID();
+  }
+
+  if (globalThis.crypto?.getRandomValues) {
+    const bytes = new Uint8Array(16);
+    globalThis.crypto.getRandomValues(bytes);
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    const hex = [...bytes].map(byte => byte.toString(16).padStart(2, '0'));
+    return `${hex.slice(0, 4).join('')}-${hex.slice(4, 6).join('')}-${hex.slice(6, 8).join('')}-${hex.slice(8, 10).join('')}-${hex.slice(10).join('')}`;
+  }
+
+  return `id-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
+}
+
 function readLocalJson(key, fallback) {
   try {
     return JSON.parse(localStorage.getItem(key) || JSON.stringify(fallback));
@@ -108,7 +125,7 @@ function saveCurrentPromptPreset() {
   const defaultName = prompt.slice(0, 24).replace(/\s+/g, ' ');
   const name = window.prompt('给这条提示词起个名字', defaultName) || defaultName;
   const preset = {
-    id: crypto.randomUUID(),
+    id: createId(),
     name,
     prompt,
     createdAt: new Date().toLocaleString(),
@@ -557,7 +574,7 @@ async function uploadLocalFileToAsset(file, options = {}) {
     const assetUrl = `asset://${assetId}`;
     if (options.addToGeneration) {
       state.assets.push({
-        id: crypto.randomUUID(),
+        id: createId(),
         resourceId: assetId,
         type: assetKind,
         url: assetUrl,
@@ -632,7 +649,7 @@ function addAsset() {
   }
 
   state.assets.push({
-    id: crypto.randomUUID(),
+    id: createId(),
     type,
     url,
     previewUrl: url.startsWith('asset://') ? '' : url,
@@ -1153,7 +1170,7 @@ function restoreTaskReferenceAssets(record) {
     const assetId = url.startsWith('asset://') ? url.slice('asset://'.length) : '';
     const resource = resourceItems.find(item => item.id === assetId || item.url === url);
     restored.push({
-      id: crypto.randomUUID(),
+      id: createId(),
       resourceId: resource?.id || assetId || undefined,
       type,
       url,
@@ -1216,7 +1233,7 @@ function showTaskCompletionToast(taskId) {
 
 function addLog(level, title, detail = '') {
   state.logs.unshift({
-    id: crypto.randomUUID(),
+    id: createId(),
     level,
     title,
     detail,
@@ -1255,7 +1272,7 @@ function createResourceGroup() {
   const defaultName = `资源组 ${state.resources.length + 1}`;
   const name = window.prompt('资源组名称', defaultName)?.trim();
   if (!name) return;
-  const id = crypto.randomUUID();
+  const id = createId();
   state.resources.unshift({
     id,
     name,
@@ -1281,7 +1298,7 @@ function toggleLibraryTools() {
 
 function getSelectedResourceGroup() {
   if (state.resources.length === 0) {
-    const id = crypto.randomUUID();
+    const id = createId();
     state.resources.unshift({
       id,
       name: '默认资源组',
@@ -1439,7 +1456,7 @@ function renderResources() {
         row.querySelector('[data-action="add"]').addEventListener('click', () => {
           const type = assetTypeToKind(item.assetType);
           state.assets.push({
-            id: crypto.randomUUID(),
+            id: createId(),
             resourceId: item.id,
             type,
             url: `asset://${item.id}`,
