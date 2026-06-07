@@ -19,7 +19,6 @@ const state = {
 };
 
 const $ = (id) => document.getElementById(id);
-let resourceSaveChain = Promise.resolve(true);
 let actionModalResolve = null;
 
 function createId() {
@@ -143,8 +142,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   renderResources();
   renderPromptPresets();
   syncResolution();
-  await restoreResourcesFromServer();
-  addLog('info', '页面已就绪', '本地代理与页面脚本加载完成');
+  addLog('info', '页面已就绪', '资源库仅保存在当前浏览器');
 });
 
 function bindEvents() {
@@ -1486,46 +1484,6 @@ async function pullAssetToResource() {
 
 function saveResources() {
   localStorage.setItem('manfei_resources', JSON.stringify(state.resources));
-  persistResourcesToServer();
-}
-
-async function restoreResourcesFromServer() {
-  try {
-    const response = await apiFetch('/api/app-state');
-    if (response.updatedAt && Array.isArray(response.resources)) {
-      state.resources = response.resources;
-      if (!state.resources.some(group => group.id === state.activeResourceGroupId)) {
-        setActiveResourceGroup(state.resources[0]?.id || null);
-      }
-      localStorage.setItem('manfei_resources', JSON.stringify(state.resources));
-      renderResources();
-      addLog('success', '资源库已从服务端恢复', `${state.resources.length} 个资源组`);
-      return;
-    }
-    if (state.resources.length > 0) {
-      await persistResourcesToServer();
-      addLog('success', '本地资源库已迁移到服务端', `${state.resources.length} 个资源组`);
-    }
-  } catch (error) {
-    addLog('error', '资源库服务端恢复失败', error.message);
-  }
-}
-
-function persistResourcesToServer() {
-  const resources = JSON.parse(JSON.stringify(state.resources));
-  resourceSaveChain = resourceSaveChain.then(async () => {
-    try {
-      await apiFetch('/api/app-state', {
-        method: 'PUT',
-        body: JSON.stringify({ resources }),
-      });
-      return true;
-    } catch (error) {
-      addLog('error', '资源库服务端保存失败', error.message);
-      return false;
-    }
-  });
-  return resourceSaveChain;
 }
 
 function renderResources() {
