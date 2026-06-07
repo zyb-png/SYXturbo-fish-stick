@@ -39,6 +39,13 @@ function createId() {
   return `id-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
 }
 
+function formatBytes(size) {
+  const bytes = Number(size) || 0;
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
 function readLocalJson(key, fallback) {
   try {
     return JSON.parse(localStorage.getItem(key) || JSON.stringify(fallback));
@@ -186,6 +193,7 @@ function bindEvents() {
     const value = $('actionModalInput').hidden ? true : $('actionModalInput').value.trim();
     closeActionModal(value || null);
   });
+  $('download').addEventListener('click', downloadPreviewVideo);
   $('closePreviewBtn').addEventListener('click', closeVideoPreview);
   document.querySelector('[data-close-preview]').addEventListener('click', closeVideoPreview);
   document.addEventListener('keydown', (event) => {
@@ -1287,12 +1295,52 @@ function openVideoPreview(record) {
   $('openVideoLink').href = record.videoUrl;
   $('openVideoLink').hidden = false;
   const filename = `${String(record.id || 'seedance-video').replace(/[^\w.-]+/g, '-')}.mp4`;
-  $('download').href = `/api/download-video?url=${encodeURIComponent(record.videoUrl)}&filename=${encodeURIComponent(filename)}`;
-  $('download').setAttribute('download', filename);
+  $('download').dataset.url = `/api/download-video?url=${encodeURIComponent(record.videoUrl)}&filename=${encodeURIComponent(filename)}`;
+  $('download').dataset.filename = filename;
+  $('download').textContent = '下载到本地';
+  $('download').disabled = false;
   $('download').hidden = false;
   $('previewModal').hidden = false;
   document.body.classList.add('preview-open');
   setStatus(`正在预览任务：${record.id}`, 'success');
+}
+
+async function downloadPreviewVideo() {
+  const button = $('download');
+  const url = button.dataset.url;
+  const filename = button.dataset.filename || 'seedance-video.mp4';
+  if (!url || button.disabled) return;
+
+  button.disabled = true;
+  button.textContent = '下载中...';
+  setStatus('正在准备视频下载', 'idle');
+
+  try {
+    const response = await fetch(url, { credentials: 'same-origin' });
+    if (!response.ok) {
+      const message = await response.text();
+      throw new Error(message || `HTTP ${response.status}`);
+    }
+    const blob = await response.blob();
+    if (!blob.size) throw new Error('视频文件为空');
+    const objectUrl = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = objectUrl;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    window.setTimeout(() => URL.revokeObjectURL(objectUrl), 30000);
+    button.textContent = '已下载';
+    setStatus(`视频已下载：${filename}`, 'success');
+    addLog('success', '视频下载完成', `${filename} · ${formatBytes(blob.size)}`);
+  } catch (error) {
+    button.textContent = '重试下载';
+    setStatus(`视频下载失败：${error.message}`, 'error');
+    addLog('error', '视频下载失败', error.message);
+  } finally {
+    button.disabled = false;
+  }
 }
 
 function closeVideoPreview() {
