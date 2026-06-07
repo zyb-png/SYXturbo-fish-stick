@@ -9,7 +9,7 @@
       location.replace('http://localhost:4177/');
     }
   </script>
-  <link rel="stylesheet" href="./styles.css?v=20260607-5">
+  <link rel="stylesheet" href="./styles.css?v=20260607-7">
 </head>
 <body>
   <main class="app">
@@ -64,6 +64,7 @@
           </div>
         </div>
         <div class="top-actions">
+          <button id="soundToggleBtn" class="icon-button sound-toggle" type="button" title="关闭完成提示音" aria-label="关闭完成提示音" aria-pressed="true">♪</button>
           <button id="balanceBtn" type="button">查询余额</button>
           <button id="usageBtn" type="button">用量</button>
         </div>
@@ -195,6 +196,13 @@
     </aside>
   </main>
 
+  <div id="submitMeteorEffect" class="submit-meteor-effect" aria-hidden="true">
+    <span class="submit-meteor"></span>
+    <span class="submit-ripple ripple-one"></span>
+    <span class="submit-ripple ripple-two"></span>
+    <span class="submit-ripple ripple-three"></span>
+  </div>
+
   <div id="previewModal" class="preview-modal" hidden>
     <button class="preview-backdrop" type="button" data-close-preview aria-label="关闭预览"></button>
     <section class="preview-dialog" role="dialog" aria-modal="true" aria-labelledby="previewTitle">
@@ -236,6 +244,6 @@
     </form>
   </div>
 
-  <script src="./app.js?v=20260607-18"></script>
+  <script src="./app.js?v=20260607-20"></script>
 </body>
 </html>

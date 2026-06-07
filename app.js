@@ -16,10 +16,12 @@ const state = {
   expandedResourceGroupId: null,
   activeResourceGroupId: localStorage.getItem('manfei_active_resource_group') || null,
   filePickerTarget: 'library',
+  soundEnabled: localStorage.getItem('manfei_completion_sound') !== 'off',
 };
 
 const $ = (id) => document.getElementById(id);
 let actionModalResolve = null;
+let completionAudioContext = null;
 
 function createId() {
   if (globalThis.crypto?.randomUUID) {
@@ -142,6 +144,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   renderResources();
   renderPromptPresets();
   syncResolution();
+  updateSoundToggle();
   addLog('info', '页面已就绪', '资源库仅保存在当前浏览器');
 });
 
@@ -158,6 +161,7 @@ function bindEvents() {
   $('cancelBtn').addEventListener('click', cancelTask);
   $('balanceBtn').addEventListener('click', getBalance);
   $('usageBtn').addEventListener('click', getUsage);
+  $('soundToggleBtn').addEventListener('click', toggleCompletionSound);
   $('uploadAssetBtn').addEventListener('click', uploadAsset);
   $('queryAssetBtn').addEventListener('click', () => queryAsset($('queryAssetId').value.trim()));
   $('pullAssetBtn').addEventListener('click', pullAssetToResource);
@@ -202,6 +206,8 @@ function bindEvents() {
       closeVideoPreview();
     }
   });
+  document.addEventListener('pointerdown', prepareCompletionAudio, { once: true, capture: true });
+  document.addEventListener('keydown', prepareCompletionAudio, { once: true, capture: true });
 }
 
 async function saveCurrentPromptPreset() {
@@ -825,12 +831,13 @@ async function submitTask() {
   clearPolling();
   const isSync = $('syncMode').checked;
   const btn = $('submitBtn');
-  btn.disabled = true;
-  setStatus(isSync ? '正在同步生成...' : '正在创建异步任务...', 'running');
-  addLog('info', isSync ? '同步生成开始' : '异步任务提交开始', $('prompt').value.trim().slice(0, 160));
 
   try {
     const body = buildRequestBody();
+    btn.disabled = true;
+    setStatus(isSync ? '正在同步生成...' : '正在创建异步任务...', 'running');
+    addLog('info', isSync ? '同步生成开始' : '异步任务提交开始', $('prompt').value.trim().slice(0, 160));
+    triggerSubmitExperience();
     if (isSync) {
       body.poll_interval_seconds = Number($('pollInterval').value || 2);
       body.timeout_seconds = Number($('timeoutSeconds').value || 600);
@@ -1169,6 +1176,7 @@ function renderTaskRecords() {
     const presentation = getTaskPresentation(record.status);
     const elapsed = getTaskElapsed(record);
     row.className = `record-item task-card task-${presentation.tone}`;
+    row.dataset.taskId = record.id;
     row.innerHTML = `
       <div class="task-card-head">
         <strong title="${escapeHtml(record.id)}">${escapeHtml(shortTaskId(record.id))}</strong>
@@ -1366,9 +1374,138 @@ function showTaskCompletionToast(taskId) {
   clearTimeout(taskToastTimer);
   $('taskToastText').textContent = `${shortTaskId(taskId)} 已生成，可在任务列表查看视频`;
   $('taskToast').hidden = false;
+  celebrateCompletedTask(taskId);
+  playCompletionSound();
   taskToastTimer = setTimeout(() => {
     $('taskToast').hidden = true;
   }, 6000);
+}
+
+function updateSoundToggle() {
+  const button = $('soundToggleBtn');
+  if (!button) return;
+  button.textContent = state.soundEnabled ? '♪' : '♩';
+  button.classList.toggle('muted', !state.soundEnabled);
+  button.setAttribute('aria-pressed', String(state.soundEnabled));
+  button.setAttribute('aria-label', state.soundEnabled ? '关闭完成提示音' : '开启完成提示音');
+  button.title = state.soundEnabled ? '关闭完成提示音' : '开启完成提示音';
+}
+
+function toggleCompletionSound() {
+  state.soundEnabled = !state.soundEnabled;
+  localStorage.setItem('manfei_completion_sound', state.soundEnabled ? 'on' : 'off');
+  updateSoundToggle();
+  if (state.soundEnabled) {
+    prepareCompletionAudio();
+    playCompletionSound({ preview: true });
+  }
+}
+
+function prepareCompletionAudio() {
+  if (!state.soundEnabled) return;
+  const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+  if (!AudioContextClass) return;
+  if (!completionAudioContext) completionAudioContext = new AudioContextClass();
+  if (completionAudioContext.state === 'suspended') {
+    completionAudioContext.resume().catch(() => {});
+  }
+}
+
+function playCompletionSound(options = {}) {
+  if (!state.soundEnabled) return;
+  prepareCompletionAudio();
+  const context = completionAudioContext;
+  if (!context || context.state !== 'running') return;
+
+  const start = context.currentTime + 0.02;
+  const master = context.createGain();
+  master.gain.setValueAtTime(0.0001, start);
+  master.gain.exponentialRampToValueAtTime(options.preview ? 0.1 : 0.16, start + 0.025);
+  master.gain.exponentialRampToValueAtTime(0.0001, start + 1.35);
+  master.connect(context.destination);
+
+  [
+    { frequency: 523.25, delay: 0, duration: 0.72 },
+    { frequency: 659.25, delay: 0.14, duration: 0.82 },
+    { frequency: 783.99, delay: 0.3, duration: 0.94 },
+  ].forEach(note => {
+    const oscillator = context.createOscillator();
+    const gain = context.createGain();
+    oscillator.type = 'sine';
+    oscillator.frequency.setValueAtTime(note.frequency, start + note.delay);
+    gain.gain.setValueAtTime(0.0001, start + note.delay);
+    gain.gain.exponentialRampToValueAtTime(0.32, start + note.delay + 0.025);
+    gain.gain.exponentialRampToValueAtTime(0.0001, start + note.delay + note.duration);
+    oscillator.connect(gain);
+    gain.connect(master);
+    oscillator.start(start + note.delay);
+    oscillator.stop(start + note.delay + note.duration);
+  });
+}
+
+function playSubmitSound() {
+  if (!state.soundEnabled) return;
+  prepareCompletionAudio();
+  const context = completionAudioContext;
+  if (!context || context.state !== 'running') return;
+
+  const start = context.currentTime + 0.015;
+  const master = context.createGain();
+  master.gain.setValueAtTime(0.0001, start);
+  master.gain.exponentialRampToValueAtTime(0.13, start + 0.02);
+  master.gain.exponentialRampToValueAtTime(0.0001, start + 1.15);
+  master.connect(context.destination);
+
+  [
+    { frequency: 880, delay: 0, duration: 0.34, volume: 0.26 },
+    { frequency: 1174.66, delay: 0.09, duration: 0.48, volume: 0.22 },
+    { frequency: 1567.98, delay: 0.19, duration: 0.68, volume: 0.16 },
+  ].forEach(note => {
+    const oscillator = context.createOscillator();
+    const gain = context.createGain();
+    oscillator.type = 'sine';
+    oscillator.frequency.setValueAtTime(note.frequency, start + note.delay);
+    oscillator.frequency.exponentialRampToValueAtTime(
+      note.frequency * 1.035,
+      start + note.delay + note.duration,
+    );
+    gain.gain.setValueAtTime(0.0001, start + note.delay);
+    gain.gain.exponentialRampToValueAtTime(note.volume, start + note.delay + 0.014);
+    gain.gain.exponentialRampToValueAtTime(0.0001, start + note.delay + note.duration);
+    oscillator.connect(gain);
+    gain.connect(master);
+    oscillator.start(start + note.delay);
+    oscillator.stop(start + note.delay + note.duration);
+  });
+}
+
+function triggerSubmitExperience() {
+  const effect = $('submitMeteorEffect');
+  if (effect) {
+    effect.classList.remove('is-active');
+    void effect.offsetWidth;
+    effect.classList.add('is-active');
+    setTimeout(() => effect.classList.remove('is-active'), 3600);
+  }
+
+  const button = $('submitBtn');
+  button.classList.remove('is-launching');
+  void button.offsetWidth;
+  button.classList.add('is-launching');
+  setTimeout(() => button.classList.remove('is-launching'), 1800);
+  playSubmitSound();
+}
+
+function celebrateCompletedTask(taskId) {
+  const card = [...document.querySelectorAll('.task-card')].find(item => item.dataset.taskId === taskId);
+  if (card) {
+    card.classList.remove('task-celebrating');
+    requestAnimationFrame(() => card.classList.add('task-celebrating'));
+    setTimeout(() => card.classList.remove('task-celebrating'), 5200);
+  }
+  document.body.classList.remove('task-completion-glow');
+  requestAnimationFrame(() => document.body.classList.add('task-completion-glow'));
+  setTimeout(() => document.body.classList.remove('task-completion-glow'), 4200);
 }
 
 function addLog(level, title, detail = '') {
