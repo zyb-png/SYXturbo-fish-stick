@@ -182,19 +182,28 @@ button:disabled {
   position: fixed;
   inset: 0;
   z-index: 90;
+  display: grid;
+  place-items: center;
   overflow: hidden;
   opacity: 0;
+  background: rgba(2, 4, 3, 0);
+  backdrop-filter: blur(0);
+  -webkit-backdrop-filter: blur(0);
   pointer-events: none;
+  transition: opacity 120ms ease-out;
 }
 
 .submit-meteor-effect.is-active {
   opacity: 1;
+  background: rgba(2, 4, 3, 0.16);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
 }
 
 .submit-meteor {
   position: absolute;
-  top: 6vh;
-  left: -25vw;
+  top: 5vh;
+  left: -32vw;
   width: clamp(190px, 28vw, 430px);
   height: 2px;
   border-radius: 50%;
@@ -212,7 +221,7 @@ button:disabled {
     0 0 5px rgba(255, 239, 186, 0.64),
     0 0 15px rgba(255, 190, 61, 0.38);
   filter: drop-shadow(0 0 10px rgba(226, 151, 34, 0.26));
-  transform: rotate(12deg);
+  transform: translate3d(0, 0, 0) rotate(17deg);
   transform-origin: right center;
   will-change: opacity, transform;
 }
@@ -248,28 +257,57 @@ button:disabled {
 }
 
 .submit-meteor-effect.is-active .submit-meteor {
-  animation: meteor-cross 2.75s cubic-bezier(0.18, 0.58, 0.2, 1) both;
+  animation:
+    meteor-motion 1s linear both,
+    meteor-fade 1s ease-in-out both;
 }
 
-@keyframes meteor-cross {
-  0% {
+@keyframes meteor-motion {
+  from {
+    transform: translate3d(0, 0, 0) rotate(17deg);
+  }
+  to {
+    transform: translate3d(164vw, 52vh, 0) rotate(17deg);
+  }
+}
+
+@keyframes meteor-fade {
+  0%, 100% {
     opacity: 0;
-    transform: translate3d(-8vw, -3vh, 0) rotate(11deg) scaleX(0.58);
   }
   12% {
-    opacity: 0.72;
-  }
-  38% {
-    opacity: 0.94;
-    transform: translate3d(56vw, 12vh, 0) rotate(16deg) scaleX(0.9);
+    opacity: 0.82;
   }
   68% {
-    opacity: 0.82;
-    transform: translate3d(102vw, 31vh, 0) rotate(20deg) scaleX(1);
+    opacity: 0.96;
   }
-  100% {
+}
+
+.submit-progress-text {
+  position: relative;
+  z-index: 2;
+  color: #ffe5a3;
+  font-size: clamp(17px, 1.5vw, 22px);
+  font-weight: 650;
+  letter-spacing: 0;
+  opacity: 0;
+  text-shadow:
+    0 0 10px rgba(255, 217, 125, 0.45),
+    0 2px 12px rgba(0, 0, 0, 0.85);
+}
+
+.submit-meteor-effect.is-active .submit-progress-text {
+  animation: submit-text-appear 1s ease-in-out both;
+}
+
+@keyframes submit-text-appear {
+  0%, 100% {
     opacity: 0;
-    transform: translate3d(151vw, 57vh, 0) rotate(23deg) scaleX(0.86);
+    transform: translateY(5px);
+  }
+  18%, 78% {
+    opacity: 1;
+    transform: translateY(0);
   }
 }
 
@@ -1861,7 +1899,8 @@ body.task-completion-glow::before {
   .task-toast,
   body.task-completion-glow::before,
   button.primary.is-launching,
-  .submit-meteor-effect.is-active .submit-meteor {
+  .submit-meteor-effect.is-active .submit-meteor,
+  .submit-meteor-effect.is-active .submit-progress-text {
     animation: none;
   }
 }

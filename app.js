@@ -1485,14 +1485,14 @@ function triggerSubmitExperience() {
     effect.classList.remove('is-active');
     void effect.offsetWidth;
     effect.classList.add('is-active');
-    setTimeout(() => effect.classList.remove('is-active'), 3600);
+    setTimeout(() => effect.classList.remove('is-active'), 1000);
   }
 
   const button = $('submitBtn');
   button.classList.remove('is-launching');
   void button.offsetWidth;
   button.classList.add('is-launching');
-  setTimeout(() => button.classList.remove('is-launching'), 1800);
+  setTimeout(() => button.classList.remove('is-launching'), 1000);
   playSubmitSound();
 }
 
