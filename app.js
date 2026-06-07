@@ -262,15 +262,7 @@ function setupPromptMentions() {
     updateMentionMenu();
   });
   prompt.addEventListener('click', updateMentionMenu);
-  prompt.addEventListener('keydown', event => {
-    if (event.key === '@' && !event.metaKey && !event.ctrlKey && !event.altKey) {
-      event.preventDefault();
-      insertPromptTextAtCaret('@');
-      updateMentionMenu();
-      return;
-    }
-    handleMentionKeys(event);
-  });
+  prompt.addEventListener('keydown', handleMentionKeys);
   prompt.addEventListener('paste', event => {
     event.preventDefault();
     document.execCommand('insertText', false, event.clipboardData.getData('text/plain'));
@@ -317,33 +309,6 @@ function getMentionContext() {
     query: query.trim().toLowerCase(),
     replaceRange,
   };
-}
-
-function insertPromptTextAtCaret(text) {
-  const prompt = $('prompt');
-  prompt.focus();
-  const selection = window.getSelection();
-  let range;
-  if (selection.rangeCount && prompt.contains(selection.anchorNode)) {
-    range = selection.getRangeAt(0);
-    range.deleteContents();
-  } else {
-    range = document.createRange();
-    range.selectNodeContents(prompt);
-    range.collapse(false);
-  }
-
-  const textNode = document.createTextNode(text);
-  range.insertNode(textNode);
-  range.setStart(textNode, textNode.textContent.length);
-  range.collapse(true);
-  selection.removeAllRanges();
-  selection.addRange(range);
-  prompt.dispatchEvent(new InputEvent('input', {
-    bubbles: true,
-    inputType: 'insertText',
-    data: text,
-  }));
 }
 
 function resolvePromptTextCaret(node, offset) {
