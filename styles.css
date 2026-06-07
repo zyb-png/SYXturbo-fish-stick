@@ -1334,6 +1334,70 @@ body.preview-open {
   overflow: hidden;
 }
 
+.action-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 120;
+  display: grid;
+  place-items: center;
+  padding: 18px;
+}
+
+.action-modal[hidden] {
+  display: none;
+}
+
+.action-modal-backdrop {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  border-radius: 0;
+  background: rgba(0, 0, 0, 0.78);
+  backdrop-filter: blur(3px);
+}
+
+.action-dialog {
+  position: relative;
+  z-index: 1;
+  width: min(360px, 100%);
+  border: 1px solid rgba(255, 202, 92, 0.72);
+  border-radius: 8px;
+  background: #090c0a;
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.72);
+  padding: 18px;
+}
+
+.action-dialog h2 {
+  margin: 0 0 12px;
+  color: var(--gold-bright);
+  font-size: 17px;
+}
+
+.action-dialog p {
+  margin: 0 0 12px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-line;
+}
+
+.action-dialog input {
+  width: 100%;
+}
+
+.action-dialog-buttons {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.action-dialog-buttons button {
+  min-width: 72px;
+}
+
 .preview-modal {
   position: fixed;
   inset: 0;

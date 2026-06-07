@@ -20,6 +20,7 @@ const state = {
 
 const $ = (id) => document.getElementById(id);
 let resourceSaveChain = Promise.resolve(true);
+let actionModalResolve = null;
 
 function createId() {
   if (globalThis.crypto?.randomUUID) {
@@ -44,6 +45,72 @@ function readLocalJson(key, fallback) {
   } catch {
     return fallback;
   }
+}
+
+function closeActionModal(value = null) {
+  const resolve = actionModalResolve;
+  actionModalResolve = null;
+  $('actionModal').hidden = true;
+  $('actionModalInput').value = '';
+  document.body.classList.remove('preview-open');
+  if (resolve) resolve(value);
+}
+
+function openActionModal({ title, message = '', value = '', input = true, confirmText = '确定' }) {
+  if (actionModalResolve) closeActionModal(null);
+  $('actionModalTitle').textContent = title;
+  $('actionModalMessage').textContent = message;
+  $('actionModalMessage').hidden = !message;
+  $('actionModalInput').hidden = !input;
+  $('actionModalInput').value = value;
+  $('actionModalConfirm').textContent = confirmText;
+  $('actionModal').hidden = false;
+  document.body.classList.add('preview-open');
+  if (input) {
+    requestAnimationFrame(() => {
+      $('actionModalInput').focus();
+      $('actionModalInput').select();
+    });
+  } else {
+    requestAnimationFrame(() => $('actionModalConfirm').focus());
+  }
+  return new Promise(resolve => {
+    actionModalResolve = resolve;
+  });
+}
+
+function requestText(title, value = '') {
+  return openActionModal({ title, value, input: true });
+}
+
+async function requestConfirmation(message) {
+  return Boolean(await openActionModal({
+    title: '请确认',
+    message,
+    input: false,
+    confirmText: '确认',
+  }));
+}
+
+async function copyText(text) {
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch {
+      // Fall through to the HTTP-compatible copy method.
+    }
+  }
+  const textarea = document.createElement('textarea');
+  textarea.value = text;
+  textarea.setAttribute('readonly', '');
+  textarea.style.position = 'fixed';
+  textarea.style.opacity = '0';
+  document.body.appendChild(textarea);
+  textarea.select();
+  const copied = document.execCommand('copy');
+  textarea.remove();
+  return copied;
 }
 
 const roles = {
@@ -109,21 +176,34 @@ function bindEvents() {
   $('historyTabBtn').addEventListener('click', () => switchSideTab('history'));
   $('clearRecordsBtn').addEventListener('click', clearActiveRecords);
   $('copyJsonBtn').addEventListener('click', async () => {
-    await navigator.clipboard.writeText(JSON.stringify(state.lastJson, null, 2));
-    setStatus('JSON 已复制', 'success');
+    const copied = await copyText(JSON.stringify(state.lastJson, null, 2));
+    setStatus(copied ? 'JSON 已复制' : '复制失败，请手动选择内容', copied ? 'success' : 'error');
+  });
+  $('actionModalBackdrop').addEventListener('click', () => closeActionModal(null));
+  $('actionModalCancel').addEventListener('click', () => closeActionModal(null));
+  $('actionModalForm').addEventListener('submit', event => {
+    event.preventDefault();
+    const value = $('actionModalInput').hidden ? true : $('actionModalInput').value.trim();
+    closeActionModal(value || null);
   });
   $('closePreviewBtn').addEventListener('click', closeVideoPreview);
   document.querySelector('[data-close-preview]').addEventListener('click', closeVideoPreview);
   document.addEventListener('keydown', (event) => {
-    if (event.key === 'Escape' && !$('previewModal').hidden) closeVideoPreview();
+    if (event.key !== 'Escape') return;
+    if (!$('actionModal').hidden) {
+      closeActionModal(null);
+    } else if (!$('previewModal').hidden) {
+      closeVideoPreview();
+    }
   });
 }
 
-function saveCurrentPromptPreset() {
+async function saveCurrentPromptPreset() {
   const prompt = $('prompt').value.trim();
   if (!prompt) return setStatus('请先输入提示词', 'error');
   const defaultName = prompt.slice(0, 24).replace(/\s+/g, ' ');
-  const name = window.prompt('给这条提示词起个名字', defaultName) || defaultName;
+  const name = await requestText('提示词名称', defaultName);
+  if (!name) return;
   const preset = {
     id: createId(),
     name,
@@ -465,10 +545,10 @@ function previewPromptPreset() {
   }
 }
 
-function deletePromptPreset() {
+async function deletePromptPreset() {
   const preset = getSelectedPromptPreset();
   if (!preset) return setStatus('请选择要删除的提示词', 'error');
-  if (!window.confirm(`删除提示词「${preset.name}」？`)) return;
+  if (!await requestConfirmation(`删除提示词「${preset.name}」？`)) return;
   state.promptPresets = state.promptPresets.filter(item => item.id !== preset.id);
   savePromptPresets();
   renderPromptPresets();
@@ -1268,9 +1348,9 @@ function renderLogs() {
   });
 }
 
-function createResourceGroup() {
+async function createResourceGroup() {
   const defaultName = `资源组 ${state.resources.length + 1}`;
-  const name = window.prompt('资源组名称', defaultName)?.trim();
+  const name = await requestText('资源组名称', defaultName);
   if (!name) return;
   const id = createId();
   state.resources.unshift({
@@ -1477,8 +1557,8 @@ function renderResources() {
   updateUploadTarget();
 }
 
-function removeLocalResource(groupId, itemId, itemName) {
-  if (!window.confirm(`从本地资源组移除「${itemName}」？\n远端 asset 和 TOS 文件不会被删除。`)) return;
+async function removeLocalResource(groupId, itemId, itemName) {
+  if (!await requestConfirmation(`从本地资源组移除「${itemName}」？\n远端 asset 和 TOS 文件不会被删除。`)) return;
   const group = state.resources.find(resourceGroup => resourceGroup.id === groupId);
   if (!group) return;
 
