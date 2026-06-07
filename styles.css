@@ -228,37 +228,6 @@ button:disabled {
   animation: meteor-cross 2.2s cubic-bezier(0.12, 0.66, 0.23, 1) both;
 }
 
-.submit-ripple {
-  position: absolute;
-  top: 47%;
-  left: 58%;
-  width: 170px;
-  height: 56px;
-  border: 1px solid rgba(255, 219, 132, 0.72);
-  border-radius: 50%;
-  opacity: 0;
-  box-shadow:
-    0 0 18px rgba(255, 186, 56, 0.28),
-    inset 0 0 14px rgba(255, 225, 153, 0.12);
-  transform: translate(-50%, -50%) rotate(-12deg) scale(0.16);
-}
-
-.submit-meteor-effect.is-active .submit-ripple {
-  animation: meteor-ripple 2.2s ease-out both;
-}
-
-.submit-meteor-effect.is-active .ripple-one {
-  animation-delay: 0.82s;
-}
-
-.submit-meteor-effect.is-active .ripple-two {
-  animation-delay: 1.04s;
-}
-
-.submit-meteor-effect.is-active .ripple-three {
-  animation-delay: 1.28s;
-}
-
 @keyframes meteor-cross {
   0% {
     opacity: 0;
@@ -273,20 +242,6 @@ button:disabled {
   100% {
     opacity: 0;
     transform: translate3d(142vw, 48vh, 0) rotate(-17deg) scaleX(1);
-  }
-}
-
-@keyframes meteor-ripple {
-  0% {
-    opacity: 0.8;
-    transform: translate(-50%, -50%) rotate(-12deg) scale(0.16);
-  }
-  55% {
-    opacity: 0.28;
-  }
-  100% {
-    opacity: 0;
-    transform: translate(-50%, -50%) rotate(-12deg) scale(3.5);
   }
 }
 
@@ -1878,8 +1833,7 @@ body.task-completion-glow::before {
   .task-toast,
   body.task-completion-glow::before,
   button.primary.is-launching,
-  .submit-meteor-effect.is-active .submit-meteor,
-  .submit-meteor-effect.is-active .submit-ripple {
+  .submit-meteor-effect.is-active .submit-meteor {
     animation: none;
   }
 }
