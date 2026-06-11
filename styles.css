@@ -1703,6 +1703,34 @@ body.preview-open {
   min-width: 72px;
 }
 
+.action-dialog.error-dialog {
+  border-color: rgba(220, 117, 102, 0.82);
+  box-shadow:
+    0 24px 70px rgba(0, 0, 0, 0.72),
+    0 0 28px rgba(220, 117, 102, 0.16);
+}
+
+.action-dialog.error-dialog h2 {
+  color: #f09a8c;
+}
+
+.action-dialog.error-dialog p {
+  max-height: min(46vh, 360px);
+  overflow: auto;
+  border-left: 3px solid rgba(220, 117, 102, 0.62);
+  border-radius: 4px;
+  background: rgba(72, 24, 19, 0.18);
+  color: #e7d4cf;
+  padding: 10px 12px;
+  overflow-wrap: anywhere;
+}
+
+.action-dialog.error-dialog .primary {
+  border-color: rgba(230, 137, 121, 0.78);
+  background: linear-gradient(135deg, #71372f, #a85345 52%, #5d2a24);
+  color: #ffe5df;
+}
+
 .preview-modal {
   position: fixed;
   inset: 0;
