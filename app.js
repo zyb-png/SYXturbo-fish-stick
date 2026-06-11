@@ -219,6 +219,9 @@ function bindEvents() {
   });
   document.addEventListener('pointerdown', prepareCompletionAudio, { once: true, capture: true });
   document.addEventListener('keydown', prepareCompletionAudio, { once: true, capture: true });
+  window.addEventListener('resize', () => {
+    if (!$('mentionMenu').hidden) positionMentionMenu();
+  });
 }
 
 async function saveCurrentPromptPreset() {
@@ -279,6 +282,9 @@ function setupPromptMentions() {
     scheduleMentionMenuUpdate();
   });
   prompt.addEventListener('click', updateMentionMenu);
+  prompt.addEventListener('scroll', () => {
+    if (!$('mentionMenu').hidden) positionMentionMenu();
+  });
   prompt.addEventListener('keydown', event => {
     handleMentionKeys(event);
   });
@@ -411,6 +417,7 @@ function renderMentionMenu() {
   if (state.mentionResults.length === 0) {
     menu.innerHTML = '<div class="mention-empty">暂无本次参考素材，请先拖入或从资源库添加</div>';
     menu.hidden = false;
+    positionMentionMenu();
     return;
   }
 
@@ -433,6 +440,48 @@ function renderMentionMenu() {
     menu.appendChild(option);
   });
   menu.hidden = false;
+  positionMentionMenu();
+}
+
+function positionMentionMenu() {
+  const menu = $('mentionMenu');
+  const wrap = menu.parentElement;
+  const prompt = $('prompt');
+  const range = state.mentionRange?.replaceRange;
+  if (menu.hidden || !wrap || !range) return;
+
+  const anchorRange = range.cloneRange();
+  anchorRange.collapse(false);
+  const anchorRect = anchorRange.getClientRects()[0] || anchorRange.getBoundingClientRect();
+  const wrapRect = wrap.getBoundingClientRect();
+  const promptRect = prompt.getBoundingClientRect();
+  const hasCaretRect = anchorRect && (anchorRect.width || anchorRect.height);
+  const caretLeft = hasCaretRect ? anchorRect.left : promptRect.left + 12;
+  const caretTop = hasCaretRect ? anchorRect.top : promptRect.top + 12;
+  const caretBottom = hasCaretRect ? anchorRect.bottom : caretTop + 22;
+  const gap = 7;
+  const edge = 8;
+  const menuWidth = menu.offsetWidth;
+  const menuHeight = menu.offsetHeight;
+  const visibleBottom = Math.min(promptRect.bottom, window.innerHeight - edge);
+  const spaceBelow = visibleBottom - caretBottom;
+  const spaceAbove = caretTop - Math.max(promptRect.top, edge);
+
+  let left = caretLeft - wrapRect.left;
+  left = Math.max(edge, Math.min(left, wrapRect.width - menuWidth - edge));
+
+  let top;
+  if (spaceBelow >= menuHeight + gap || spaceBelow >= spaceAbove) {
+    top = caretBottom - wrapRect.top + gap;
+  } else {
+    top = caretTop - wrapRect.top - menuHeight - gap;
+  }
+
+  const minTop = promptRect.top - wrapRect.top + edge;
+  const maxTop = promptRect.bottom - wrapRect.top - menuHeight - edge;
+  top = Math.max(minTop, Math.min(top, Math.max(minTop, maxTop)));
+  menu.style.left = `${Math.round(left)}px`;
+  menu.style.top = `${Math.round(top)}px`;
 }
 
 function handleMentionKeys(event) {

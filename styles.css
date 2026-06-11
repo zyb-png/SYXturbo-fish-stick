@@ -724,8 +724,7 @@ h3 {
 
 .mention-menu {
   position: absolute;
-  right: auto;
-  bottom: 10px;
+  top: 10px;
   left: 10px;
   z-index: 30;
   width: min(250px, calc(100% - 20px));
