@@ -17,6 +17,7 @@ const state = {
   activeResourceGroupId: localStorage.getItem('manfei_active_resource_group') || null,
   filePickerTarget: 'library',
   soundEnabled: localStorage.getItem('manfei_completion_sound') !== 'off',
+  shownTaskErrors: new Set(),
 };
 
 const $ = (id) => document.getElementById(id);
@@ -64,7 +65,15 @@ function closeActionModal(value = null) {
   if (resolve) resolve(value);
 }
 
-function openActionModal({ title, message = '', value = '', input = true, confirmText = '确定' }) {
+function openActionModal({
+  title,
+  message = '',
+  value = '',
+  input = true,
+  confirmText = '确定',
+  tone = '',
+  showCancel = true,
+}) {
   if (actionModalResolve) closeActionModal(null);
   $('actionModalTitle').textContent = title;
   $('actionModalMessage').textContent = message;
@@ -72,6 +81,8 @@ function openActionModal({ title, message = '', value = '', input = true, confir
   $('actionModalInput').hidden = !input;
   $('actionModalInput').value = value;
   $('actionModalConfirm').textContent = confirmText;
+  $('actionModalCancel').hidden = !showCancel;
+  $('actionModalForm').classList.toggle('error-dialog', tone === 'error');
   $('actionModal').hidden = false;
   document.body.classList.add('preview-open');
   if (input) {
@@ -877,8 +888,13 @@ async function submitTask() {
     }
   } catch (error) {
     setStatus(error.message, 'error');
-    showJson({ error: error.message });
+    showJson(error.data || { error: error.message });
     addLog('error', '任务提交失败', error.message);
+    showVideoErrorDialog(error.data || error, {
+      title: '视频任务提交失败',
+      fallbackMessage: error.message,
+      httpStatus: error.status,
+    });
   } finally {
     btn.disabled = false;
   }
@@ -921,14 +937,27 @@ async function queryTask(taskId, options = {}) {
     } else if (['failed', 'cancelled', 'expired'].includes(status)) {
       clearPolling();
       setStatus(`任务结束：${status}`, 'error');
-      addLog('error', `任务结束：${taskId}`, status);
+      const errorSummary = getVideoErrorSummary(result, { taskId, status });
+      addLog('error', `任务结束：${taskId}`, errorSummary);
+      if (status !== 'cancelled' && (!options.quiet || !state.shownTaskErrors.has(taskId))) {
+        state.shownTaskErrors.add(taskId);
+        showVideoErrorDialog(result, { taskId, status });
+      }
     } else {
       setStatus(`任务状态：${status || 'unknown'}`, 'running');
     }
   } catch (error) {
     if (!options.quiet) setStatus(error.message, 'error');
-    showJson({ error: error.message });
+    showJson(error.data || { error: error.message });
     if (!options.quiet) addLog('error', `任务查询失败：${taskId}`, error.message);
+    if (!options.quiet) {
+      showVideoErrorDialog(error.data || error, {
+        title: '任务查询失败',
+        taskId,
+        fallbackMessage: error.message,
+        httpStatus: error.status,
+      });
+    }
   }
 }
 
@@ -1064,9 +1093,95 @@ async function apiFetch(url, options = {}) {
     data = { raw: text };
   }
   if (!response.ok) {
-    throw new Error(data.detail?.message || data.error || data.message || `HTTP ${response.status}`);
+    const apiError = new Error(getVideoErrorSummary(data, {
+      fallbackMessage: `HTTP ${response.status}`,
+    }));
+    apiError.status = response.status;
+    apiError.data = data;
+    throw apiError;
   }
   return data;
+}
+
+function getVideoErrorSummary(payload, context = {}) {
+  const details = collectVideoErrorDetails(payload);
+  return details.message
+    || context.fallbackMessage
+    || getStatusFallback(context.status)
+    || '服务未返回具体失败原因';
+}
+
+function collectVideoErrorDetails(payload) {
+  const source = payload && typeof payload === 'object' ? payload : { message: payload };
+  const candidates = [source, source.detail, source.error, source.data, source.result]
+    .filter(value => value && typeof value === 'object');
+  const read = (...keys) => {
+    for (const candidate of candidates) {
+      for (const key of keys) {
+        const value = candidate[key];
+        if (typeof value === 'string' && value.trim()) return value.trim();
+        if (typeof value === 'number') return String(value);
+      }
+    }
+    return '';
+  };
+  const stringError = typeof source.error === 'string' ? source.error.trim() : '';
+  const stringDetail = typeof source.detail === 'string' ? source.detail.trim() : '';
+
+  return {
+    message: read('message', 'error_message', 'msg', 'description')
+      || stringError
+      || stringDetail,
+    reason: read('fail_reason', 'failure_reason', 'reason', 'error_reason'),
+    code: read('error_code', 'code', 'status_code'),
+    requestId: read('request_id', 'requestId', 'trace_id', 'traceId'),
+    stage: read('stage', 'failed_stage', 'failure_stage'),
+  };
+}
+
+function getStatusFallback(status = '') {
+  const value = String(status).toLowerCase();
+  if (value === 'expired') return '任务超过服务端处理时限，已过期';
+  if (value === 'failed') return '服务未返回具体失败原因';
+  return '';
+}
+
+function formatVideoErrorDetails(payload, context = {}) {
+  const details = collectVideoErrorDetails(payload);
+  const status = context.status || (
+    payload && typeof payload === 'object' ? payload.status : ''
+  );
+  const taskId = context.taskId || (
+    payload && typeof payload === 'object'
+      ? payload.id || payload.task_id || payload.detail?.task_id
+      : ''
+  );
+  const lines = [
+    `原因：${details.message || details.reason || context.fallbackMessage || getStatusFallback(status) || '服务未返回具体失败原因'}`,
+  ];
+
+  if (details.reason && details.reason !== details.message) lines.push(`详细原因：${details.reason}`);
+  if (details.code) lines.push(`错误码：${details.code}`);
+  if (details.stage) lines.push(`失败阶段：${details.stage}`);
+  if (status) lines.push(`任务状态：${status}`);
+  if (taskId) lines.push(`任务编号：${taskId}`);
+  if (context.httpStatus) lines.push(`HTTP 状态：${context.httpStatus}`);
+  if (details.requestId) lines.push(`请求 ID：${details.requestId}`);
+  if (!details.message && !details.reason) {
+    lines.push('建议：稍后重试；如持续失败，请在任务卡片中点击“调试”查看完整返回数据。');
+  }
+  return lines.join('\n');
+}
+
+function showVideoErrorDialog(payload, context = {}) {
+  return openActionModal({
+    title: context.title || '视频生成失败',
+    message: formatVideoErrorDetails(payload, context),
+    input: false,
+    confirmText: '我知道了',
+    tone: 'error',
+    showCancel: false,
+  });
 }
 
 function showJson(value) {
