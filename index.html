@@ -8,8 +8,14 @@
     if (location.protocol === 'file:') {
       location.replace('http://localhost:4177/');
     }
+    try {
+      const savedTheme = localStorage.getItem('manfei_interface_theme');
+      if (['gold', 'orange', 'violet', 'cyan'].includes(savedTheme)) {
+        document.documentElement.dataset.theme = savedTheme;
+      }
+    } catch {}
   </script>
-  <link rel="stylesheet" href="./styles.css?v=20260612-windows-motion-1">
+  <link rel="stylesheet" href="./styles.css?v=20260612-interface-themes-1">
 </head>
 <body>
   <main class="app">
@@ -64,6 +70,7 @@
           </div>
         </div>
         <div class="top-actions">
+          <button id="themeSettingsBtn" class="icon-button theme-settings-button" type="button" title="界面设置" aria-label="界面设置" aria-expanded="false">⚙</button>
           <button id="soundToggleBtn" class="icon-button sound-toggle" type="button" title="关闭完成提示音" aria-label="关闭完成提示音" aria-pressed="true">♪</button>
           <button id="balanceBtn" type="button">查询余额</button>
           <button id="usageBtn" type="button">用量</button>
@@ -196,6 +203,41 @@
     </aside>
   </main>
 
+  <div id="themeSettings" class="theme-settings" hidden>
+    <button id="themeSettingsBackdrop" class="theme-settings-backdrop" type="button" aria-label="关闭界面设置"></button>
+    <section class="theme-settings-dialog" role="dialog" aria-modal="true" aria-labelledby="themeSettingsTitle">
+      <div class="theme-settings-head">
+        <div>
+          <h2 id="themeSettingsTitle">界面设置</h2>
+          <p>选择喜欢的界面配色</p>
+        </div>
+        <button id="closeThemeSettingsBtn" class="icon-button" type="button" title="关闭" aria-label="关闭界面设置">×</button>
+      </div>
+      <div class="theme-options" role="radiogroup" aria-label="界面配色">
+        <button class="theme-option" type="button" data-theme-value="gold" role="radio" aria-checked="true">
+          <span class="theme-preview theme-preview-gold"><i></i><i></i><i></i></span>
+          <span><strong>曜石金</strong><small>沉浸黑金</small></span>
+          <b>✓</b>
+        </button>
+        <button class="theme-option" type="button" data-theme-value="orange" role="radio" aria-checked="false">
+          <span class="theme-preview theme-preview-orange"><i></i><i></i><i></i></span>
+          <span><strong>晨曦橙</strong><small>清爽暖白</small></span>
+          <b>✓</b>
+        </button>
+        <button class="theme-option" type="button" data-theme-value="violet" role="radio" aria-checked="false">
+          <span class="theme-preview theme-preview-violet"><i></i><i></i><i></i></span>
+          <span><strong>幻境紫</strong><small>柔和紫白</small></span>
+          <b>✓</b>
+        </button>
+        <button class="theme-option" type="button" data-theme-value="cyan" role="radio" aria-checked="false">
+          <span class="theme-preview theme-preview-cyan"><i></i><i></i><i></i></span>
+          <span><strong>星海青</strong><small>通透青白</small></span>
+          <b>✓</b>
+        </button>
+      </div>
+    </section>
+  </div>
+
   <div id="submitMeteorEffect" class="submit-meteor-effect" aria-hidden="true">
     <span class="submit-meteor"></span>
     <span class="submit-progress-text">任务提交中……</span>
@@ -242,6 +284,6 @@
     </form>
   </div>
 
-  <script src="./app.js?v=20260612-windows-motion-1"></script>
+  <script src="./app.js?v=20260612-interface-themes-1"></script>
 </body>
 </html>

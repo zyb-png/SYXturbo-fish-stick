@@ -17,6 +17,7 @@ const state = {
   activeResourceGroupId: localStorage.getItem('manfei_active_resource_group') || null,
   filePickerTarget: 'library',
   soundEnabled: localStorage.getItem('manfei_completion_sound') !== 'off',
+  interfaceTheme: readInterfaceTheme(),
   shownTaskErrors: new Set(),
 };
 
@@ -54,6 +55,11 @@ function readLocalJson(key, fallback) {
   } catch {
     return fallback;
   }
+}
+
+function readInterfaceTheme() {
+  const value = localStorage.getItem('manfei_interface_theme') || 'gold';
+  return ['gold', 'orange', 'violet', 'cyan'].includes(value) ? value : 'gold';
 }
 
 function closeActionModal(value = null) {
@@ -156,6 +162,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   renderPromptPresets();
   syncResolution();
   updateSoundToggle();
+  applyInterfaceTheme(state.interfaceTheme);
   addLog('info', '页面已就绪', '资源库仅保存在当前浏览器');
 });
 
@@ -173,6 +180,12 @@ function bindEvents() {
   $('balanceBtn').addEventListener('click', getBalance);
   $('usageBtn').addEventListener('click', getUsage);
   $('soundToggleBtn').addEventListener('click', toggleCompletionSound);
+  $('themeSettingsBtn').addEventListener('click', openThemeSettings);
+  $('closeThemeSettingsBtn').addEventListener('click', closeThemeSettings);
+  $('themeSettingsBackdrop').addEventListener('click', closeThemeSettings);
+  document.querySelectorAll('[data-theme-value]').forEach(button => {
+    button.addEventListener('click', () => applyInterfaceTheme(button.dataset.themeValue));
+  });
   $('uploadAssetBtn').addEventListener('click', uploadAsset);
   $('queryAssetBtn').addEventListener('click', () => queryAsset($('queryAssetId').value.trim()));
   $('pullAssetBtn').addEventListener('click', pullAssetToResource);
@@ -211,7 +224,9 @@ function bindEvents() {
   document.querySelector('[data-close-preview]').addEventListener('click', closeVideoPreview);
   document.addEventListener('keydown', (event) => {
     if (event.key !== 'Escape') return;
-    if (!$('actionModal').hidden) {
+    if (!$('themeSettings').hidden) {
+      closeThemeSettings();
+    } else if (!$('actionModal').hidden) {
       closeActionModal(null);
     } else if (!$('previewModal').hidden) {
       closeVideoPreview();
@@ -222,6 +237,36 @@ function bindEvents() {
   window.addEventListener('resize', () => {
     if (!$('mentionMenu').hidden) positionMentionMenu();
   });
+}
+
+function openThemeSettings() {
+  $('themeSettings').hidden = false;
+  $('themeSettingsBtn').setAttribute('aria-expanded', 'true');
+  document.body.classList.add('theme-settings-open');
+  requestAnimationFrame(() => {
+    const selected = document.querySelector(`[data-theme-value="${state.interfaceTheme}"]`);
+    selected?.focus();
+  });
+}
+
+function closeThemeSettings() {
+  $('themeSettings').hidden = true;
+  $('themeSettingsBtn').setAttribute('aria-expanded', 'false');
+  document.body.classList.remove('theme-settings-open');
+}
+
+function applyInterfaceTheme(theme) {
+  if (!['gold', 'orange', 'violet', 'cyan'].includes(theme)) return;
+  state.interfaceTheme = theme;
+  document.documentElement.dataset.theme = theme;
+  localStorage.setItem('manfei_interface_theme', theme);
+  document.querySelectorAll('[data-theme-value]').forEach(button => {
+    const selected = button.dataset.themeValue === theme;
+    button.classList.toggle('selected', selected);
+    button.setAttribute('aria-checked', String(selected));
+  });
+  const names = { gold: '曜石金', orange: '晨曦橙', violet: '幻境紫', cyan: '星海青' };
+  $('themeSettingsBtn').title = `界面设置 · ${names[theme]}`;
 }
 
 async function saveCurrentPromptPreset() {
