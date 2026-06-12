@@ -223,6 +223,8 @@ button:disabled {
   filter: drop-shadow(0 0 10px rgba(226, 151, 34, 0.26));
   transform: translate3d(0, 0, 0) rotate(17deg);
   transform-origin: right center;
+  backface-visibility: hidden;
+  -webkit-backface-visibility: hidden;
   will-change: opacity, transform;
 }
 
@@ -1944,16 +1946,7 @@ body.task-completion-glow::before {
 
 @media (prefers-reduced-motion: reduce) {
   body::before,
-  body::after,
-  .task-card.task-completed.task-celebrating,
-  .task-card.task-completed.task-celebrating::before,
-  .task-card.task-completed.task-celebrating::after,
-  .task-card.task-completed.task-celebrating .task-state-icon,
-  .task-toast,
-  body.task-completion-glow::before,
-  button.primary.is-launching,
-  .submit-meteor-effect.is-active .submit-meteor,
-  .submit-meteor-effect.is-active .submit-progress-text {
+  body::after {
     animation: none;
   }
 }

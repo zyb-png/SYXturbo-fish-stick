@@ -1581,21 +1581,25 @@ function toggleCompletionSound() {
   }
 }
 
-function prepareCompletionAudio() {
-  if (!state.soundEnabled) return;
+async function prepareCompletionAudio() {
+  if (!state.soundEnabled) return null;
   const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-  if (!AudioContextClass) return;
+  if (!AudioContextClass) return null;
   if (!completionAudioContext) completionAudioContext = new AudioContextClass();
   if (completionAudioContext.state === 'suspended') {
-    completionAudioContext.resume().catch(() => {});
+    try {
+      await completionAudioContext.resume();
+    } catch {
+      return null;
+    }
   }
+  return completionAudioContext.state === 'running' ? completionAudioContext : null;
 }
 
-function playCompletionSound(options = {}) {
+async function playCompletionSound(options = {}) {
   if (!state.soundEnabled) return;
-  prepareCompletionAudio();
-  const context = completionAudioContext;
-  if (!context || context.state !== 'running') return;
+  const context = await prepareCompletionAudio();
+  if (!context) return;
 
   const start = context.currentTime + 0.02;
   const master = context.createGain();
@@ -1623,11 +1627,10 @@ function playCompletionSound(options = {}) {
   });
 }
 
-function playSubmitSound() {
+async function playSubmitSound() {
   if (!state.soundEnabled) return;
-  prepareCompletionAudio();
-  const context = completionAudioContext;
-  if (!context || context.state !== 'running') return;
+  const context = await prepareCompletionAudio();
+  if (!context) return;
 
   const start = context.currentTime + 0.015;
   const master = context.createGain();
@@ -1680,11 +1683,13 @@ function celebrateCompletedTask(taskId) {
   const card = [...document.querySelectorAll('.task-card')].find(item => item.dataset.taskId === taskId);
   if (card) {
     card.classList.remove('task-celebrating');
-    requestAnimationFrame(() => card.classList.add('task-celebrating'));
+    void card.offsetWidth;
+    card.classList.add('task-celebrating');
     setTimeout(() => card.classList.remove('task-celebrating'), 5200);
   }
   document.body.classList.remove('task-completion-glow');
-  requestAnimationFrame(() => document.body.classList.add('task-completion-glow'));
+  void document.body.offsetWidth;
+  document.body.classList.add('task-completion-glow');
   setTimeout(() => document.body.classList.remove('task-completion-glow'), 4200);
 }
 
