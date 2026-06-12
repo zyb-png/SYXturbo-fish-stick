@@ -10,12 +10,12 @@
     }
     try {
       const savedTheme = localStorage.getItem('manfei_interface_theme');
-      if (['gold', 'orange', 'violet', 'cyan'].includes(savedTheme)) {
+      if (['gold', 'orange', 'violet', 'cyan', 'pink', 'blue', 'silver'].includes(savedTheme)) {
         document.documentElement.dataset.theme = savedTheme;
       }
     } catch {}
   </script>
-  <link rel="stylesheet" href="./styles.css?v=20260612-interface-themes-1">
+  <link rel="stylesheet" href="./styles.css?v=20260612-interface-themes-2">
 </head>
 <body>
   <main class="app">
@@ -234,6 +234,21 @@
           <span><strong>星海青</strong><small>通透青白</small></span>
           <b>✓</b>
         </button>
+        <button class="theme-option" type="button" data-theme-value="pink" role="radio" aria-checked="false">
+          <span class="theme-preview theme-preview-pink"><i></i><i></i><i></i></span>
+          <span><strong>樱雾粉</strong><small>柔亮粉白</small></span>
+          <b>✓</b>
+        </button>
+        <button class="theme-option" type="button" data-theme-value="blue" role="radio" aria-checked="false">
+          <span class="theme-preview theme-preview-blue"><i></i><i></i><i></i></span>
+          <span><strong>曜石蓝</strong><small>清透蓝白</small></span>
+          <b>✓</b>
+        </button>
+        <button class="theme-option" type="button" data-theme-value="silver" role="radio" aria-checked="false">
+          <span class="theme-preview theme-preview-silver"><i></i><i></i><i></i></span>
+          <span><strong>月影银</strong><small>极简银灰</small></span>
+          <b>✓</b>
+        </button>
       </div>
     </section>
   </div>
@@ -284,6 +299,6 @@
     </form>
   </div>
 
-  <script src="./app.js?v=20260612-interface-themes-1"></script>
+  <script src="./app.js?v=20260612-interface-themes-2"></script>
 </body>
 </html>

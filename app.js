@@ -59,7 +59,7 @@ function readLocalJson(key, fallback) {
 
 function readInterfaceTheme() {
   const value = localStorage.getItem('manfei_interface_theme') || 'gold';
-  return ['gold', 'orange', 'violet', 'cyan'].includes(value) ? value : 'gold';
+  return ['gold', 'orange', 'violet', 'cyan', 'pink', 'blue', 'silver'].includes(value) ? value : 'gold';
 }
 
 function closeActionModal(value = null) {
@@ -256,7 +256,7 @@ function closeThemeSettings() {
 }
 
 function applyInterfaceTheme(theme) {
-  if (!['gold', 'orange', 'violet', 'cyan'].includes(theme)) return;
+  if (!['gold', 'orange', 'violet', 'cyan', 'pink', 'blue', 'silver'].includes(theme)) return;
   state.interfaceTheme = theme;
   document.documentElement.dataset.theme = theme;
   localStorage.setItem('manfei_interface_theme', theme);
@@ -265,7 +265,15 @@ function applyInterfaceTheme(theme) {
     button.classList.toggle('selected', selected);
     button.setAttribute('aria-checked', String(selected));
   });
-  const names = { gold: '曜石金', orange: '晨曦橙', violet: '幻境紫', cyan: '星海青' };
+  const names = {
+    gold: '曜石金',
+    orange: '晨曦橙',
+    violet: '幻境紫',
+    cyan: '星海青',
+    pink: '樱雾粉',
+    blue: '曜石蓝',
+    silver: '月影银',
+  };
   $('themeSettingsBtn').title = `界面设置 · ${names[theme]}`;
 }
 

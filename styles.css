@@ -2134,6 +2134,57 @@ body.preview-open {
   background: #e8fbfc;
 }
 
+.theme-preview-pink {
+  background: #fffafd;
+  color: #ff6da7;
+}
+
+.theme-preview-pink i {
+  background: #ff6da7;
+}
+
+.theme-preview-pink i:nth-child(2) {
+  background: #ffb7d2;
+}
+
+.theme-preview-pink i:nth-child(3) {
+  background: #fff0f6;
+}
+
+.theme-preview-blue {
+  background: #fbfdff;
+  color: #1768ed;
+}
+
+.theme-preview-blue i {
+  background: #1768ed;
+}
+
+.theme-preview-blue i:nth-child(2) {
+  background: #76a9ff;
+}
+
+.theme-preview-blue i:nth-child(3) {
+  background: #edf4ff;
+}
+
+.theme-preview-silver {
+  background: #fcfcfc;
+  color: #5e6267;
+}
+
+.theme-preview-silver i {
+  background: #5e6267;
+}
+
+.theme-preview-silver i:nth-child(2) {
+  background: #aeb2b6;
+}
+
+.theme-preview-silver i:nth-child(3) {
+  background: #eeeeee;
+}
+
 html[data-theme="orange"] {
   color-scheme: light;
   --gold: #ff6a00;
@@ -2201,6 +2252,75 @@ html[data-theme="cyan"] {
   --light-accent-deep: #00777e;
   --light-panel: rgba(255, 255, 255, 0.9);
   --light-tint: rgba(0, 159, 167, 0.05);
+}
+
+html[data-theme="pink"] {
+  color-scheme: light;
+  --gold: #ff6da7;
+  --gold-bright: #f95698;
+  --gold-deep: #b62f68;
+  --gold-soft: rgba(255, 109, 167, 0.13);
+  --border: rgba(255, 109, 167, 0.34);
+  --border-strong: rgba(255, 109, 167, 0.7);
+  --bg: #fffafd;
+  --surface: #ffffff;
+  --surface-2: #fff8fb;
+  --surface-3: #fff0f6;
+  --text: #302127;
+  --text-secondary: #8b747e;
+  --success: #d84a82;
+  --warning: #ed6b9e;
+  --shadow: 0 8px 24px rgba(113, 36, 67, 0.055);
+  --light-accent: 255, 109, 167;
+  --light-accent-deep: #b62f68;
+  --light-panel: rgba(255, 255, 255, 0.9);
+  --light-tint: rgba(255, 109, 167, 0.055);
+}
+
+html[data-theme="blue"] {
+  color-scheme: light;
+  --gold: #1768ed;
+  --gold-bright: #0d5fe8;
+  --gold-deep: #0644ae;
+  --gold-soft: rgba(23, 104, 237, 0.12);
+  --border: rgba(23, 104, 237, 0.3);
+  --border-strong: rgba(23, 104, 237, 0.68);
+  --bg: #fbfdff;
+  --surface: #ffffff;
+  --surface-2: #f8fbff;
+  --surface-3: #edf4ff;
+  --text: #17243a;
+  --text-secondary: #6c7d99;
+  --success: #1260dc;
+  --warning: #347ce8;
+  --shadow: 0 8px 24px rgba(20, 67, 140, 0.06);
+  --light-accent: 23, 104, 237;
+  --light-accent-deep: #0644ae;
+  --light-panel: rgba(255, 255, 255, 0.91);
+  --light-tint: rgba(23, 104, 237, 0.05);
+}
+
+html[data-theme="silver"] {
+  color-scheme: light;
+  --gold: #666a6f;
+  --gold-bright: #4f5358;
+  --gold-deep: #303337;
+  --gold-soft: rgba(94, 98, 103, 0.11);
+  --border: rgba(94, 98, 103, 0.3);
+  --border-strong: rgba(74, 78, 83, 0.62);
+  --bg: #fcfcfc;
+  --surface: #ffffff;
+  --surface-2: #f8f8f8;
+  --surface-3: #eeeeee;
+  --text: #252729;
+  --text-secondary: #767a7e;
+  --success: #5c6065;
+  --warning: #777b80;
+  --shadow: 0 8px 24px rgba(30, 32, 34, 0.055);
+  --light-accent: 94, 98, 103;
+  --light-accent-deep: #303337;
+  --light-panel: rgba(255, 255, 255, 0.91);
+  --light-tint: rgba(94, 98, 103, 0.05);
 }
 
 html[data-theme]:not([data-theme="gold"]) body {
@@ -2312,6 +2432,37 @@ html[data-theme]:not([data-theme="gold"]) .brand-mark {
   background: var(--light-tint);
   box-shadow: 0 0 18px rgba(var(--light-accent), 0.12);
   color: var(--gold);
+}
+
+html[data-theme="pink"][data-theme] button.primary,
+html[data-theme="pink"][data-theme] .activity-panel .task-card .task-play,
+html[data-theme="pink"][data-theme] .download-primary {
+  border-color: #ff9fc4;
+  background: linear-gradient(135deg, #ffe4ef, #ffc8dc);
+  box-shadow: 0 6px 18px rgba(255, 109, 167, 0.16);
+  color: #a52d5d;
+}
+
+html[data-theme="blue"][data-theme] .brand-mark {
+  border-color: #1768ed;
+  background: linear-gradient(145deg, #397cf2, #174bd8);
+  box-shadow: 0 8px 20px rgba(23, 104, 237, 0.22);
+  color: #fff;
+}
+
+html[data-theme="silver"][data-theme] .brand-mark {
+  border-color: #b9bdc0;
+  background: linear-gradient(145deg, #f2f2f2, #cfd1d3);
+  color: #55595d;
+}
+
+html[data-theme="silver"][data-theme] button.primary,
+html[data-theme="silver"][data-theme] .activity-panel .task-card .task-play,
+html[data-theme="silver"][data-theme] .download-primary {
+  border-color: #b7babd;
+  background: linear-gradient(135deg, #eeeeee, #d8d9da);
+  box-shadow: 0 6px 18px rgba(60, 63, 66, 0.1);
+  color: #292c2f;
 }
 
 html[data-theme]:not([data-theme="gold"]) .brand h1 {
