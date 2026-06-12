@@ -859,28 +859,6 @@ function syncResolution() {
   resolution.value = values.includes(old) ? old : '720p';
 }
 
-function addAsset() {
-  const type = $('assetKind').value;
-  const url = $('assetUrl').value.trim();
-  if (!url) return setStatus('请填写素材 URL 或 asset://id', 'error');
-
-  const limits = { image_url: 9, video_url: 3, audio_url: 3 };
-  const count = state.assets.filter(item => item.type === type).length;
-  if (count >= limits[type]) {
-    return setStatus(`${labels[type]}最多 ${limits[type]} 个`, 'error');
-  }
-
-  state.assets.push({
-    id: createId(),
-    type,
-    url,
-    previewUrl: url.startsWith('asset://') ? '' : url,
-    name: url.startsWith('asset://') ? '' : getFileNameFromUrl(url),
-  });
-  $('assetUrl').value = '';
-  renderAssets();
-}
-
 function renderAssets() {
   const list = $('assetList');
   if (state.assets.length === 0) {
