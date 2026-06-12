@@ -971,6 +971,12 @@ h3 {
   color: var(--gold-bright);
 }
 
+.resource-group-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 34px;
+  align-items: stretch;
+}
+
 .resource-group .resource-head {
   display: grid;
   grid-template-columns: 20px minmax(0, 1fr) auto;
@@ -985,6 +991,26 @@ h3 {
   color: var(--text);
   font-size: 12px;
   text-align: left;
+}
+
+.delete-resource-group {
+  width: 34px;
+  min-width: 34px;
+  min-height: 42px;
+  border: 0;
+  border-left: 1px solid rgba(220, 117, 102, 0.22);
+  border-radius: 0;
+  background: transparent;
+  color: #b87568;
+  padding: 0;
+  opacity: 0.72;
+}
+
+.delete-resource-group:hover {
+  border-color: rgba(220, 117, 102, 0.48);
+  background: rgba(106, 34, 27, 0.2);
+  color: #ffc1b4;
+  opacity: 1;
 }
 
 .resource-group .resource-head strong {

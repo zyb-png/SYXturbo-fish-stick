@@ -347,7 +347,7 @@ function insertMentionTrigger() {
 function getMentionableResources() {
   return state.assets.map(asset => ({
     ...asset,
-    id: asset.url.startsWith('asset://') ? asset.url.slice('asset://'.length) : asset.id,
+    id: normalizeAssetId(asset.url) || normalizeAssetId(asset.resourceId) || normalizeAssetId(asset.id),
     mentionSourceId: asset.id,
     assetType: labels[asset.type] || '素材',
     groupName: '本次参考素材',
@@ -736,7 +736,10 @@ async function uploadLocalFileToAsset(file, options = {}) {
       }),
     });
 
-    const assetId = assetResult.asset_id;
+    const assetId = normalizeAssetId(assetResult.asset_id) || normalizeAssetId(assetResult);
+    if (!assetId) {
+      throw new Error('素材创建接口未返回有效的 asset_id');
+    }
     const assetUrl = `asset://${assetId}`;
     if (options.addToGeneration) {
       state.assets.push({
@@ -838,7 +841,8 @@ function renderAssets() {
   state.assets.forEach((asset, index) => {
     const row = document.createElement('div');
     row.className = 'asset-item';
-    const assetId = asset.url.startsWith('asset://') ? asset.url.slice('asset://'.length) : asset.url;
+    const normalizedUrl = normalizeAssetUrl(asset.url, asset.resourceId);
+    const assetId = normalizeAssetId(normalizedUrl) || normalizedUrl || '素材编号异常';
     row.title = `${index + 1}. ${asset.name || labels[asset.type]}\n${assetId}`;
     row.innerHTML = `
       ${renderMediaPreview(asset.type, asset.previewUrl, asset.name)}
@@ -863,9 +867,13 @@ function buildContent() {
   const content = [{ type: 'text', text: prompt }];
   for (const asset of state.assets) {
     const key = asset.type;
+    const url = normalizeAssetUrl(asset.url, asset.resourceId);
+    if (!url) {
+      throw new Error(`参考素材「${asset.name || asset.resourceId || '未命名素材'}」缺少有效的 asset_id 或 URL，请从本次参考素材中移除后重新添加`);
+    }
     content.push({
       type: key,
-      [key]: { url: asset.url },
+      [key]: { url },
       role: roles[key],
     });
   }
@@ -1071,18 +1079,20 @@ async function uploadAsset() {
       body: JSON.stringify({ url, asset_type: assetType }),
     });
     showJson(result);
-    const assetUrl = `asset://${result.asset_id}`;
-    $('queryAssetId').value = result.asset_id || '';
+    const assetId = normalizeAssetId(result.asset_id) || normalizeAssetId(result);
+    if (!assetId) throw new Error('素材创建接口未返回有效的 asset_id');
+    const assetUrl = `asset://${assetId}`;
+    $('queryAssetId').value = assetId;
     setStatus(`素材已上传：${assetUrl}`, 'success');
     addResourceToSelectedGroup({
-      id: result.asset_id,
+      id: assetId,
       assetType,
       url,
       name: getFileNameFromUrl(url),
       status: 'Created',
       createdAt: new Date().toLocaleString(),
     });
-    addLog('success', `素材创建成功：${result.asset_id}`, `${assetType} · ${url}`);
+    addLog('success', `素材创建成功：${assetId}`, `${assetType} · ${url}`);
   } catch (error) {
     setStatus(error.message, 'error');
     addLog('error', '素材创建失败', error.message);
@@ -1162,18 +1172,7 @@ function getVideoErrorSummary(payload, context = {}) {
 
 function collectVideoErrorDetails(payload) {
   const source = payload && typeof payload === 'object' ? payload : { message: payload };
-  const candidates = [source, source.detail, source.error, source.data, source.result]
-    .filter(value => value && typeof value === 'object');
-  const read = (...keys) => {
-    for (const candidate of candidates) {
-      for (const key of keys) {
-        const value = candidate[key];
-        if (typeof value === 'string' && value.trim()) return value.trim();
-        if (typeof value === 'number') return String(value);
-      }
-    }
-    return '';
-  };
+  const read = (...keys) => findNestedScalar(source, keys);
   const stringError = typeof source.error === 'string' ? source.error.trim() : '';
   const stringDetail = typeof source.detail === 'string' ? source.detail.trim() : '';
 
@@ -1186,6 +1185,21 @@ function collectVideoErrorDetails(payload) {
     requestId: read('request_id', 'requestId', 'trace_id', 'traceId'),
     stage: read('stage', 'failed_stage', 'failure_stage'),
   };
+}
+
+function findNestedScalar(value, keys, depth = 0, seen = new Set()) {
+  if (!value || typeof value !== 'object' || depth > 5 || seen.has(value)) return '';
+  seen.add(value);
+  for (const key of keys) {
+    const candidate = value[key];
+    if (typeof candidate === 'string' && candidate.trim()) return candidate.trim();
+    if (typeof candidate === 'number') return String(candidate);
+  }
+  for (const candidate of Object.values(value)) {
+    const found = findNestedScalar(candidate, keys, depth + 1, seen);
+    if (found) return found;
+  }
+  return '';
 }
 
 function getStatusFallback(status = '') {
@@ -1437,16 +1451,18 @@ function restoreTaskReferenceAssets(record) {
   content.forEach(entry => {
     const type = entry?.type;
     if (!['image_url', 'video_url', 'audio_url'].includes(type)) return;
-    const url = entry[type]?.url || '';
+    const url = normalizeAssetUrl(entry[type]?.url, entry.resourceId);
     if (!url) return;
-    const assetId = url.startsWith('asset://') ? url.slice('asset://'.length) : '';
-    const resource = resourceItems.find(item => item.id === assetId || item.url === url);
+    const assetId = normalizeAssetId(url);
+    const resource = resourceItems.find(item =>
+      normalizeAssetId(item.id) === assetId || normalizePlainUrl(item.url) === url
+    );
     restored.push({
       id: createId(),
-      resourceId: resource?.id || assetId || undefined,
+      resourceId: normalizeAssetId(resource?.id) || assetId || undefined,
       type,
       url,
-      previewUrl: resource?.url || (url.startsWith('asset://') ? '' : url),
+      previewUrl: normalizePlainUrl(resource?.url) || (url.startsWith('asset://') ? '' : url),
       name: resource?.name || (url.startsWith('asset://') ? assetId : getFileNameFromUrl(url)),
     });
   });
@@ -1824,11 +1840,14 @@ function renderResources() {
     const groupEl = document.createElement('div');
     groupEl.className = `resource-group${isExpanded ? ' expanded' : ''}${isActive ? ' active' : ''}`;
     groupEl.innerHTML = `
-      <button class="resource-head" type="button" aria-expanded="${isExpanded}">
-        <span class="group-chevron">›</span>
-        <strong>${escapeHtml(group.name)}</strong>
-        <span class="resource-count">${group.items.length}</span>
-      </button>
+      <div class="resource-group-header">
+        <button class="resource-head" type="button" aria-expanded="${isExpanded}">
+          <span class="group-chevron">›</span>
+          <strong>${escapeHtml(group.name)}</strong>
+          <span class="resource-count">${group.items.length}</span>
+        </button>
+        <button class="delete-resource-group" type="button" title="删除资源组" aria-label="删除资源组「${escapeHtml(group.name)}」">⌫</button>
+      </div>
       <div class="resource-items" ${isExpanded ? '' : 'hidden'}></div>
     `;
     const itemsEl = groupEl.querySelector('.resource-items');
@@ -1836,6 +1855,10 @@ function renderResources() {
       setActiveResourceGroup(group.id);
       state.expandedResourceGroupId = isExpanded ? null : group.id;
       renderResources();
+    });
+    groupEl.querySelector('.delete-resource-group').addEventListener('click', event => {
+      event.stopPropagation();
+      deleteResourceGroup(group.id);
     });
     if (group.items.length === 0) {
       itemsEl.className = 'resource-items empty';
@@ -1856,16 +1879,25 @@ function renderResources() {
         `;
         row.querySelector('[data-action="add"]').addEventListener('click', () => {
           const type = assetTypeToKind(item.assetType);
+          const assetId = normalizeAssetId(item.id) || normalizeAssetId(item.raw);
+          if (!assetId) {
+            setStatus(`素材「${itemName}」缺少有效 asset_id，请重新上传或拉取`, 'error');
+            showVideoErrorDialog({
+              message: `素材「${itemName}」的编号格式异常，无法加入生成`,
+              reason: '资源数据中没有可识别的 asset_id，已阻止生成 asset://[object Object]',
+            }, { title: '素材编号无效' });
+            return;
+          }
           state.assets.push({
             id: createId(),
-            resourceId: item.id,
+            resourceId: assetId,
             type,
-            url: `asset://${item.id}`,
-            previewUrl: item.url || '',
+            url: `asset://${assetId}`,
+            previewUrl: normalizePlainUrl(item.url),
             name: item.name || '',
           });
           renderAssets();
-          setStatus(`已加入生成素材：${item.id}`, 'success');
+          setStatus(`已加入生成素材：${assetId}`, 'success');
         });
         row.querySelector('[data-action="delete"]').addEventListener('click', () => {
           removeLocalResource(group.id, item.id, itemName);
@@ -1878,19 +1910,47 @@ function renderResources() {
   updateUploadTarget();
 }
 
+async function deleteResourceGroup(groupId) {
+  const group = state.resources.find(item => item.id === groupId);
+  if (!group) return;
+  const itemCount = group.items?.length || 0;
+  const message = itemCount > 0
+    ? `删除资源组「${group.name}」及其中 ${itemCount} 个本地素材记录？\n远端 asset 和 TOS 文件不会被删除。`
+    : `删除空资源组「${group.name}」？`;
+  if (!await requestConfirmation(message)) return;
+
+  const resourceIds = new Set(
+    (group.items || [])
+      .map(item => normalizeAssetId(item.id) || normalizeAssetId(item.raw))
+      .filter(Boolean),
+  );
+  const linkedAssets = state.assets.filter(asset => resourceIds.has(normalizeAssetId(asset.resourceId)));
+  linkedAssets.forEach(removePromptMention);
+  state.assets = state.assets.filter(asset => !resourceIds.has(normalizeAssetId(asset.resourceId)));
+  state.resources = state.resources.filter(item => item.id !== groupId);
+
+  if (state.expandedResourceGroupId === groupId) state.expandedResourceGroupId = null;
+  if (state.activeResourceGroupId === groupId) {
+    setActiveResourceGroup(state.resources[0]?.id || null);
+  }
+  saveResources();
+  renderResources();
+  renderAssets();
+  hideMentionMenu();
+  setStatus(`已删除资源组：${group.name}`, 'success');
+  addLog('info', `删除资源组：${group.name}`, `${itemCount} 个本地素材记录`);
+}
+
 async function removeLocalResource(groupId, itemId, itemName) {
   if (!await requestConfirmation(`从本地资源组移除「${itemName}」？\n远端 asset 和 TOS 文件不会被删除。`)) return;
   const group = state.resources.find(resourceGroup => resourceGroup.id === groupId);
   if (!group) return;
 
+  const linkedAsset = state.assets.find(asset => normalizeAssetId(asset.resourceId) === normalizeAssetId(itemId));
   const item = group.items.find(resource => resource.id === itemId);
   group.items = group.items.filter(resource => resource.id !== itemId);
-  state.assets = state.assets.filter(asset => asset.resourceId !== itemId);
-
-  if (item) {
-    const linkedAsset = state.assets.find(asset => asset.resourceId === itemId);
-    if (linkedAsset) removePromptMention(linkedAsset);
-  }
+  if (linkedAsset) removePromptMention(linkedAsset);
+  state.assets = state.assets.filter(asset => normalizeAssetId(asset.resourceId) !== normalizeAssetId(itemId));
 
   saveResources();
   renderResources();
@@ -1906,8 +1966,49 @@ function assetTypeToKind(assetType) {
   return 'image_url';
 }
 
+function normalizeAssetId(value, depth = 0) {
+  if (depth > 5 || value == null) return '';
+  if (typeof value === 'string' || typeof value === 'number') {
+    const text = String(value).trim().replace(/^asset:\/\//, '');
+    if (/^(https?:|data:)/i.test(text)) return '';
+    return text && text !== '[object Object]' ? text : '';
+  }
+  if (typeof value !== 'object') return '';
+  for (const key of ['asset_id', 'assetId', 'id', 'resource_id', 'resourceId']) {
+    const normalized = normalizeAssetId(value[key], depth + 1);
+    if (normalized) return normalized;
+  }
+  for (const key of ['asset', 'data', 'detail', 'result', 'raw']) {
+    const normalized = normalizeAssetId(value[key], depth + 1);
+    if (normalized) return normalized;
+  }
+  return '';
+}
+
+function normalizePlainUrl(value, depth = 0) {
+  if (depth > 4 || value == null) return '';
+  if (typeof value === 'string') {
+    const text = value.trim();
+    return text && text !== '[object Object]' ? text : '';
+  }
+  if (typeof value !== 'object') return '';
+  for (const key of ['url', 'signed_url', 'public_url', 'preview_url', 'previewUrl']) {
+    const normalized = normalizePlainUrl(value[key], depth + 1);
+    if (normalized) return normalized;
+  }
+  return '';
+}
+
+function normalizeAssetUrl(value, resourceId) {
+  const directUrl = normalizePlainUrl(value);
+  if (directUrl.startsWith('asset://') || /^(https?:|data:)/i.test(directUrl)) return directUrl;
+  const assetId = normalizeAssetId(value) || normalizeAssetId(resourceId);
+  return assetId ? `asset://${assetId}` : '';
+}
+
 function renderMediaPreview(type, url, name = '') {
-  const safeUrl = url ? escapeHtml(url) : '';
+  const normalizedUrl = normalizePlainUrl(url);
+  const safeUrl = normalizedUrl ? escapeHtml(normalizedUrl) : '';
   const safeName = escapeHtml(name || labels[type] || '素材');
   if (type === 'image_url' && safeUrl) {
     return `<div class="media-thumb"><img src="${safeUrl}" alt="${safeName}" loading="lazy"></div>`;
