@@ -153,6 +153,7 @@ const labels = {
 document.addEventListener('DOMContentLoaded', async () => {
   localStorage.setItem('manfei_task_records', JSON.stringify(state.taskRecords));
   bindEvents();
+  setupWebPet();
   renderAssets();
   renderHistory();
   renderTaskRecords();
@@ -236,6 +237,116 @@ function bindEvents() {
   document.addEventListener('keydown', prepareCompletionAudio, { once: true, capture: true });
   window.addEventListener('resize', () => {
     if (!$('mentionMenu').hidden) positionMentionMenu();
+  });
+}
+
+function setupWebPet() {
+  const pet = $('webPet');
+  if (!pet) return;
+
+  const savedPosition = readLocalJson('manfei_web_pet_position', null);
+  const clampPosition = (left, top) => ({
+    left: Math.max(8, Math.min(window.innerWidth - pet.offsetWidth - 8, left)),
+    top: Math.max(8, Math.min(window.innerHeight - pet.offsetHeight - 8, top)),
+  });
+  const setPosition = (left, top) => {
+    const next = clampPosition(left, top);
+    pet.style.left = `${next.left}px`;
+    pet.style.top = `${next.top}px`;
+    pet.style.right = 'auto';
+    pet.style.bottom = 'auto';
+    return next;
+  };
+
+  if (savedPosition && Number.isFinite(savedPosition.left) && Number.isFinite(savedPosition.top)) {
+    requestAnimationFrame(() => setPosition(savedPosition.left, savedPosition.top));
+  }
+
+  const moods = [
+    { key: 'eating', text: '吃点小鱼干' },
+    { key: 'sleeping', text: '呼噜呼噜' },
+    { key: 'playing', text: '追小球啦' },
+  ];
+  let moodIndex = 0;
+  const applyMood = (mood) => {
+    pet.classList.remove('web-pet-eating', 'web-pet-sleeping', 'web-pet-playing');
+    pet.classList.add(`web-pet-${mood.key}`);
+    $('petSpeech').textContent = mood.text;
+  };
+  const cycleMood = () => {
+    moodIndex = (moodIndex + 1) % moods.length;
+    applyMood(moods[moodIndex]);
+  };
+  let moodTimer = setInterval(cycleMood, 5200);
+
+  let drag = null;
+  let suppressNextClick = false;
+  pet.addEventListener('pointerdown', (event) => {
+    if (event.button !== 0) return;
+    const rect = pet.getBoundingClientRect();
+    drag = {
+      offsetX: event.clientX - rect.left,
+      offsetY: event.clientY - rect.top,
+      moved: false,
+    };
+    pet.classList.add('is-dragging');
+    clearInterval(moodTimer);
+    pet.setPointerCapture?.(event.pointerId);
+  });
+
+  pet.addEventListener('pointermove', (event) => {
+    if (!drag) return;
+    drag.moved = true;
+    setPosition(event.clientX - drag.offsetX, event.clientY - drag.offsetY);
+  });
+
+  const endDrag = (event) => {
+    if (!drag) return;
+    suppressNextClick = drag.moved;
+    const rect = pet.getBoundingClientRect();
+    const next = setPosition(rect.left, rect.top);
+    localStorage.setItem('manfei_web_pet_position', JSON.stringify(next));
+    pet.classList.remove('is-dragging');
+    pet.releasePointerCapture?.(event.pointerId);
+    moodTimer = setInterval(cycleMood, 5200);
+    drag = null;
+  };
+
+  pet.addEventListener('pointerup', endDrag);
+  pet.addEventListener('pointercancel', endDrag);
+  pet.addEventListener('click', () => {
+    if (suppressNextClick) {
+      suppressNextClick = false;
+      return;
+    }
+    cycleMood();
+    clearInterval(moodTimer);
+    moodTimer = setInterval(cycleMood, 5200);
+  });
+  pet.addEventListener('keydown', (event) => {
+    const step = event.shiftKey ? 32 : 14;
+    const rect = pet.getBoundingClientRect();
+    const keys = {
+      ArrowUp: [0, -step],
+      ArrowDown: [0, step],
+      ArrowLeft: [-step, 0],
+      ArrowRight: [step, 0],
+    };
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      cycleMood();
+      return;
+    }
+    if (!keys[event.key]) return;
+    event.preventDefault();
+    const [dx, dy] = keys[event.key];
+    const next = setPosition(rect.left + dx, rect.top + dy);
+    localStorage.setItem('manfei_web_pet_position', JSON.stringify(next));
+  });
+  window.addEventListener('resize', () => {
+    const rect = pet.getBoundingClientRect();
+    const next = setPosition(rect.left, rect.top);
+    localStorage.setItem('manfei_web_pet_position', JSON.stringify(next));
   });
 }
 
