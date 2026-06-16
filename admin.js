@@ -35,6 +35,7 @@ function renderUsers(users) {
   $('userRows').innerHTML = users.map(user => `
     <tr data-user-id="${escapeHtml(user.id)}">
       <td><strong>${escapeHtml(user.username)}</strong></td>
+      <td>${user.phone ? escapeHtml(user.phone) : '未填写'}</td>
       <td>${user.role === 'admin' ? '管理员' : '普通账号'}</td>
       <td>${user.quota}</td>
       <td>${user.used}</td>
@@ -44,6 +45,7 @@ function renderUsers(users) {
       <td>
         <div class="row-actions">
           <button data-action="quota" type="button">设置额度</button>
+          <button data-action="phone" type="button">手机号</button>
           <button data-action="password" type="button">重置密码</button>
           <button data-action="role" type="button">${user.role === 'admin' ? '改为普通账号' : '设为管理员'}</button>
           <button data-action="enabled" type="button">${user.enabled ? '停用' : '启用'}</button>
@@ -64,6 +66,7 @@ async function createUser(event) {
       method: 'POST',
       body: JSON.stringify({
         username: $('newUsername').value.trim(),
+        phone: $('newPhone').value.trim(),
         password: $('newPassword').value,
         role: $('newRole').value,
         quota: Number($('newQuota').value),
@@ -86,6 +89,10 @@ async function handleUserAction(userId, action, users) {
       const value = prompt(`设置 ${user.username} 的视频秒数总额度`, String(user.quota));
       if (value === null) return;
       await updateUser(userId, { quota: Number(value) });
+    } else if (action === 'phone') {
+      const phone = prompt(`设置 ${user.username} 的手机号（留空可清除）`, user.phone || '');
+      if (phone === null) return;
+      await updateUser(userId, { phone: phone.trim() });
     } else if (action === 'password') {
       const password = prompt(`输入 ${user.username} 的新密码（至少 8 位）`);
       if (!password) return;

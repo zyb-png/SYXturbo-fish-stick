@@ -15,6 +15,10 @@ const APP_USERNAME = process.env.APP_USERNAME || env.APP_USERNAME || '';
 const APP_PASSWORD = process.env.APP_PASSWORD || env.APP_PASSWORD || '';
 const APP_STATE_FILE = process.env.APP_STATE_FILE || env.APP_STATE_FILE || path.join(__dirname, '.data', 'app-state.json');
 const ACCOUNTS_FILE = process.env.ACCOUNTS_FILE || env.ACCOUNTS_FILE || path.join(__dirname, '.data', 'accounts.json');
+const REGISTRATION_ENABLED = readBoolean(process.env.REGISTRATION_ENABLED || env.REGISTRATION_ENABLED, true);
+const REGISTER_INVITE_CODES = parseList(process.env.REGISTER_INVITE_CODES || env.REGISTER_INVITE_CODES || 'SYX2026');
+const REGISTER_SMS_CODE = String(process.env.REGISTER_SMS_CODE || env.REGISTER_SMS_CODE || '123456').trim();
+const REGISTER_DEFAULT_QUOTA = validateStartupQuota(process.env.REGISTER_DEFAULT_QUOTA || env.REGISTER_DEFAULT_QUOTA || 0);
 const MAX_ADMIN_ACCOUNTS = 4;
 const SESSION_MAX_AGE_SECONDS = 172800;
 const sessions = new Map();
@@ -59,23 +63,32 @@ const server = http.createServer(async (req, res) => {
       sendJson(res, 200, { status: 'ok' });
       return;
     }
-    if (req.url === '/login' && req.method === 'GET') {
+    const requestUrl = new URL(req.url || '/', `http://localhost:${PORT}`);
+    if (requestUrl.pathname === '/login' && req.method === 'GET') {
       serveLoginPage(res);
       return;
     }
-    if (req.url === '/admin/login' && req.method === 'GET') {
+    if (requestUrl.pathname === '/register' && req.method === 'GET') {
+      serveRegisterPage(res);
+      return;
+    }
+    if (requestUrl.pathname === '/admin/login' && req.method === 'GET') {
       serveLoginPage(res, false, true);
       return;
     }
-    if (req.url === '/login' && req.method === 'POST') {
+    if (requestUrl.pathname === '/login' && req.method === 'POST') {
       await handleLogin(req, res);
       return;
     }
-    if (req.url === '/admin/login' && req.method === 'POST') {
+    if (requestUrl.pathname === '/register' && req.method === 'POST') {
+      await handleRegister(req, res);
+      return;
+    }
+    if (requestUrl.pathname === '/admin/login' && req.method === 'POST') {
       await handleLogin(req, res, true);
       return;
     }
-    if (req.url === '/logout') {
+    if (requestUrl.pathname === '/logout') {
       const sessionToken = getSessionToken(req);
       if (sessionToken) sessions.delete(sessionToken);
       res.writeHead(303, {
@@ -192,7 +205,11 @@ async function handleLogin(req, res, adminLogin = false) {
   const username = form.get('username') || '';
   const password = form.get('password') || '';
   const accounts = await readAccounts();
-  const user = accounts.users.find(item => item.username.toLowerCase() === username.trim().toLowerCase());
+    const login = username.trim().toLowerCase();
+    const user = accounts.users.find(item => (
+      item.username.toLowerCase() === login
+      || String(item.phone || '').toLowerCase() === login
+    ));
   if (user && user.enabled !== false && verifyPassword(password, user.password) && (!adminLogin || user.role === 'admin')) {
     const sessionToken = crypto.randomBytes(32).toString('hex');
     sessions.set(sessionToken, {
@@ -213,9 +230,62 @@ async function handleLogin(req, res, adminLogin = false) {
   serveLoginPage(res, true, adminLogin);
 }
 
+async function handleRegister(req, res) {
+  if (!REGISTRATION_ENABLED) {
+    serveRegisterPage(res, '注册暂未开放');
+    return;
+  }
+  const body = (await readBody(req)).toString('utf8');
+  const form = new URLSearchParams(body);
+  const phone = form.get('phone') || '';
+  const username = form.get('username') || '';
+  const password = form.get('password') || '';
+  const confirmPassword = form.get('confirmPassword') || '';
+  const smsCode = form.get('smsCode') || '';
+  const inviteCode = form.get('inviteCode') || '';
+
+  try {
+    const created = await mutateAccounts(accounts => {
+      const normalizedPhone = validatePhone(phone);
+      const normalizedUsername = validateUsername(username);
+      const normalizedPassword = validateNewPassword(password);
+      if (normalizedPassword !== confirmPassword) throw httpError(400, '两次输入的密码不一致');
+      validateRegisterSmsCode(smsCode);
+      validateInviteCode(inviteCode);
+      if (accounts.users.some(user => user.username.toLowerCase() === normalizedUsername.toLowerCase())) {
+        throw httpError(409, '用户名已存在');
+      }
+      if (accounts.users.some(user => String(user.phone || '') === normalizedPhone)) {
+        throw httpError(409, '手机号已注册');
+      }
+      const user = {
+        id: crypto.randomUUID(),
+        username: normalizedUsername,
+        phone: normalizedPhone,
+        password: hashPassword(normalizedPassword),
+        role: 'user',
+        quota: REGISTER_DEFAULT_QUOTA,
+        used: 0,
+        enabled: true,
+        usage: [],
+        createdAt: new Date().toISOString(),
+        lastLoginAt: null,
+      };
+      accounts.users.push(user);
+      return publicUser(user);
+    });
+    serveRegisterPage(res, '', `注册成功：${created.username}。请返回登录，管理员分配额度后即可生成视频。`);
+  } catch (error) {
+    serveRegisterPage(res, error.message || '注册失败');
+  }
+}
+
 function serveLoginPage(res, hasError = false, adminLogin = false) {
   const error = hasError
     ? `<p class="error">${adminLogin ? '管理员账号或密码错误' : '用户名或密码错误'}</p>`
+    : '';
+  const registerLink = !adminLogin && REGISTRATION_ENABLED
+    ? '<p class="login-extra">还没有账号？<a href="/register">立即注册</a></p>'
     : '';
   const html = `<!doctype html>
 <html lang="zh-CN">
@@ -232,7 +302,7 @@ function serveLoginPage(res, hasError = false, adminLogin = false) {
     input{width:100%;height:42px;border:1px solid rgba(212,164,77,.4);border-radius:6px;background:#050806;color:#eee2c9;padding:0 12px;outline:none}
     input:focus{border-color:#d4a44d;box-shadow:0 0 0 2px rgba(212,164,77,.12)}
     button{width:100%;height:44px;margin-top:20px;border:1px solid #e2af50;border-radius:6px;background:linear-gradient(135deg,#a96e22,#d7a44b,#79501c);color:#fff0c5;font-weight:800;cursor:pointer}
-    .error{margin:12px 0 0;color:#ef8c7b}
+    .error{margin:12px 0 0;color:#ef8c7b}.login-extra{margin:14px 0 0}.login-extra a{color:#ffe09a;text-decoration:none}
   </style>
 </head>
 <body>
@@ -242,14 +312,68 @@ function serveLoginPage(res, hasError = false, adminLogin = false) {
     <p>${adminLogin ? '仅管理员账号可以进入' : '使用个人账号登录 Seedance 工作台'}</p>
     ${error}
     <form method="post" action="${adminLogin ? '/admin/login' : '/login'}">
-      <label>用户名<input name="username" autocomplete="username" autofocus required></label>
+      <label>用户名 / 手机号<input name="username" autocomplete="username" autofocus required></label>
       <label>密码<input name="password" type="password" autocomplete="current-password" required></label>
       <button type="submit">登录</button>
     </form>
+    ${registerLink}
   </main>
 </body>
 </html>`;
   res.writeHead(hasError ? 401 : 200, {
+    'Content-Type': 'text/html; charset=utf-8',
+    'Cache-Control': 'no-store',
+  });
+  res.end(html);
+}
+
+function serveRegisterPage(res, errorMessage = '', successMessage = '') {
+  const status = successMessage
+    ? `<p class="success">${escapeHtml(successMessage)}</p>`
+    : errorMessage
+      ? `<p class="error">${escapeHtml(errorMessage)}</p>`
+      : '';
+  const disabled = REGISTRATION_ENABLED ? '' : 'disabled';
+  const html = `<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>注册 · 宋钰汐视频生成</title>
+  <style>
+    *{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:#030504;color:#eee2c9;font-family:system-ui,-apple-system,sans-serif}
+    main{width:min(420px,calc(100vw - 32px));border:1px solid rgba(212,164,77,.55);border-radius:8px;background:#090c0a;padding:28px;box-shadow:0 20px 60px #000}
+    .mark{display:grid;place-items:center;width:48px;height:48px;margin-bottom:18px;color:#ffe09a;font-size:22px;font-weight:900}
+    h1{margin:0 0 6px;color:#efd18d;font-size:22px}p{margin:0 0 18px;color:#918875;font-size:12px}
+    label{display:grid;gap:7px;margin-top:13px;color:#a79b85;font-size:12px}
+    input{width:100%;height:42px;border:1px solid rgba(212,164,77,.4);border-radius:6px;background:#050806;color:#eee2c9;padding:0 12px;outline:none}
+    input:focus{border-color:#d4a44d;box-shadow:0 0 0 2px rgba(212,164,77,.12)}
+    button{width:100%;height:44px;margin-top:20px;border:1px solid #e2af50;border-radius:6px;background:linear-gradient(135deg,#a96e22,#d7a44b,#79501c);color:#fff0c5;font-weight:800;cursor:pointer}
+    button:disabled{opacity:.5;cursor:not-allowed}.error{margin:12px 0 0;color:#ef8c7b}.success{margin:12px 0 0;color:#88d89f}
+    .extra{margin-top:14px}.extra a{color:#ffe09a;text-decoration:none}.hint{margin-top:8px;color:#756d5d}
+  </style>
+</head>
+<body>
+  <main>
+    <div class="mark">钰汐</div>
+    <h1>注册账号</h1>
+    <p>注册后默认 0 秒额度，管理员审核并分配额度后即可生成视频。</p>
+    ${status}
+    <form method="post" action="/register">
+      <label>手机号<input name="phone" inputmode="tel" autocomplete="tel" pattern="1[3-9][0-9]{9}" required ${disabled}></label>
+      <label>用户名<input name="username" autocomplete="username" minlength="3" maxlength="32" required ${disabled}></label>
+      <label>密码<input name="password" type="password" autocomplete="new-password" minlength="8" maxlength="128" required ${disabled}></label>
+      <label>确认密码<input name="confirmPassword" type="password" autocomplete="new-password" minlength="8" maxlength="128" required ${disabled}></label>
+      <label>短信验证码<input name="smsCode" inputmode="numeric" autocomplete="one-time-code" required ${disabled}></label>
+      <label>邀请码<input name="inviteCode" autocomplete="off" required ${disabled}></label>
+      <p class="hint">当前短信验证码由管理员配置，之后可接入火山短信自动发送。</p>
+      <button type="submit" ${disabled}>注册</button>
+    </form>
+    <p class="extra"><a href="/login">返回登录</a></p>
+  </main>
+</body>
+</html>`;
+  res.writeHead(errorMessage ? 400 : 200, {
     'Content-Type': 'text/html; charset=utf-8',
     'Cache-Control': 'no-store',
   });
@@ -278,6 +402,7 @@ function publicUser(user) {
   return {
     id: user.id,
     username: user.username,
+    phone: user.phone || '',
     role: user.role,
     quota: user.quota,
     used: user.used,
@@ -304,6 +429,7 @@ async function ensureAccountsFile() {
       users: [{
         id: crypto.randomUUID(),
         username,
+        phone: '',
         password: hashPassword(password),
         role: 'admin',
         quota: 1000,
@@ -328,6 +454,7 @@ async function readAccounts() {
     updatedAt: value.updatedAt || null,
     users: Array.isArray(value.users) ? value.users.map(user => ({
       ...user,
+      phone: String(user.phone || ''),
       quota: Math.max(0, Math.floor(Number(user.quota || 0))),
       used: Math.max(0, Math.floor(Number(user.used || 0))),
       usage: Array.isArray(user.usage) ? user.usage : [],
@@ -376,10 +503,14 @@ async function handleAdminApi(req, res, auth) {
     const created = await mutateAccounts(accounts => {
       const username = validateUsername(payload.username);
       const password = validateNewPassword(payload.password);
+      const phone = payload.phone ? validatePhone(payload.phone) : '';
       const role = payload.role === 'admin' ? 'admin' : 'user';
       const quota = validateQuota(payload.quota);
       if (accounts.users.some(user => user.username.toLowerCase() === username.toLowerCase())) {
         throw httpError(409, '账号名已存在');
+      }
+      if (phone && accounts.users.some(user => String(user.phone || '') === phone)) {
+        throw httpError(409, '手机号已注册');
       }
       if (role === 'admin' && accounts.users.filter(user => user.role === 'admin').length >= MAX_ADMIN_ACCOUNTS) {
         throw httpError(400, `管理员账号最多 ${MAX_ADMIN_ACCOUNTS} 个`);
@@ -387,6 +518,7 @@ async function handleAdminApi(req, res, auth) {
       const user = {
         id: crypto.randomUUID(),
         username,
+        phone,
         password: hashPassword(password),
         role,
         quota,
@@ -419,6 +551,13 @@ async function handleAdminApi(req, res, auth) {
             throw httpError(409, '账号名已存在');
           }
           user.username = username;
+        }
+        if (payload.phone !== undefined) {
+          const phone = payload.phone ? validatePhone(payload.phone) : '';
+          if (phone && accounts.users.some(item => item.id !== user.id && String(item.phone || '') === phone)) {
+            throw httpError(409, '手机号已注册');
+          }
+          user.phone = phone;
         }
         if (payload.password) user.password = hashPassword(validateNewPassword(payload.password));
         if (payload.quota !== undefined) user.quota = validateQuota(payload.quota);
@@ -471,6 +610,31 @@ function validateUsername(value) {
   return username;
 }
 
+function validatePhone(value) {
+  const phone = String(value || '').trim();
+  if (!/^1[3-9]\d{9}$/.test(phone)) {
+    throw httpError(400, '请输入有效的中国大陆手机号');
+  }
+  return phone;
+}
+
+function validateInviteCode(value) {
+  const inviteCode = String(value || '').trim();
+  if (REGISTER_INVITE_CODES.length === 0) return inviteCode;
+  if (!REGISTER_INVITE_CODES.includes(inviteCode)) {
+    throw httpError(400, '邀请码无效');
+  }
+  return inviteCode;
+}
+
+function validateRegisterSmsCode(value) {
+  const smsCode = String(value || '').trim();
+  if (REGISTER_SMS_CODE && smsCode !== REGISTER_SMS_CODE) {
+    throw httpError(400, '短信验证码错误');
+  }
+  return smsCode;
+}
+
 function validateNewPassword(value) {
   const password = String(value || '');
   if (password.length < 8 || password.length > 128) {
@@ -485,6 +649,33 @@ function validateQuota(value) {
     throw httpError(400, '额度需为 0-1000000 的整数');
   }
   return quota;
+}
+
+function validateStartupQuota(value) {
+  const quota = Number(value);
+  return Number.isInteger(quota) && quota >= 0 ? quota : 0;
+}
+
+function readBoolean(value, fallback = false) {
+  if (value === undefined || value === null || value === '') return fallback;
+  return ['1', 'true', 'yes', 'on'].includes(String(value).trim().toLowerCase());
+}
+
+function parseList(value) {
+  return String(value || '')
+    .split(',')
+    .map(item => item.trim())
+    .filter(Boolean);
+}
+
+function escapeHtml(value) {
+  return String(value).replace(/[&<>"']/g, char => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;',
+  }[char]));
 }
 
 function httpError(status, message) {
