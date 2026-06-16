@@ -6,10 +6,10 @@ services:
     env_file:
       - .env
     environment:
-      PORT: 4177
+      PORT: 4178
       APP_STATE_FILE: /var/data/app-state.json
+      ACCOUNTS_FILE: /var/data/accounts.json
     ports:
-      - "80:4177"
+      - "80:4178"
     volumes:
       - ./data:/var/data
-

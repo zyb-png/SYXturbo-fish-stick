@@ -14,9 +14,11 @@ services:
       sizeGB: 1
     envVars:
       - key: PORT
-        value: 4177
+        value: 4178
       - key: APP_STATE_FILE
         value: /var/data/app-state.json
+      - key: ACCOUNTS_FILE
+        value: /var/data/accounts.json
       - key: MANFEI_API_BASE
         sync: false
       - key: MANFEI_API_TOKEN

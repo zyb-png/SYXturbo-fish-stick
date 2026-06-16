@@ -14,9 +14,11 @@ const API_TOKEN = process.env.MANFEI_API_TOKEN || env.MANFEI_API_TOKEN || '';
 const APP_USERNAME = process.env.APP_USERNAME || env.APP_USERNAME || '';
 const APP_PASSWORD = process.env.APP_PASSWORD || env.APP_PASSWORD || '';
 const APP_STATE_FILE = process.env.APP_STATE_FILE || env.APP_STATE_FILE || path.join(__dirname, '.data', 'app-state.json');
-const SESSION_TOKEN = crypto.createHash('sha256')
-  .update(`${APP_USERNAME || 'manfei'}:${APP_PASSWORD}:manfei-session`)
-  .digest('hex');
+const ACCOUNTS_FILE = process.env.ACCOUNTS_FILE || env.ACCOUNTS_FILE || path.join(__dirname, '.data', 'accounts.json');
+const MAX_ADMIN_ACCOUNTS = 4;
+const SESSION_MAX_AGE_SECONDS = 172800;
+const sessions = new Map();
+let accountsMutationQueue = Promise.resolve();
 const TOS_CONFIG = {
   bucket: process.env.TOS_BUCKET || env.TOS_BUCKET || '',
   region: process.env.TOS_REGION || env.TOS_REGION || 'cn-beijing',
@@ -37,6 +39,7 @@ const tosClient = isTosConfigured()
       bucket: TOS_CONFIG.bucket,
     })
   : null;
+await ensureAccountsFile();
 
 const mimeTypes = {
   '.html': 'text/html; charset=utf-8',
@@ -60,11 +63,21 @@ const server = http.createServer(async (req, res) => {
       serveLoginPage(res);
       return;
     }
+    if (req.url === '/admin/login' && req.method === 'GET') {
+      serveLoginPage(res, false, true);
+      return;
+    }
     if (req.url === '/login' && req.method === 'POST') {
       await handleLogin(req, res);
       return;
     }
+    if (req.url === '/admin/login' && req.method === 'POST') {
+      await handleLogin(req, res, true);
+      return;
+    }
     if (req.url === '/logout') {
+      const sessionToken = getSessionToken(req);
+      if (sessionToken) sessions.delete(sessionToken);
       res.writeHead(303, {
         'Set-Cookie': 'manfei_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0',
         'Location': '/login',
@@ -72,7 +85,8 @@ const server = http.createServer(async (req, res) => {
       res.end();
       return;
     }
-    if (!isAuthorized(req)) {
+    const auth = await getAuthenticatedUser(req);
+    if (!auth) {
       if (req.url?.startsWith('/api/')) {
         sendJson(res, 401, { error: '请先登录' });
       } else {
@@ -81,7 +95,38 @@ const server = http.createServer(async (req, res) => {
       }
       return;
     }
+    req.auth = auth;
+    if (req.url === '/admin' || req.url === '/admin/' || req.url === '/admin.html') {
+      if (auth.user.role !== 'admin') {
+        sendJson(res, 403, { error: '仅管理员可以访问账号管理页面' });
+        return;
+      }
+      await serveFile(path.join(__dirname, 'admin.html'), res);
+      return;
+    }
     if (req.url?.startsWith('/api/')) {
+      if (req.url === '/api/session' && req.method === 'GET') {
+        sendJson(res, 200, publicUser(auth.user));
+        return;
+      }
+      if (req.url === '/api/me' && req.method === 'GET') {
+        sendJson(res, 200, publicUser(auth.user));
+        return;
+      }
+      if (req.url.startsWith('/api/usage') && req.method === 'GET') {
+        sendJson(res, 200, {
+          username: auth.user.username,
+          quota: auth.user.quota,
+          used: auth.user.used,
+          remaining: getRemainingQuota(auth.user),
+          items: [...(auth.user.usage || [])].reverse().slice(0, 50),
+        });
+        return;
+      }
+      if (req.url.startsWith('/api/admin/')) {
+        await handleAdminApi(req, res, auth);
+        return;
+      }
       if (req.url.startsWith('/api/app-state')) {
         await handleAppState(req, res);
         return;
@@ -100,7 +145,7 @@ const server = http.createServer(async (req, res) => {
     await serveStatic(req, res);
   } catch (error) {
     console.error('[server]', error);
-    sendJson(res, 500, { error: error.message || 'Server error' });
+    sendJson(res, error.status || 500, { error: error.message || 'Server error' });
   }
 });
 
@@ -108,24 +153,29 @@ server.listen(PORT, () => {
   console.log(`Manfei Seedance app: http://localhost:${PORT}`);
   console.log(`Proxy target: ${API_BASE}`);
   console.log(tosClient ? `TOS bucket: ${TOS_CONFIG.bucket}` : 'TOS upload: not configured');
-  console.log(APP_PASSWORD ? `Access protection: enabled (${APP_USERNAME || 'manfei'})` : 'Access protection: disabled');
+  console.log(`Account system: enabled (${ACCOUNTS_FILE})`);
 });
 
-function isAuthorized(req) {
-  if (!APP_PASSWORD) return true;
+function getSessionToken(req) {
   const cookies = parseCookies(req.headers.cookie || '');
-  if (cookies.manfei_session && safeEqual(cookies.manfei_session, SESSION_TOKEN)) return true;
-  const authorization = req.headers.authorization || '';
-  if (!authorization.startsWith('Basic ')) return false;
-  try {
-    const decoded = Buffer.from(authorization.slice(6), 'base64').toString('utf8');
-    const separator = decoded.indexOf(':');
-    const username = decoded.slice(0, separator);
-    const password = decoded.slice(separator + 1);
-    return safeEqual(username, APP_USERNAME || 'manfei') && safeEqual(password, APP_PASSWORD);
-  } catch {
-    return false;
+  return cookies.manfei_session || '';
+}
+
+async function getAuthenticatedUser(req) {
+  const token = getSessionToken(req);
+  const session = token ? sessions.get(token) : null;
+  if (!session || session.expiresAt <= Date.now()) {
+    if (token) sessions.delete(token);
+    return null;
   }
+  const accounts = await readAccounts();
+  const user = accounts.users.find(item => item.id === session.userId && item.enabled !== false);
+  if (!user) {
+    sessions.delete(token);
+    return null;
+  }
+  session.expiresAt = Date.now() + SESSION_MAX_AGE_SECONDS * 1000;
+  return { token, session, user, accounts };
 }
 
 function parseCookies(cookieHeader) {
@@ -136,35 +186,47 @@ function parseCookies(cookieHeader) {
   }).filter(([key]) => key));
 }
 
-async function handleLogin(req, res) {
+async function handleLogin(req, res, adminLogin = false) {
   const body = (await readBody(req)).toString('utf8');
   const form = new URLSearchParams(body);
   const username = form.get('username') || '';
   const password = form.get('password') || '';
-  if (safeEqual(username, APP_USERNAME || 'manfei') && safeEqual(password, APP_PASSWORD)) {
+  const accounts = await readAccounts();
+  const user = accounts.users.find(item => item.username.toLowerCase() === username.trim().toLowerCase());
+  if (user && user.enabled !== false && verifyPassword(password, user.password) && (!adminLogin || user.role === 'admin')) {
+    const sessionToken = crypto.randomBytes(32).toString('hex');
+    sessions.set(sessionToken, {
+      userId: user.id,
+      createdAt: Date.now(),
+      expiresAt: Date.now() + SESSION_MAX_AGE_SECONDS * 1000,
+    });
+    user.lastLoginAt = new Date().toISOString();
+    await writeAccounts(accounts);
     res.writeHead(303, {
-      'Set-Cookie': `manfei_session=${SESSION_TOKEN}; Path=/; HttpOnly; SameSite=Lax; Max-Age=172800`,
-      'Location': '/',
+      'Set-Cookie': `manfei_session=${sessionToken}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${SESSION_MAX_AGE_SECONDS}`,
+      'Location': adminLogin ? '/admin' : '/?welcome=1',
       'Cache-Control': 'no-store',
     });
     res.end();
     return;
   }
-  serveLoginPage(res, true);
+  serveLoginPage(res, true, adminLogin);
 }
 
-function serveLoginPage(res, hasError = false) {
-  const error = hasError ? '<p class="error">用户名或密码错误</p>' : '';
+function serveLoginPage(res, hasError = false, adminLogin = false) {
+  const error = hasError
+    ? `<p class="error">${adminLogin ? '管理员账号或密码错误' : '用户名或密码错误'}</p>`
+    : '';
   const html = `<!doctype html>
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>登录 · 漫飞视频生成</title>
+  <title>${adminLogin ? '管理员登录' : '登录'} · 宋钰汐视频生成</title>
   <style>
     *{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:#030504;color:#eee2c9;font-family:system-ui,-apple-system,sans-serif}
     main{width:min(360px,calc(100vw - 32px));border:1px solid rgba(212,164,77,.55);border-radius:8px;background:#090c0a;padding:28px;box-shadow:0 20px 60px #000}
-    .mark{display:grid;place-items:center;width:48px;height:48px;margin-bottom:18px;border:1px solid #d4a44d;border-radius:7px;color:#ffe09a;font-weight:800}
+    .mark{display:grid;place-items:center;width:48px;height:48px;margin-bottom:18px;color:#ffe09a;font-size:22px;font-weight:900}
     h1{margin:0 0 6px;color:#efd18d;font-size:22px}p{margin:0 0 20px;color:#918875;font-size:12px}
     label{display:grid;gap:7px;margin-top:14px;color:#a79b85;font-size:12px}
     input{width:100%;height:42px;border:1px solid rgba(212,164,77,.4);border-radius:6px;background:#050806;color:#eee2c9;padding:0 12px;outline:none}
@@ -175,11 +237,11 @@ function serveLoginPage(res, hasError = false) {
 </head>
 <body>
   <main>
-    <div class="mark">MF</div>
-    <h1>漫飞视频生成</h1>
-    <p>登录后进入 Seedance 工作台</p>
+    <div class="mark">钰汐</div>
+    <h1>${adminLogin ? '额度管理后台' : '宋钰汐视频生成'}</h1>
+    <p>${adminLogin ? '仅管理员账号可以进入' : '使用个人账号登录 Seedance 工作台'}</p>
     ${error}
-    <form method="post" action="/login">
+    <form method="post" action="${adminLogin ? '/admin/login' : '/login'}">
       <label>用户名<input name="username" autocomplete="username" autofocus required></label>
       <label>密码<input name="password" type="password" autocomplete="current-password" required></label>
       <button type="submit">登录</button>
@@ -198,6 +260,237 @@ function safeEqual(actual, expected) {
   const left = Buffer.from(String(actual));
   const right = Buffer.from(String(expected));
   return left.length === right.length && crypto.timingSafeEqual(left, right);
+}
+
+function hashPassword(password, salt = crypto.randomBytes(16).toString('hex')) {
+  const hash = crypto.scryptSync(String(password), salt, 64).toString('hex');
+  return `scrypt:${salt}:${hash}`;
+}
+
+function verifyPassword(password, encoded) {
+  const [scheme, salt, expected] = String(encoded || '').split(':');
+  if (scheme !== 'scrypt' || !salt || !expected) return false;
+  const actual = crypto.scryptSync(String(password), salt, 64).toString('hex');
+  return safeEqual(actual, expected);
+}
+
+function publicUser(user) {
+  return {
+    id: user.id,
+    username: user.username,
+    role: user.role,
+    quota: user.quota,
+    used: user.used,
+    remaining: getRemainingQuota(user),
+    enabled: user.enabled !== false,
+    createdAt: user.createdAt,
+    lastLoginAt: user.lastLoginAt || null,
+  };
+}
+
+function getRemainingQuota(user) {
+  return Math.max(0, Number(user.quota || 0) - Number(user.used || 0));
+}
+
+async function ensureAccountsFile() {
+  try {
+    await fs.access(ACCOUNTS_FILE);
+  } catch {
+    const username = APP_USERNAME || 'admin';
+    const password = APP_PASSWORD || crypto.randomBytes(12).toString('base64url');
+    const initial = {
+      version: 1,
+      updatedAt: new Date().toISOString(),
+      users: [{
+        id: crypto.randomUUID(),
+        username,
+        password: hashPassword(password),
+        role: 'admin',
+        quota: 1000,
+        used: 0,
+        enabled: true,
+        usage: [],
+        createdAt: new Date().toISOString(),
+        lastLoginAt: null,
+      }],
+    };
+    await writeAccounts(initial);
+    if (!APP_PASSWORD) {
+      console.warn(`[accounts] 已创建管理员 ${username}，临时密码：${password}`);
+    }
+  }
+}
+
+async function readAccounts() {
+  const value = JSON.parse(await fs.readFile(ACCOUNTS_FILE, 'utf8'));
+  return {
+    version: 1,
+    updatedAt: value.updatedAt || null,
+    users: Array.isArray(value.users) ? value.users.map(user => ({
+      ...user,
+      quota: Math.max(0, Math.floor(Number(user.quota || 0))),
+      used: Math.max(0, Math.floor(Number(user.used || 0))),
+      usage: Array.isArray(user.usage) ? user.usage : [],
+      enabled: user.enabled !== false,
+    })) : [],
+  };
+}
+
+async function writeAccounts(accounts) {
+  const directory = path.dirname(ACCOUNTS_FILE);
+  const temporaryFile = `${ACCOUNTS_FILE}.${crypto.randomBytes(4).toString('hex')}.tmp`;
+  accounts.updatedAt = new Date().toISOString();
+  await fs.mkdir(directory, { recursive: true });
+  await fs.writeFile(temporaryFile, JSON.stringify(accounts, null, 2), { encoding: 'utf8', mode: 0o600 });
+  await fs.rename(temporaryFile, ACCOUNTS_FILE);
+}
+
+function mutateAccounts(mutator) {
+  const operation = accountsMutationQueue.then(async () => {
+    const accounts = await readAccounts();
+    const result = await mutator(accounts);
+    await writeAccounts(accounts);
+    return result;
+  });
+  accountsMutationQueue = operation.catch(() => {});
+  return operation;
+}
+
+async function handleAdminApi(req, res, auth) {
+  if (auth.user.role !== 'admin') {
+    sendJson(res, 403, { error: '仅管理员可以管理账号' });
+    return;
+  }
+  const url = new URL(req.url || '/', `http://localhost:${PORT}`);
+  const userPrefix = '/api/admin/users/';
+  if (url.pathname === '/api/admin/users' && req.method === 'GET') {
+    const accounts = await readAccounts();
+    sendJson(res, 200, {
+      maxAdmins: MAX_ADMIN_ACCOUNTS,
+      users: accounts.users.map(publicUser),
+    });
+    return;
+  }
+  if (url.pathname === '/api/admin/users' && req.method === 'POST') {
+    const payload = JSON.parse((await readBody(req)).toString('utf8') || '{}');
+    const created = await mutateAccounts(accounts => {
+      const username = validateUsername(payload.username);
+      const password = validateNewPassword(payload.password);
+      const role = payload.role === 'admin' ? 'admin' : 'user';
+      const quota = validateQuota(payload.quota);
+      if (accounts.users.some(user => user.username.toLowerCase() === username.toLowerCase())) {
+        throw httpError(409, '账号名已存在');
+      }
+      if (role === 'admin' && accounts.users.filter(user => user.role === 'admin').length >= MAX_ADMIN_ACCOUNTS) {
+        throw httpError(400, `管理员账号最多 ${MAX_ADMIN_ACCOUNTS} 个`);
+      }
+      const user = {
+        id: crypto.randomUUID(),
+        username,
+        password: hashPassword(password),
+        role,
+        quota,
+        used: 0,
+        enabled: true,
+        usage: [],
+        createdAt: new Date().toISOString(),
+        lastLoginAt: null,
+      };
+      accounts.users.push(user);
+      return publicUser(user);
+    });
+    sendJson(res, 201, created);
+    return;
+  }
+  if (url.pathname.startsWith(userPrefix)) {
+    const userId = decodeURIComponent(url.pathname.slice(userPrefix.length));
+    if (!userId) {
+      sendJson(res, 404, { error: '账号不存在' });
+      return;
+    }
+    if (req.method === 'PATCH') {
+      const payload = JSON.parse((await readBody(req)).toString('utf8') || '{}');
+      const updated = await mutateAccounts(accounts => {
+        const user = accounts.users.find(item => item.id === userId);
+        if (!user) throw httpError(404, '账号不存在');
+        if (payload.username !== undefined) {
+          const username = validateUsername(payload.username);
+          if (accounts.users.some(item => item.id !== user.id && item.username.toLowerCase() === username.toLowerCase())) {
+            throw httpError(409, '账号名已存在');
+          }
+          user.username = username;
+        }
+        if (payload.password) user.password = hashPassword(validateNewPassword(payload.password));
+        if (payload.quota !== undefined) user.quota = validateQuota(payload.quota);
+        if (payload.enabled !== undefined) user.enabled = Boolean(payload.enabled);
+        if (payload.role !== undefined) {
+          const role = payload.role === 'admin' ? 'admin' : 'user';
+          const adminCount = accounts.users.filter(item => item.role === 'admin').length;
+          if (role === 'admin' && user.role !== 'admin' && adminCount >= MAX_ADMIN_ACCOUNTS) {
+            throw httpError(400, `管理员账号最多 ${MAX_ADMIN_ACCOUNTS} 个`);
+          }
+          if (role !== 'admin' && user.role === 'admin' && adminCount <= 1) {
+            throw httpError(400, '至少保留一个管理员账号');
+          }
+          user.role = role;
+        }
+        return publicUser(user);
+      });
+      sendJson(res, 200, updated);
+      return;
+    }
+    if (req.method === 'DELETE') {
+      if (userId === auth.user.id) {
+        sendJson(res, 400, { error: '不能删除当前登录的管理员账号' });
+        return;
+      }
+      await mutateAccounts(accounts => {
+        const index = accounts.users.findIndex(item => item.id === userId);
+        if (index < 0) throw httpError(404, '账号不存在');
+        const user = accounts.users[index];
+        if (user.role === 'admin' && accounts.users.filter(item => item.role === 'admin').length <= 1) {
+          throw httpError(400, '至少保留一个管理员账号');
+        }
+        accounts.users.splice(index, 1);
+      });
+      for (const [token, session] of sessions) {
+        if (session.userId === userId) sessions.delete(token);
+      }
+      sendJson(res, 200, { deleted: true });
+      return;
+    }
+  }
+  sendJson(res, 404, { error: '未知的管理员接口' });
+}
+
+function validateUsername(value) {
+  const username = String(value || '').trim();
+  if (!/^[\w.-]{3,32}$/.test(username)) {
+    throw httpError(400, '账号名需为 3-32 位字母、数字、下划线、点或短横线');
+  }
+  return username;
+}
+
+function validateNewPassword(value) {
+  const password = String(value || '');
+  if (password.length < 8 || password.length > 128) {
+    throw httpError(400, '密码长度需为 8-128 位');
+  }
+  return password;
+}
+
+function validateQuota(value) {
+  const quota = Number(value);
+  if (!Number.isInteger(quota) || quota < 0 || quota > 1000000) {
+    throw httpError(400, '额度需为 0-1000000 的整数');
+  }
+  return quota;
+}
+
+function httpError(status, message) {
+  const error = new Error(message);
+  error.status = status;
+  return error;
 }
 
 async function loadEnv(filePath) {
@@ -240,6 +533,16 @@ async function serveStatic(req, res) {
   }
 }
 
+async function serveFile(filePath, res) {
+  const data = await fs.readFile(filePath);
+  const ext = path.extname(filePath).toLowerCase();
+  res.writeHead(200, {
+    'Content-Type': mimeTypes[ext] || 'application/octet-stream',
+    'Cache-Control': 'no-store',
+  });
+  res.end(data);
+}
+
 async function proxyApi(req, res) {
   const url = new URL(req.url || '/', `http://localhost:${PORT}`);
   const target = mapApiUrl(url);
@@ -253,24 +556,162 @@ async function proxyApi(req, res) {
   }
 
   const body = await readBody(req);
+  const isGenerationRequest = req.method === 'POST'
+    && (url.pathname === '/api/video/tasks' || url.pathname === '/api/video/tasks/generate');
+  let reservation = null;
+  if (isGenerationRequest) {
+    const requestSummary = safeRequestSummary(body);
+    const chargeAmount = validateGenerationDuration(requestSummary.duration);
+    reservation = await reserveGenerationQuota(req.auth.user.id, {
+      endpoint: url.pathname,
+      request: requestSummary,
+      amount: chargeAmount,
+    });
+    if (!reservation.allowed) {
+      sendJson(res, 402, {
+        error: `个人额度不足：本次 ${chargeAmount} 秒视频需要 ${chargeAmount} 点额度`,
+        code: 'QUOTA_EXHAUSTED',
+        required: chargeAmount,
+        quota: reservation.user.quota,
+        used: reservation.user.used,
+        remaining: reservation.user.remaining,
+      });
+      return;
+    }
+  }
   const headers = {
     'Authorization': `Bearer ${API_TOKEN}`,
     'Accept': 'application/json',
   };
   if (body.length > 0) headers['Content-Type'] = req.headers['content-type'] || 'application/json';
 
-  const upstream = await fetch(target, {
-    method: req.method,
-    headers,
-    body: body.length > 0 ? body : undefined,
-  });
+  try {
+    const upstream = await fetch(target, {
+      method: req.method,
+      headers,
+      body: body.length > 0 ? body : undefined,
+    });
+    const text = await upstream.text();
+    if (reservation && (!upstream.ok || isFailedTaskResponse(text))) {
+      const reason = !upstream.ok ? `上游返回 HTTP ${upstream.status}` : '视频生成失败';
+      await refundGenerationQuota(req.auth.user.id, reservation.usageId, reason);
+    } else if (reservation) {
+      await finalizeGenerationUsage(req.auth.user.id, reservation.usageId, text);
+    } else if (req.method === 'GET' && url.pathname.startsWith('/api/video/tasks/') && isFailedTaskResponse(text)) {
+      await refundFailedTaskQuota(req.auth.user.id, readTaskId(text) || decodeURIComponent(url.pathname.slice('/api/video/tasks/'.length)));
+    }
+    res.writeHead(upstream.status, {
+      'Content-Type': upstream.headers.get('content-type') || 'application/json; charset=utf-8',
+      'Cache-Control': 'no-store',
+    });
+    res.end(text);
+  } catch (error) {
+    if (reservation) {
+      await refundGenerationQuota(req.auth.user.id, reservation.usageId, '上游请求未完成');
+    }
+    throw error;
+  }
+}
 
-  const text = await upstream.text();
-  res.writeHead(upstream.status, {
-    'Content-Type': upstream.headers.get('content-type') || 'application/json; charset=utf-8',
-    'Cache-Control': 'no-store',
+async function reserveGenerationQuota(userId, context) {
+  return mutateAccounts(accounts => {
+    const user = accounts.users.find(item => item.id === userId && item.enabled !== false);
+    if (!user) throw httpError(401, '账号已失效，请重新登录');
+    const amount = context.amount;
+    if (getRemainingQuota(user) < amount) {
+      return { allowed: false, user: publicUser(user) };
+    }
+    const usageId = crypto.randomUUID();
+    user.used += amount;
+    user.usage = Array.isArray(user.usage) ? user.usage : [];
+    user.usage.push({
+      id: usageId,
+      type: 'video_generation',
+      amount,
+      status: 'reserved',
+      endpoint: context.endpoint,
+      request: context.request,
+      createdAt: new Date().toISOString(),
+    });
+    user.usage = user.usage.slice(-500);
+    return { allowed: true, usageId, user: publicUser(user) };
   });
-  res.end(text);
+}
+
+async function finalizeGenerationUsage(userId, usageId, responseText) {
+  await mutateAccounts(accounts => {
+    const user = accounts.users.find(item => item.id === userId);
+    const usage = user?.usage?.find(item => item.id === usageId);
+    if (!usage) return;
+    usage.status = 'charged';
+    usage.taskId = readTaskId(responseText);
+    usage.completedAt = new Date().toISOString();
+  });
+}
+
+async function refundGenerationQuota(userId, usageId, reason) {
+  await mutateAccounts(accounts => {
+    const user = accounts.users.find(item => item.id === userId);
+    const usage = user?.usage?.find(item => item.id === usageId);
+    if (!user || !usage || usage.status === 'refunded') return;
+    user.used = Math.max(0, Number(user.used || 0) - Number(usage.amount || 0));
+    usage.status = 'refunded';
+    usage.reason = reason;
+    usage.completedAt = new Date().toISOString();
+  });
+}
+
+function safeRequestSummary(body) {
+  try {
+    const payload = JSON.parse(body.toString('utf8') || '{}');
+    return {
+      model: payload.model || '',
+      duration: payload.duration || null,
+      resolution: payload.resolution || '',
+      ratio: payload.ratio || '',
+    };
+  } catch {
+    return {};
+  }
+}
+
+function validateGenerationDuration(value) {
+  const duration = Number(value);
+  if (!Number.isInteger(duration) || duration < 1 || duration > 3600) {
+    throw httpError(400, '视频时长无效，无法计算额度');
+  }
+  return duration;
+}
+
+function readTaskId(text) {
+  try {
+    const payload = JSON.parse(text || '{}');
+    return payload.id || payload.task_id || payload.detail?.task_id || null;
+  } catch {
+    return null;
+  }
+}
+
+function isFailedTaskResponse(text) {
+  try {
+    const payload = JSON.parse(text || '{}');
+    return ['failed', 'error', 'cancelled', 'canceled'].includes(String(payload.status || '').toLowerCase());
+  } catch {
+    return false;
+  }
+}
+
+async function refundFailedTaskQuota(userId, taskId) {
+  if (!taskId) return;
+  await mutateAccounts(accounts => {
+    const user = accounts.users.find(item => item.id === userId);
+    const usage = user?.usage?.find(item => item.taskId === taskId && item.status === 'charged');
+    if (!user || !usage) return;
+    user.used = Math.max(0, Number(user.used || 0) - Number(usage.amount || 0));
+    usage.status = 'refunded';
+    usage.reason = '视频任务失败';
+    usage.completedAt = new Date().toISOString();
+  });
 }
 
 async function downloadVideo(req, res) {

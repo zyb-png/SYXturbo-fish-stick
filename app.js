@@ -17,12 +17,38 @@ const state = {
   activeResourceGroupId: localStorage.getItem('manfei_active_resource_group') || null,
   filePickerTarget: 'library',
   soundEnabled: localStorage.getItem('manfei_completion_sound') !== 'off',
+  theme: localStorage.getItem('manfei_ui_theme') || 'gold',
   shownTaskErrors: new Set(),
+  account: null,
 };
 
 const $ = (id) => document.getElementById(id);
 let actionModalResolve = null;
 let completionAudioContext = null;
+let guideStep = 0;
+
+const guideSteps = [
+  {
+    icon: '✓',
+    title: '先完成人脸验证',
+    description: '在左侧“人脸验证”中新建分组并上传人物图片。选择当前分组后，素材会保存在浏览器中，方便后续重复使用。',
+  },
+  {
+    icon: '@',
+    title: '添加素材并编写提示词',
+    description: '把图片、视频或音频拖入“本次参考素材”，在提示词中输入 @ 可以快速引用已经添加的素材。',
+  },
+  {
+    icon: '▶',
+    title: '设置参数并生成视频',
+    description: '选择模型、分辨率、画面比例与时长。确认无误后点击“提交生成任务”，同步等待可按需勾选。',
+  },
+  {
+    icon: '☷',
+    title: '查看任务结果',
+    description: '右侧可切换任务、日志和历史记录。任务完成后可以预览、下载视频，也可以查看失败原因。',
+  },
+];
 
 function createId() {
   if (globalThis.crypto?.randomUUID) {
@@ -156,7 +182,10 @@ document.addEventListener('DOMContentLoaded', async () => {
   renderPromptPresets();
   syncResolution();
   updateSoundToggle();
-  addLog('info', '页面已就绪', '资源库仅保存在当前浏览器');
+  applyTheme(state.theme);
+  await refreshAccountSummary();
+  addLog('info', '页面已就绪', '人脸验证素材仅保存在当前浏览器');
+  showGuideAfterLogin();
 });
 
 function bindEvents() {
@@ -172,6 +201,26 @@ function bindEvents() {
   $('cancelBtn').addEventListener('click', cancelTask);
   $('balanceBtn').addEventListener('click', getBalance);
   $('usageBtn').addEventListener('click', getUsage);
+  $('guideBtn').addEventListener('click', () => openGuide(0));
+  $('guideModalBackdrop').addEventListener('click', closeGuide);
+  $('closeGuideBtn').addEventListener('click', closeGuide);
+  $('guideSkipBtn').addEventListener('click', closeGuide);
+  $('guidePrevBtn').addEventListener('click', () => setGuideStep(guideStep - 1));
+  $('guideNextBtn').addEventListener('click', () => {
+    if (guideStep === guideSteps.length - 1) {
+      closeGuide();
+      return;
+    }
+    setGuideStep(guideStep + 1);
+  });
+  $('themeSettingsBtn').addEventListener('click', openThemeSettings);
+  $('themeModalBackdrop').addEventListener('click', closeThemeSettings);
+  $('closeThemeModalBtn').addEventListener('click', closeThemeSettings);
+  document.querySelectorAll('[data-theme-option]').forEach(button => {
+    button.addEventListener('click', () => {
+      applyTheme(button.dataset.themeOption);
+    });
+  });
   $('soundToggleBtn').addEventListener('click', toggleCompletionSound);
   $('uploadAssetBtn').addEventListener('click', uploadAsset);
   $('queryAssetBtn').addEventListener('click', () => queryAsset($('queryAssetId').value.trim()));
@@ -213,12 +262,96 @@ function bindEvents() {
     if (event.key !== 'Escape') return;
     if (!$('actionModal').hidden) {
       closeActionModal(null);
+    } else if (!$('guideModal').hidden) {
+      closeGuide();
+    } else if (!$('themeModal').hidden) {
+      closeThemeSettings();
     } else if (!$('previewModal').hidden) {
       closeVideoPreview();
     }
   });
   document.addEventListener('pointerdown', prepareCompletionAudio, { once: true, capture: true });
   document.addEventListener('keydown', prepareCompletionAudio, { once: true, capture: true });
+}
+
+function showGuideAfterLogin() {
+  const url = new URL(window.location.href);
+  const justLoggedIn = url.searchParams.get('welcome') === '1';
+  const hasSeenGuide = localStorage.getItem('song_yuxi_guide_seen') === '1';
+  if (justLoggedIn) {
+    url.searchParams.delete('welcome');
+    history.replaceState(null, '', `${url.pathname}${url.search}${url.hash}`);
+  }
+  if (justLoggedIn || !hasSeenGuide) {
+    requestAnimationFrame(() => openGuide(0));
+  }
+}
+
+function openGuide(step = 0) {
+  guideStep = Math.max(0, Math.min(step, guideSteps.length - 1));
+  $('guideModal').hidden = false;
+  document.body.classList.add('preview-open');
+  renderGuideStep();
+}
+
+function closeGuide() {
+  $('guideModal').hidden = true;
+  localStorage.setItem('song_yuxi_guide_seen', '1');
+  if ($('actionModal').hidden && $('themeModal').hidden && $('previewModal').hidden) {
+    document.body.classList.remove('preview-open');
+  }
+  $('guideBtn').focus();
+}
+
+function setGuideStep(step) {
+  guideStep = Math.max(0, Math.min(step, guideSteps.length - 1));
+  renderGuideStep();
+}
+
+function renderGuideStep() {
+  const step = guideSteps[guideStep];
+  $('guideProgress').textContent = `${guideStep + 1} / ${guideSteps.length}`;
+  $('guideTitle').textContent = step.title;
+  $('guideIcon').textContent = step.icon;
+  $('guideDescription').textContent = step.description;
+  $('guidePrevBtn').disabled = guideStep === 0;
+  $('guideNextBtn').textContent = guideStep === guideSteps.length - 1 ? '开始使用' : '下一步';
+  $('guideDots').innerHTML = guideSteps.map((_, index) => (
+    `<span class="${index === guideStep ? 'active' : ''}"></span>`
+  )).join('');
+  requestAnimationFrame(() => $('guideNextBtn').focus());
+}
+
+function openThemeSettings() {
+  $('themeModal').hidden = false;
+  document.body.classList.add('preview-open');
+  updateThemeSelection();
+  requestAnimationFrame(() => {
+    document.querySelector(`[data-theme-option="${CSS.escape(state.theme)}"]`)?.focus();
+  });
+}
+
+function closeThemeSettings() {
+  $('themeModal').hidden = true;
+  if ($('actionModal').hidden && $('previewModal').hidden) {
+    document.body.classList.remove('preview-open');
+  }
+}
+
+function applyTheme(theme) {
+  const allowedThemes = ['gold', 'orange', 'pink', 'gray', 'purple', 'cyan', 'blue'];
+  state.theme = allowedThemes.includes(theme) ? theme : 'gold';
+  document.documentElement.dataset.theme = state.theme;
+  localStorage.setItem('manfei_ui_theme', state.theme);
+  updateThemeSelection();
+}
+
+function updateThemeSelection() {
+  document.querySelectorAll('[data-theme-option]').forEach(button => {
+    const selected = button.dataset.themeOption === state.theme;
+    button.classList.toggle('selected', selected);
+    button.setAttribute('aria-pressed', String(selected));
+  });
 }
 
 async function saveCurrentPromptPreset() {
@@ -279,6 +412,7 @@ function setupPromptMentions() {
     scheduleMentionMenuUpdate();
   });
   prompt.addEventListener('click', updateMentionMenu);
+  prompt.addEventListener('scroll', positionMentionMenu);
   prompt.addEventListener('keydown', event => {
     handleMentionKeys(event);
   });
@@ -295,6 +429,7 @@ function setupPromptMentions() {
   prompt.addEventListener('blur', () => {
     window.setTimeout(hideMentionMenu, 140);
   });
+  window.addEventListener('resize', positionMentionMenu);
 }
 
 let mentionUpdateFrame = 0;
@@ -411,6 +546,7 @@ function renderMentionMenu() {
   if (state.mentionResults.length === 0) {
     menu.innerHTML = '<div class="mention-empty">暂无本次参考素材，请先拖入或从资源库添加</div>';
     menu.hidden = false;
+    positionMentionMenu();
     return;
   }
 
@@ -433,6 +569,41 @@ function renderMentionMenu() {
     menu.appendChild(option);
   });
   menu.hidden = false;
+  positionMentionMenu();
+}
+
+function positionMentionMenu() {
+  const menu = $('mentionMenu');
+  const prompt = $('prompt');
+  const wrap = menu?.parentElement;
+  const range = state.mentionRange?.replaceRange;
+  if (!menu || menu.hidden || !prompt || !wrap || !range) return;
+
+  const rects = [...range.getClientRects()];
+  const anchor = rects.at(-1) || range.getBoundingClientRect();
+  const promptRect = prompt.getBoundingClientRect();
+  const wrapRect = wrap.getBoundingClientRect();
+  if (!anchor || (!anchor.width && !anchor.height)) return;
+
+  const gap = 6;
+  const edge = 8;
+  const menuWidth = Math.min(250, Math.max(180, promptRect.width - edge * 2));
+  menu.style.width = `${menuWidth}px`;
+
+  let left = anchor.right - wrapRect.left;
+  left = Math.min(left, promptRect.right - wrapRect.left - menuWidth - edge);
+  left = Math.max(promptRect.left - wrapRect.left + edge, left);
+
+  const menuHeight = menu.offsetHeight;
+  const belowTop = anchor.bottom - wrapRect.top + gap;
+  const aboveTop = anchor.top - wrapRect.top - menuHeight - gap;
+  const fitsBelow = anchor.bottom + gap + menuHeight <= Math.min(window.innerHeight - edge, promptRect.bottom);
+  const top = fitsBelow
+    ? belowTop
+    : Math.max(promptRect.top - wrapRect.top + edge, aboveTop);
+
+  menu.style.left = `${Math.round(left)}px`;
+  menu.style.top = `${Math.round(top)}px`;
 }
 
 function handleMentionKeys(event) {
@@ -858,6 +1029,7 @@ async function submitTask() {
       method: 'POST',
       body: JSON.stringify(body),
     });
+    await refreshAccountSummary();
 
     showJson(result);
     const taskId = result.id || result.task_id || result.detail?.task_id;
@@ -887,6 +1059,7 @@ async function submitTask() {
       setStatus('任务已提交，但响应中没有任务 ID', 'error');
     }
   } catch (error) {
+    await refreshAccountSummary();
     setStatus(error.message, 'error');
     showJson(error.data || { error: error.message });
     addLog('error', '任务提交失败', error.message);
@@ -896,7 +1069,7 @@ async function submitTask() {
       httpStatus: error.status,
     });
   } finally {
-    btn.disabled = false;
+    btn.disabled = state.account ? state.account.remaining <= 0 : false;
   }
 }
 
@@ -1056,9 +1229,11 @@ async function queryAsset(assetId) {
 async function getBalance() {
   try {
     const result = await apiFetch('/api/me');
+    state.account = result;
+    updateAccountBadge();
     showJson(result);
-    setStatus(`余额：${result.balance_rmb ?? '-'} 元`, 'success');
-    addLog('info', '余额查询', `${result.balance_rmb ?? '-'} 元`);
+    setStatus(`个人额度：剩余 ${result.remaining} / ${result.quota} 秒`, 'success');
+    addLog('info', '个人额度查询', `已使用 ${result.used} 秒，剩余 ${result.remaining} 秒`);
   } catch (error) {
     setStatus(error.message, 'error');
     addLog('error', '余额查询失败', error.message);
@@ -1069,12 +1244,29 @@ async function getUsage() {
   try {
     const result = await apiFetch('/api/usage?limit=20&charged_only=true');
     showJson(result);
-    setStatus(`用量记录：${result.items?.length ?? 0} 条`, 'success');
-    addLog('info', '用量查询', `${result.items?.length ?? 0} 条记录`);
+    setStatus(`已使用 ${result.used} 秒额度，剩余 ${result.remaining} 秒`, 'success');
+    addLog('info', '个人使用记录', `${result.items?.length ?? 0} 条记录`);
   } catch (error) {
     setStatus(error.message, 'error');
     addLog('error', '用量查询失败', error.message);
   }
+}
+
+async function refreshAccountSummary() {
+  try {
+    state.account = await apiFetch('/api/session');
+    updateAccountBadge();
+  } catch (error) {
+    $('accountBadge').textContent = '账号状态异常';
+  }
+}
+
+function updateAccountBadge() {
+  if (!state.account) return;
+  $('accountBadge').textContent = `${state.account.username} · 剩余 ${state.account.remaining} 秒`;
+  $('adminLink').hidden = state.account.role !== 'admin';
+  $('submitBtn').disabled = state.account.remaining <= 0;
+  $('submitBtn').title = state.account.remaining <= 0 ? '个人额度已用完，请联系管理员' : '';
 }
 
 async function apiFetch(url, options = {}) {
@@ -1113,30 +1305,56 @@ function getVideoErrorSummary(payload, context = {}) {
 
 function collectVideoErrorDetails(payload) {
   const source = payload && typeof payload === 'object' ? payload : { message: payload };
-  const candidates = [source, source.detail, source.error, source.data, source.result]
-    .filter(value => value && typeof value === 'object');
+  const candidates = collectErrorObjects(source);
   const read = (...keys) => {
     for (const candidate of candidates) {
       for (const key of keys) {
-        const value = candidate[key];
-        if (typeof value === 'string' && value.trim()) return value.trim();
-        if (typeof value === 'number') return String(value);
+        const value = formatErrorValue(candidate[key]);
+        if (value) return value;
       }
     }
     return '';
   };
-  const stringError = typeof source.error === 'string' ? source.error.trim() : '';
-  const stringDetail = typeof source.detail === 'string' ? source.detail.trim() : '';
 
   return {
     message: read('message', 'error_message', 'msg', 'description')
-      || stringError
-      || stringDetail,
+      || formatErrorValue(source.error)
+      || formatErrorValue(source.detail),
     reason: read('fail_reason', 'failure_reason', 'reason', 'error_reason'),
     code: read('error_code', 'code', 'status_code'),
     requestId: read('request_id', 'requestId', 'trace_id', 'traceId'),
     stage: read('stage', 'failed_stage', 'failure_stage'),
   };
+}
+
+function collectErrorObjects(value, seen = new Set(), result = []) {
+  if (!value || typeof value !== 'object' || seen.has(value)) return result;
+  seen.add(value);
+  result.push(value);
+  ['detail', 'error', 'data', 'result', 'cause'].forEach(key => {
+    collectErrorObjects(value[key], seen, result);
+  });
+  return result;
+}
+
+function formatErrorValue(value) {
+  if (typeof value === 'string') return value.trim();
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  if (Array.isArray(value)) {
+    return value.map(formatErrorValue).filter(Boolean).join('；');
+  }
+  if (!value || typeof value !== 'object') return '';
+
+  for (const key of ['message', 'error_message', 'msg', 'description', 'reason', 'detail']) {
+    const nested = formatErrorValue(value[key]);
+    if (nested) return nested;
+  }
+
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return '服务返回了无法解析的错误信息';
+  }
 }
 
 function getStatusFallback(status = '') {
@@ -1190,7 +1408,7 @@ function showJson(value) {
 }
 
 function setStatus(message, type = 'idle') {
-  $('statusLine').textContent = message;
+  $('statusLine').textContent = formatErrorValue(message) || '未知状态';
   $('statusLine').className = `status ${type}`;
 }
 
@@ -1607,7 +1825,7 @@ function triggerSubmitExperience() {
   button.classList.remove('is-launching');
   void button.offsetWidth;
   button.classList.add('is-launching');
-  setTimeout(() => button.classList.remove('is-launching'), 1000);
+  setTimeout(() => button.classList.remove('is-launching'), 1700);
   playSubmitSound();
 }
 
@@ -1775,11 +1993,14 @@ function renderResources() {
     const groupEl = document.createElement('div');
     groupEl.className = `resource-group${isExpanded ? ' expanded' : ''}${isActive ? ' active' : ''}`;
     groupEl.innerHTML = `
-      <button class="resource-head" type="button" aria-expanded="${isExpanded}">
-        <span class="group-chevron">›</span>
-        <strong>${escapeHtml(group.name)}</strong>
-        <span class="resource-count">${group.items.length}</span>
-      </button>
+      <div class="resource-group-header">
+        <button class="resource-head" type="button" aria-expanded="${isExpanded}">
+          <span class="group-chevron">›</span>
+          <strong>${escapeHtml(group.name)}</strong>
+          <span class="resource-count">${group.items.length}</span>
+        </button>
+        <button class="delete-resource-group" type="button" title="删除资源组" aria-label="删除资源组「${escapeHtml(group.name)}」">⌫</button>
+      </div>
       <div class="resource-items" ${isExpanded ? '' : 'hidden'}></div>
     `;
     const itemsEl = groupEl.querySelector('.resource-items');
@@ -1787,6 +2008,10 @@ function renderResources() {
       setActiveResourceGroup(group.id);
       state.expandedResourceGroupId = isExpanded ? null : group.id;
       renderResources();
+    });
+    groupEl.querySelector('.delete-resource-group').addEventListener('click', event => {
+      event.stopPropagation();
+      removeResourceGroup(group.id);
     });
     if (group.items.length === 0) {
       itemsEl.className = 'resource-items empty';
@@ -1835,13 +2060,10 @@ async function removeLocalResource(groupId, itemId, itemName) {
   if (!group) return;
 
   const item = group.items.find(resource => resource.id === itemId);
+  const linkedAssets = state.assets.filter(asset => asset.resourceId === itemId);
+  linkedAssets.forEach(removePromptMention);
   group.items = group.items.filter(resource => resource.id !== itemId);
   state.assets = state.assets.filter(asset => asset.resourceId !== itemId);
-
-  if (item) {
-    const linkedAsset = state.assets.find(asset => asset.resourceId === itemId);
-    if (linkedAsset) removePromptMention(linkedAsset);
-  }
 
   saveResources();
   renderResources();
@@ -1849,6 +2071,35 @@ async function removeLocalResource(groupId, itemId, itemName) {
   hideMentionMenu();
   setStatus(`已从本地资源组移除：${itemName}`, 'success');
   addLog('info', `移除本地资源：${itemName}`, itemId);
+}
+
+async function removeResourceGroup(groupId) {
+  const group = state.resources.find(resourceGroup => resourceGroup.id === groupId);
+  if (!group) return;
+  const itemCount = group.items?.length || 0;
+  const warning = itemCount
+    ? `删除资源组「${group.name}」及其中 ${itemCount} 个本地资源？`
+    : `删除空资源组「${group.name}」？`;
+  if (!await requestConfirmation(`${warning}\n远端 asset 和 TOS 文件不会被删除。`)) return;
+
+  const resourceIds = new Set((group.items || []).map(item => item.id).filter(Boolean));
+  state.assets
+    .filter(asset => resourceIds.has(asset.resourceId))
+    .forEach(removePromptMention);
+  state.assets = state.assets.filter(asset => !resourceIds.has(asset.resourceId));
+  state.resources = state.resources.filter(resourceGroup => resourceGroup.id !== groupId);
+
+  if (state.expandedResourceGroupId === groupId) state.expandedResourceGroupId = null;
+  if (state.activeResourceGroupId === groupId) {
+    setActiveResourceGroup(state.resources[0]?.id || null);
+  }
+
+  saveResources();
+  renderResources();
+  renderAssets();
+  hideMentionMenu();
+  setStatus(`已删除资源组：${group.name}`, 'success');
+  addLog('info', `删除资源组：${group.name}`, `移除 ${itemCount} 个本地资源`);
 }
 
 function assetTypeToKind(assetType) {

@@ -3,20 +3,21 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>漫飞 Seedance · 错误弹窗版</title>
+  <title>宋钰汐视频生成</title>
   <script>
     if (location.protocol === 'file:') {
       location.replace('http://localhost:4178/');
     }
+    document.documentElement.dataset.theme = localStorage.getItem('manfei_ui_theme') || 'gold';
   </script>
-  <link rel="stylesheet" href="./styles.css?v=20260611-error-dialog-1">
+  <link rel="stylesheet" href="./styles.css?v=20260613-checkbox-2">
 </head>
 <body>
   <main class="app">
     <aside class="side-panel left-panel">
       <div class="side-header">
         <div class="library-title">
-          <h2>资源库</h2>
+          <h2>人脸验证</h2>
           <span id="resourceCount">0</span>
         </div>
         <div class="library-actions">
@@ -57,16 +58,46 @@
     <section class="workspace">
       <header class="topbar">
         <div class="brand">
-          <span class="brand-mark">MF</span>
+          <svg class="brand-mark" viewBox="0 0 100 100" aria-hidden="true">
+            <defs>
+              <filter id="brandLogoColor" color-interpolation-filters="sRGB">
+                <feColorMatrix
+                  in="SourceGraphic"
+                  type="matrix"
+                  values="0 0 0 0 0
+                          0 0 0 0 0
+                          0 0 0 0 0
+                          -0.2126 -0.7152 -0.0722 0 1"
+                  result="logoAlpha"
+                />
+                <feComposite in="logoAlpha" in2="SourceAlpha" operator="in" result="clippedLogoAlpha" />
+                <feFlood flood-color="currentColor" result="logoColor" />
+                <feComposite in="logoColor" in2="clippedLogoAlpha" operator="in" />
+              </filter>
+            </defs>
+            <image
+              href="./assets/song-yuxi-logo.png?v=20260613-logo-3"
+              x="-36"
+              y="-36"
+              width="172"
+              height="172"
+              filter="url(#brandLogoColor)"
+            />
+          </svg>
           <div>
-            <h1>漫飞视频生成</h1>
-            <p><span class="version-badge">错误弹窗版</span> manfei-new · 端口 4178</p>
+            <h1>宋钰汐视频生成</h1>
+            <p>Seedance2.0和Seedance2.1满血版，支持真人人脸。</p>
           </div>
         </div>
         <div class="top-actions">
+          <span id="accountBadge" class="account-badge">加载账号…</span>
+          <a id="adminLink" class="button-link" href="/admin" hidden>账号管理</a>
+          <button id="guideBtn" class="icon-button" type="button" title="使用指导" aria-label="打开使用指导">?</button>
+          <button id="themeSettingsBtn" class="icon-button" type="button" title="界面设置" aria-label="界面设置">◐</button>
           <button id="soundToggleBtn" class="icon-button sound-toggle" type="button" title="关闭完成提示音" aria-label="关闭完成提示音" aria-pressed="true">♪</button>
-          <button id="balanceBtn" type="button">查询余额</button>
-          <button id="usageBtn" type="button">用量</button>
+          <button id="balanceBtn" type="button">我的额度</button>
+          <button id="usageBtn" type="button">使用记录</button>
+          <a class="button-link" href="/logout">退出</a>
         </div>
       </header>
 
@@ -242,6 +273,81 @@
     </form>
   </div>
 
-  <script src="./app.js?v=20260611-error-dialog-1"></script>
+  <div id="themeModal" class="theme-modal" hidden>
+    <button id="themeModalBackdrop" class="theme-modal-backdrop" type="button" aria-label="关闭界面设置"></button>
+    <section class="theme-dialog" role="dialog" aria-modal="true" aria-labelledby="themeModalTitle">
+      <div class="theme-dialog-header">
+        <div>
+          <h2 id="themeModalTitle">界面设置</h2>
+          <p>选择喜欢的界面配色，设置会自动保存。</p>
+        </div>
+        <button id="closeThemeModalBtn" class="icon-button" type="button" aria-label="关闭界面设置">×</button>
+      </div>
+      <div class="theme-options">
+        <button class="theme-option" type="button" data-theme-option="gold">
+          <span class="theme-preview theme-preview-gold"></span>
+          <strong>金黑</strong>
+          <small>当前经典深色</small>
+        </button>
+        <button class="theme-option" type="button" data-theme-option="orange">
+          <span class="theme-preview theme-preview-orange"></span>
+          <strong>活力橙</strong>
+          <small>明亮温暖</small>
+        </button>
+        <button class="theme-option" type="button" data-theme-option="pink">
+          <span class="theme-preview theme-preview-pink"></span>
+          <strong>樱花粉</strong>
+          <small>柔和梦幻</small>
+        </button>
+        <button class="theme-option" type="button" data-theme-option="gray">
+          <span class="theme-preview theme-preview-gray"></span>
+          <strong>极简灰</strong>
+          <small>克制清爽</small>
+        </button>
+        <button class="theme-option" type="button" data-theme-option="purple">
+          <span class="theme-preview theme-preview-purple"></span>
+          <strong>梦幻紫</strong>
+          <small>灵感创作</small>
+        </button>
+        <button class="theme-option" type="button" data-theme-option="cyan">
+          <span class="theme-preview theme-preview-cyan"></span>
+          <strong>清透青</strong>
+          <small>通透轻盈</small>
+        </button>
+        <button class="theme-option" type="button" data-theme-option="blue">
+          <span class="theme-preview theme-preview-blue"></span>
+          <strong>经典蓝</strong>
+          <small>清晰专注</small>
+        </button>
+      </div>
+    </section>
+  </div>
+
+  <div id="guideModal" class="guide-modal" hidden>
+    <button id="guideModalBackdrop" class="guide-modal-backdrop" type="button" aria-label="跳过使用指导"></button>
+    <section class="guide-dialog" role="dialog" aria-modal="true" aria-labelledby="guideTitle">
+      <div class="guide-dialog-header">
+        <div>
+          <span id="guideProgress" class="guide-progress">1 / 4</span>
+          <h2 id="guideTitle">欢迎使用宋钰汐视频生成</h2>
+        </div>
+        <button id="closeGuideBtn" class="icon-button" type="button" aria-label="关闭使用指导">×</button>
+      </div>
+      <div class="guide-visual" aria-hidden="true">
+        <span id="guideIcon">✓</span>
+      </div>
+      <p id="guideDescription" class="guide-description"></p>
+      <div id="guideDots" class="guide-dots" aria-hidden="true"></div>
+      <div class="guide-actions">
+        <button id="guideSkipBtn" type="button">跳过</button>
+        <div class="guide-navigation">
+          <button id="guidePrevBtn" type="button">上一步</button>
+          <button id="guideNextBtn" class="primary" type="button">下一步</button>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <script src="./app.js?v=20260614-seconds-quota-1"></script>
 </body>
 </html>
