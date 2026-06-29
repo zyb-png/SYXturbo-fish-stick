@@ -8,6 +8,7 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { PasswordInput } from '@/components/password-input';
 
 interface AdminAccountRow {
   id: string;
@@ -257,9 +258,8 @@ export default function AdminAccountsPage() {
             <div className="space-y-3">
               <div className="space-y-2">
                 <Label htmlFor="admin-password">后台口令</Label>
-                <Input
+                <PasswordInput
                   id="admin-password"
-                  type="password"
                   value={adminPassword}
                   onChange={(event) => setAdminPassword(event.target.value)}
                   onKeyDown={(event) => {
@@ -308,7 +308,7 @@ export default function AdminAccountsPage() {
               </div>
               <div className="grid grid-cols-1 gap-3 md:grid-cols-6">
                 <Input placeholder="账号" value={newAccount.username} onChange={(event) => setNewAccount({ ...newAccount, username: event.target.value })} className="border-amber-400/25 bg-black/35" />
-                <Input type="password" placeholder="密码" value={newAccount.password} onChange={(event) => setNewAccount({ ...newAccount, password: event.target.value })} className="border-amber-400/25 bg-black/35" />
+                <PasswordInput placeholder="密码" value={newAccount.password} onChange={(event) => setNewAccount({ ...newAccount, password: event.target.value })} className="border-amber-400/25 bg-black/35" />
                 <Input placeholder="姓名/备注" value={newAccount.name} onChange={(event) => setNewAccount({ ...newAccount, name: event.target.value })} className="border-amber-400/25 bg-black/35" />
                 <Input placeholder="微信" value={newAccount.wechat} onChange={(event) => setNewAccount({ ...newAccount, wechat: event.target.value })} className="border-amber-400/25 bg-black/35" />
                 <Input type="number" min="0" placeholder="额外点数" value={newAccount.initialPoints} onChange={(event) => setNewAccount({ ...newAccount, initialPoints: event.target.value })} className="border-amber-400/25 bg-black/35" />
@@ -376,7 +376,7 @@ export default function AdminAccountsPage() {
                           </Button>
                         </div>
                         <div className="grid grid-cols-2 gap-2">
-                          <Input type="password" placeholder="新密码" value={draft.password} onChange={(event) => updateDraft(account.id, { password: event.target.value })} className="border-amber-400/25 bg-black/35" />
+                          <PasswordInput placeholder="新密码" value={draft.password} onChange={(event) => updateDraft(account.id, { password: event.target.value })} className="border-amber-400/25 bg-black/35" />
                           <Button className="bg-amber-500 text-black hover:bg-amber-400" onClick={() => void postAction({
                             action: 'updateProfile',
                             accountId: account.id,

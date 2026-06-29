@@ -74,6 +74,7 @@ import { CreationPointsWallet } from '@/components/creation-points-wallet';
 import { ImageLibrarySelector } from '@/components/image-library-selector';
 import { StorageMonitor } from '@/components/storage-monitor';
 import { WorkspaceModeSwitch } from '@/components/workspace-mode-switch';
+import { PasswordInput } from '@/components/password-input';
 import { usePersistentState, usePersistentStateManager, STORAGE_KEYS, TokenUsage, INITIAL_TOKEN_USAGE } from '@/hooks/usePersistentState';
 
 interface Chapter {
@@ -6071,9 +6072,8 @@ export default function StoryboardGenerator() {
                       <div className="font-medium">文本分析</div>
                       <div className="grid gap-2">
                         <Label htmlFor="llm-api-key">API Key</Label>
-                        <Input
+                        <PasswordInput
                           id="llm-api-key"
-                          type="password"
                           autoComplete="off"
                           value={appConnectionSettings.llm.apiKey}
                           onChange={(event) => updateAppConnectionSetting('llm', 'apiKey', event.target.value)}
@@ -6102,9 +6102,8 @@ export default function StoryboardGenerator() {
                       <div className="font-medium">图片生成 RunningHub</div>
                       <div className="grid gap-2">
                         <Label htmlFor="runninghub-api-key">API Key</Label>
-                        <Input
+                        <PasswordInput
                           id="runninghub-api-key"
-                          type="password"
                           autoComplete="off"
                           value={appConnectionSettings.runninghub.apiKey}
                           onChange={(event) => updateAppConnectionSetting('runninghub', 'apiKey', event.target.value)}
@@ -6125,9 +6124,8 @@ export default function StoryboardGenerator() {
                       <div className="font-medium">视频编辑 Seedance（保留）</div>
                       <div className="grid gap-2">
                         <Label htmlFor="seedance-api-key">API Key</Label>
-                        <Input
+                        <PasswordInput
                           id="seedance-api-key"
-                          type="password"
                           autoComplete="off"
                           value={appConnectionSettings.seedance.apiKey}
                           onChange={(event) => updateAppConnectionSetting('seedance', 'apiKey', event.target.value)}
@@ -6148,9 +6146,8 @@ export default function StoryboardGenerator() {
                       <div className="font-medium">视频生成 manfei</div>
                       <div className="grid gap-2">
                         <Label htmlFor="manfei-api-key">Token</Label>
-                        <Input
+                        <PasswordInput
                           id="manfei-api-key"
-                          type="password"
                           autoComplete="off"
                           value={appConnectionSettings.manfei.apiKey}
                           onChange={(event) => updateAppConnectionSetting('manfei', 'apiKey', event.target.value)}
@@ -6217,9 +6214,8 @@ export default function StoryboardGenerator() {
                       </div>
                       <div className="grid gap-2">
                         <Label htmlFor="asset-storage-access-key">AK</Label>
-                        <Input
+                        <PasswordInput
                           id="asset-storage-access-key"
-                          type="password"
                           autoComplete="off"
                           value={appConnectionSettings.assetStorage.accessKeyId}
                           onChange={(event) => updateAppConnectionSetting('assetStorage', 'accessKeyId', event.target.value)}
@@ -6227,9 +6223,8 @@ export default function StoryboardGenerator() {
                       </div>
                       <div className="grid gap-2">
                         <Label htmlFor="asset-storage-secret-key">SK</Label>
-                        <Input
+                        <PasswordInput
                           id="asset-storage-secret-key"
-                          type="password"
                           autoComplete="off"
                           value={appConnectionSettings.assetStorage.secretAccessKey}
                           onChange={(event) => updateAppConnectionSetting('assetStorage', 'secretAccessKey', event.target.value)}

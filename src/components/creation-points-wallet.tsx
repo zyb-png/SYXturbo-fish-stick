@@ -7,6 +7,7 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { PasswordInput } from '@/components/password-input';
 import {
   Dialog,
   DialogContent,
@@ -528,9 +529,8 @@ export function CreationPointsWallet() {
             </div>
             <div className="space-y-2">
               <Label htmlFor="wallet-login-password" className="text-amber-100/80">密码</Label>
-              <Input
+              <PasswordInput
                 id="wallet-login-password"
-                type="password"
                 value={loginForm.password}
                 onChange={(event) => setLoginForm((current) => ({ ...current, password: event.target.value }))}
                 onKeyDown={(event) => {
