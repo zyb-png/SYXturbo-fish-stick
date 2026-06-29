@@ -15,10 +15,6 @@ const APP_USERNAME = process.env.APP_USERNAME || env.APP_USERNAME || '';
 const APP_PASSWORD = process.env.APP_PASSWORD || env.APP_PASSWORD || '';
 const APP_STATE_FILE = process.env.APP_STATE_FILE || env.APP_STATE_FILE || path.join(__dirname, '.data', 'app-state.json');
 const ACCOUNTS_FILE = process.env.ACCOUNTS_FILE || env.ACCOUNTS_FILE || path.join(__dirname, '.data', 'accounts.json');
-const REGISTRATION_ENABLED = readBoolean(process.env.REGISTRATION_ENABLED || env.REGISTRATION_ENABLED, true);
-const REGISTER_INVITE_CODES = parseList(process.env.REGISTER_INVITE_CODES || env.REGISTER_INVITE_CODES || 'SYX2026');
-const REGISTER_SMS_CODE = String(process.env.REGISTER_SMS_CODE || env.REGISTER_SMS_CODE || '123456').trim();
-const REGISTER_DEFAULT_QUOTA = validateStartupQuota(process.env.REGISTER_DEFAULT_QUOTA || env.REGISTER_DEFAULT_QUOTA || 0);
 const PUBLIC_ACCESS = readBoolean(process.env.PUBLIC_ACCESS || env.PUBLIC_ACCESS, true);
 const PUBLIC_ACCOUNT_USERNAME = validateStartupUsername(process.env.PUBLIC_ACCOUNT_USERNAME || env.PUBLIC_ACCOUNT_USERNAME || 'public');
 const PUBLIC_ACCOUNT_QUOTA = validateStartupQuota(process.env.PUBLIC_ACCOUNT_QUOTA || env.PUBLIC_ACCOUNT_QUOTA || 1000000);
@@ -77,16 +73,8 @@ const server = http.createServer(async (req, res) => {
       serveLoginPage(res);
       return;
     }
-    if (requestUrl.pathname === '/register' && req.method === 'GET') {
-      serveRegisterPage(res);
-      return;
-    }
     if (requestUrl.pathname === '/login' && req.method === 'POST') {
       await handleLogin(req, res);
-      return;
-    }
-    if (requestUrl.pathname === '/register' && req.method === 'POST') {
-      await handleRegister(req, res);
       return;
     }
     if (requestUrl.pathname === '/logout') {
@@ -267,62 +255,9 @@ async function handleLogin(req, res) {
   serveLoginPage(res, true);
 }
 
-async function handleRegister(req, res) {
-  if (!REGISTRATION_ENABLED) {
-    serveRegisterPage(res, '注册暂未开放');
-    return;
-  }
-  const body = (await readBody(req)).toString('utf8');
-  const form = new URLSearchParams(body);
-  const phone = form.get('phone') || '';
-  const username = form.get('username') || '';
-  const password = form.get('password') || '';
-  const confirmPassword = form.get('confirmPassword') || '';
-  const smsCode = form.get('smsCode') || '';
-  const inviteCode = form.get('inviteCode') || '';
-
-  try {
-    const created = await mutateAccounts(accounts => {
-      const normalizedPhone = validatePhone(phone);
-      const normalizedUsername = validateUsername(username);
-      const normalizedPassword = validateNewPassword(password);
-      if (normalizedPassword !== confirmPassword) throw httpError(400, '两次输入的密码不一致');
-      validateRegisterSmsCode(smsCode);
-      validateInviteCode(inviteCode);
-      if (accounts.users.some(user => user.username.toLowerCase() === normalizedUsername.toLowerCase())) {
-        throw httpError(409, '用户名已存在');
-      }
-      if (accounts.users.some(user => String(user.phone || '') === normalizedPhone)) {
-        throw httpError(409, '手机号已注册');
-      }
-      const user = {
-        id: crypto.randomUUID(),
-        username: normalizedUsername,
-        phone: normalizedPhone,
-        password: hashPassword(normalizedPassword),
-        role: 'user',
-        quota: REGISTER_DEFAULT_QUOTA,
-        used: 0,
-        enabled: true,
-        usage: [],
-        createdAt: new Date().toISOString(),
-        lastLoginAt: null,
-      };
-      accounts.users.push(user);
-      return publicUser(user);
-    });
-    serveRegisterPage(res, '', `注册成功：${created.username}。请返回登录，运营方分配 API 费用额度后即可生成视频。`);
-  } catch (error) {
-    serveRegisterPage(res, error.message || '注册失败');
-  }
-}
-
 function serveLoginPage(res, hasError = false) {
   const error = hasError
     ? '<p class="error">用户名或密码错误</p>'
-    : '';
-  const registerLink = REGISTRATION_ENABLED
-    ? '<p class="login-extra">还没有账号？<a href="/register">立即注册</a></p>'
     : '';
   const html = `<!doctype html>
 <html lang="zh-CN">
@@ -341,7 +276,7 @@ function serveLoginPage(res, hasError = false) {
     .password-wrap{position:relative}.password-wrap input{padding-right:46px}.password-toggle{position:absolute;right:8px;top:50%;width:30px;height:30px;margin:0;transform:translateY(-50%);border:0;background:transparent;color:#d8b76a;font-size:16px;line-height:1;display:grid;place-items:center}
     .password-toggle:hover{color:#ffe09a;background:rgba(212,164,77,.12)}
     button{width:100%;height:44px;margin-top:20px;border:1px solid #e2af50;border-radius:6px;background:linear-gradient(135deg,#a96e22,#d7a44b,#79501c);color:#fff0c5;font-weight:800;cursor:pointer}
-    .error{margin:12px 0 0;color:#ef8c7b}.login-extra{margin:14px 0 0}.login-extra a{color:#ffe09a;text-decoration:none}
+    .error{margin:12px 0 0;color:#ef8c7b}
   </style>
 </head>
 <body>
@@ -355,68 +290,11 @@ function serveLoginPage(res, hasError = false) {
       <label>密码<span class="password-wrap"><input name="password" type="password" autocomplete="current-password" required><button class="password-toggle" type="button" aria-label="显示密码" title="显示密码">◉</button></span></label>
       <button type="submit">登录</button>
     </form>
-    ${registerLink}
   </main>
   <script>${passwordToggleScript()}</script>
 </body>
 </html>`;
   res.writeHead(hasError ? 401 : 200, {
-    'Content-Type': 'text/html; charset=utf-8',
-    'Cache-Control': 'no-store',
-  });
-  res.end(html);
-}
-
-function serveRegisterPage(res, errorMessage = '', successMessage = '') {
-  const status = successMessage
-    ? `<p class="success">${escapeHtml(successMessage)}</p>`
-    : errorMessage
-      ? `<p class="error">${escapeHtml(errorMessage)}</p>`
-      : '';
-  const disabled = REGISTRATION_ENABLED ? '' : 'disabled';
-  const html = `<!doctype html>
-<html lang="zh-CN">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>注册 · 宋钰汐视频生成</title>
-  <style>
-    *{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:#030504;color:#eee2c9;font-family:system-ui,-apple-system,sans-serif}
-    main{width:min(420px,calc(100vw - 32px));border:1px solid rgba(212,164,77,.55);border-radius:8px;background:#090c0a;padding:28px;box-shadow:0 20px 60px #000}
-    .mark{display:grid;place-items:center;width:48px;height:48px;margin-bottom:18px;color:#ffe09a;font-size:22px;font-weight:900}
-    h1{margin:0 0 6px;color:#efd18d;font-size:22px}p{margin:0 0 18px;color:#918875;font-size:12px}
-    label{display:grid;gap:7px;margin-top:13px;color:#a79b85;font-size:12px}
-    input{width:100%;height:42px;border:1px solid rgba(212,164,77,.4);border-radius:6px;background:#050806;color:#eee2c9;padding:0 12px;outline:none}
-    input:focus{border-color:#d4a44d;box-shadow:0 0 0 2px rgba(212,164,77,.12)}
-    .password-wrap{position:relative}.password-wrap input{padding-right:46px}.password-toggle{position:absolute;right:8px;top:50%;width:30px;height:30px;margin:0;transform:translateY(-50%);border:0;background:transparent;color:#d8b76a;font-size:16px;line-height:1;display:grid;place-items:center}
-    .password-toggle:hover{color:#ffe09a;background:rgba(212,164,77,.12)}
-    button{width:100%;height:44px;margin-top:20px;border:1px solid #e2af50;border-radius:6px;background:linear-gradient(135deg,#a96e22,#d7a44b,#79501c);color:#fff0c5;font-weight:800;cursor:pointer}
-    button:disabled{opacity:.5;cursor:not-allowed}.error{margin:12px 0 0;color:#ef8c7b}.success{margin:12px 0 0;color:#88d89f}
-    .extra{margin-top:14px}.extra a{color:#ffe09a;text-decoration:none}.hint{margin-top:8px;color:#756d5d}
-  </style>
-</head>
-<body>
-  <main>
-    <div class="mark">钰汐</div>
-    <h1>注册账号</h1>
-    <p>注册后默认 0 费用额度，运营方审核并分配 API 费用额度后即可生成视频。</p>
-    ${status}
-    <form method="post" action="/register">
-      <label>手机号<input name="phone" inputmode="tel" autocomplete="tel" pattern="1[3-9][0-9]{9}" required ${disabled}></label>
-      <label>用户名<input name="username" autocomplete="username" minlength="3" maxlength="32" required ${disabled}></label>
-      <label>密码<span class="password-wrap"><input name="password" type="password" autocomplete="new-password" minlength="8" maxlength="128" required ${disabled}><button class="password-toggle" type="button" aria-label="显示密码" title="显示密码" ${disabled}>◉</button></span></label>
-      <label>确认密码<span class="password-wrap"><input name="confirmPassword" type="password" autocomplete="new-password" minlength="8" maxlength="128" required ${disabled}><button class="password-toggle" type="button" aria-label="显示密码" title="显示密码" ${disabled}>◉</button></span></label>
-      <label>短信验证码<input name="smsCode" inputmode="numeric" autocomplete="one-time-code" required ${disabled}></label>
-      <label>邀请码<input name="inviteCode" autocomplete="off" required ${disabled}></label>
-      <p class="hint">当前短信验证码由运营方配置，之后可接入火山短信自动发送。</p>
-      <button type="submit" ${disabled}>注册</button>
-    </form>
-    <p class="extra"><a href="/login">返回登录</a></p>
-  </main>
-  <script>${passwordToggleScript()}</script>
-</body>
-</html>`;
-  res.writeHead(errorMessage ? 400 : 200, {
     'Content-Type': 'text/html; charset=utf-8',
     'Cache-Control': 'no-store',
   });
@@ -557,39 +435,6 @@ function validateStartupUsername(value) {
   } catch {
     return 'public';
   }
-}
-
-function validatePhone(value) {
-  const phone = String(value || '').trim();
-  if (!/^1[3-9]\d{9}$/.test(phone)) {
-    throw httpError(400, '请输入有效的中国大陆手机号');
-  }
-  return phone;
-}
-
-function validateInviteCode(value) {
-  const inviteCode = String(value || '').trim();
-  if (REGISTER_INVITE_CODES.length === 0) return inviteCode;
-  if (!REGISTER_INVITE_CODES.includes(inviteCode)) {
-    throw httpError(400, '邀请码无效');
-  }
-  return inviteCode;
-}
-
-function validateRegisterSmsCode(value) {
-  const smsCode = String(value || '').trim();
-  if (REGISTER_SMS_CODE && smsCode !== REGISTER_SMS_CODE) {
-    throw httpError(400, '短信验证码错误');
-  }
-  return smsCode;
-}
-
-function validateNewPassword(value) {
-  const password = String(value || '');
-  if (password.length < 8 || password.length > 128) {
-    throw httpError(400, '密码长度需为 8-128 位');
-  }
-  return password;
 }
 
 function validateQuota(value) {
