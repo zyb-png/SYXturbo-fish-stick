@@ -372,6 +372,8 @@ function serveLoginPage(res, hasError = false, adminLogin = false) {
     label{display:grid;gap:7px;margin-top:14px;color:#a79b85;font-size:12px}
     input{width:100%;height:42px;border:1px solid rgba(212,164,77,.4);border-radius:6px;background:#050806;color:#eee2c9;padding:0 12px;outline:none}
     input:focus{border-color:#d4a44d;box-shadow:0 0 0 2px rgba(212,164,77,.12)}
+    .password-wrap{position:relative}.password-wrap input{padding-right:46px}.password-toggle{position:absolute;right:8px;top:50%;width:30px;height:30px;margin:0;transform:translateY(-50%);border:0;background:transparent;color:#d8b76a;font-size:16px;line-height:1;display:grid;place-items:center}
+    .password-toggle:hover{color:#ffe09a;background:rgba(212,164,77,.12)}
     button{width:100%;height:44px;margin-top:20px;border:1px solid #e2af50;border-radius:6px;background:linear-gradient(135deg,#a96e22,#d7a44b,#79501c);color:#fff0c5;font-weight:800;cursor:pointer}
     .error{margin:12px 0 0;color:#ef8c7b}.login-extra{margin:14px 0 0}.login-extra a{color:#ffe09a;text-decoration:none}
   </style>
@@ -384,11 +386,12 @@ function serveLoginPage(res, hasError = false, adminLogin = false) {
     ${error}
     <form method="post" action="${adminLogin ? '/admin/login' : '/login'}">
       <label>用户名 / 手机号<input name="username" autocomplete="username" autofocus required></label>
-      <label>密码<input name="password" type="password" autocomplete="current-password" required></label>
+      <label>密码<span class="password-wrap"><input name="password" type="password" autocomplete="current-password" required><button class="password-toggle" type="button" aria-label="显示密码" title="显示密码">◉</button></span></label>
       <button type="submit">登录</button>
     </form>
     ${registerLink}
   </main>
+  <script>${passwordToggleScript()}</script>
 </body>
 </html>`;
   res.writeHead(hasError ? 401 : 200, {
@@ -419,6 +422,8 @@ function serveRegisterPage(res, errorMessage = '', successMessage = '') {
     label{display:grid;gap:7px;margin-top:13px;color:#a79b85;font-size:12px}
     input{width:100%;height:42px;border:1px solid rgba(212,164,77,.4);border-radius:6px;background:#050806;color:#eee2c9;padding:0 12px;outline:none}
     input:focus{border-color:#d4a44d;box-shadow:0 0 0 2px rgba(212,164,77,.12)}
+    .password-wrap{position:relative}.password-wrap input{padding-right:46px}.password-toggle{position:absolute;right:8px;top:50%;width:30px;height:30px;margin:0;transform:translateY(-50%);border:0;background:transparent;color:#d8b76a;font-size:16px;line-height:1;display:grid;place-items:center}
+    .password-toggle:hover{color:#ffe09a;background:rgba(212,164,77,.12)}
     button{width:100%;height:44px;margin-top:20px;border:1px solid #e2af50;border-radius:6px;background:linear-gradient(135deg,#a96e22,#d7a44b,#79501c);color:#fff0c5;font-weight:800;cursor:pointer}
     button:disabled{opacity:.5;cursor:not-allowed}.error{margin:12px 0 0;color:#ef8c7b}.success{margin:12px 0 0;color:#88d89f}
     .extra{margin-top:14px}.extra a{color:#ffe09a;text-decoration:none}.hint{margin-top:8px;color:#756d5d}
@@ -433,8 +438,8 @@ function serveRegisterPage(res, errorMessage = '', successMessage = '') {
     <form method="post" action="/register">
       <label>手机号<input name="phone" inputmode="tel" autocomplete="tel" pattern="1[3-9][0-9]{9}" required ${disabled}></label>
       <label>用户名<input name="username" autocomplete="username" minlength="3" maxlength="32" required ${disabled}></label>
-      <label>密码<input name="password" type="password" autocomplete="new-password" minlength="8" maxlength="128" required ${disabled}></label>
-      <label>确认密码<input name="confirmPassword" type="password" autocomplete="new-password" minlength="8" maxlength="128" required ${disabled}></label>
+      <label>密码<span class="password-wrap"><input name="password" type="password" autocomplete="new-password" minlength="8" maxlength="128" required ${disabled}><button class="password-toggle" type="button" aria-label="显示密码" title="显示密码" ${disabled}>◉</button></span></label>
+      <label>确认密码<span class="password-wrap"><input name="confirmPassword" type="password" autocomplete="new-password" minlength="8" maxlength="128" required ${disabled}><button class="password-toggle" type="button" aria-label="显示密码" title="显示密码" ${disabled}>◉</button></span></label>
       <label>短信验证码<input name="smsCode" inputmode="numeric" autocomplete="one-time-code" required ${disabled}></label>
       <label>邀请码<input name="inviteCode" autocomplete="off" required ${disabled}></label>
       <p class="hint">当前短信验证码由管理员配置，之后可接入火山短信自动发送。</p>
@@ -442,6 +447,7 @@ function serveRegisterPage(res, errorMessage = '', successMessage = '') {
     </form>
     <p class="extra"><a href="/login">返回登录</a></p>
   </main>
+  <script>${passwordToggleScript()}</script>
 </body>
 </html>`;
   res.writeHead(errorMessage ? 400 : 200, {
@@ -449,6 +455,21 @@ function serveRegisterPage(res, errorMessage = '', successMessage = '') {
     'Cache-Control': 'no-store',
   });
   res.end(html);
+}
+
+function passwordToggleScript() {
+  return `
+    document.querySelectorAll('.password-toggle').forEach(function(button) {
+      button.addEventListener('click', function() {
+        var input = button.parentElement.querySelector('input');
+        var visible = input.type === 'text';
+        input.type = visible ? 'password' : 'text';
+        button.textContent = visible ? '◉' : '◌';
+        button.setAttribute('aria-label', visible ? '显示密码' : '隐藏密码');
+        button.title = visible ? '显示密码' : '隐藏密码';
+      });
+    });
+  `;
 }
 
 function safeEqual(actual, expected) {
