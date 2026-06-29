@@ -549,10 +549,10 @@ textarea:focus {
 }
 
 .button-link.primary-link {
-  border-color: var(--theme-accent);
-  background: var(--theme-gradient);
-  color: #fff;
-  font-weight: 800;
+  border-color: var(--border-strong);
+  background: var(--surface-soft);
+  color: var(--theme-accent);
+  font-weight: 700;
 }
 
 .version-badge {
@@ -623,7 +623,7 @@ h3 {
 .top-actions {
   align-items: center;
   justify-content: flex-end;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
 }
 
 .panel {
