@@ -3,15 +3,15 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>账号额度管理 · 宋钰汐视频生成</title>
-  <link rel="stylesheet" href="./admin.css?v=20260617-register-1">
+  <title>账号费用管理 · 宋钰汐视频生成</title>
+  <link rel="stylesheet" href="./admin.css?v=20260629-cost-1">
 </head>
 <body>
   <header class="admin-header">
     <div>
       <p class="eyebrow">ADMIN CONSOLE</p>
-      <h1>账号与额度管理</h1>
-      <p>管理登录账号、视频秒数额度与使用状态。</p>
+      <h1>账号与费用管理</h1>
+      <p>管理登录账号、API 费用额度与使用状态。</p>
     </div>
     <nav>
       <a href="/">返回工作台</a>
@@ -23,15 +23,15 @@
     <section class="summary-grid" aria-label="账号统计">
       <article><span>账号总数</span><strong id="totalUsers">0</strong></article>
       <article><span>管理员</span><strong id="adminUsers">0 / 4</strong></article>
-      <article><span>已分配额度</span><strong id="totalQuota">0</strong></article>
-      <article><span>已使用额度</span><strong id="totalUsed">0</strong></article>
+      <article><span>已分配费用额度</span><strong id="totalQuota">¥0</strong></article>
+      <article><span>已使用 API 费用</span><strong id="totalUsed">¥0</strong></article>
     </section>
 
     <section class="panel create-panel">
       <div class="section-heading">
         <div>
           <h2>添加新账号</h2>
-          <p>每生成 1 秒视频扣除 1 点额度，例如 5 秒视频扣除 5 点。</p>
+          <p>按 API 费用扣除额度；提交时先预估，接口返回真实费用后自动修正。</p>
         </div>
       </div>
       <form id="createUserForm" class="create-form">
@@ -44,7 +44,7 @@
             <option value="admin">管理员</option>
           </select>
         </label>
-        <label>秒数额度<input id="newQuota" type="number" min="0" max="1000000" step="1" value="100" required></label>
+        <label>费用额度<input id="newQuota" type="number" min="0" max="1000000" step="0.0001" value="100" required></label>
         <button class="primary" type="submit">创建账号</button>
       </form>
     </section>
@@ -53,7 +53,7 @@
       <div class="section-heading">
         <div>
           <h2>账号使用情况</h2>
-          <p>剩余额度少于视频时长时，该账号的生成请求会在服务器端被阻止。</p>
+          <p>费用余额不足时，该账号的生成请求会在服务器端被阻止。</p>
         </div>
         <button id="refreshBtn" type="button">刷新</button>
       </div>
@@ -65,9 +65,9 @@
               <th>账号</th>
               <th>手机号</th>
               <th>角色</th>
-              <th>总额度（秒）</th>
-              <th>已使用（秒）</th>
-              <th>剩余（秒）</th>
+              <th>费用额度</th>
+              <th>已用费用</th>
+              <th>剩余费用</th>
               <th>状态</th>
               <th>最后登录</th>
               <th>操作</th>
@@ -79,6 +79,6 @@
     </section>
   </main>
 
-  <script src="./admin.js?v=20260617-register-1"></script>
+  <script src="./admin.js?v=20260629-cost-1"></script>
 </body>
 </html>

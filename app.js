@@ -1232,8 +1232,8 @@ async function getBalance() {
     state.account = result;
     updateAccountBadge();
     showJson(result);
-    setStatus(`个人额度：剩余 ${result.remaining} / ${result.quota} 秒`, 'success');
-    addLog('info', '个人额度查询', `已使用 ${result.used} 秒，剩余 ${result.remaining} 秒`);
+    setStatus(`API费用余额：剩余 ${formatCost(result.remaining, result.currency)} / ${formatCost(result.quota, result.currency)}`, 'success');
+    addLog('info', 'API费用查询', `已使用 ${formatCost(result.used, result.currency)}，剩余 ${formatCost(result.remaining, result.currency)}`);
   } catch (error) {
     setStatus(error.message, 'error');
     addLog('error', '余额查询失败', error.message);
@@ -1244,8 +1244,8 @@ async function getUsage() {
   try {
     const result = await apiFetch('/api/usage?limit=20&charged_only=true');
     showJson(result);
-    setStatus(`已使用 ${result.used} 秒额度，剩余 ${result.remaining} 秒`, 'success');
-    addLog('info', '个人使用记录', `${result.items?.length ?? 0} 条记录`);
+    setStatus(`已使用 API 费用 ${formatCost(result.used, result.currency)}，剩余 ${formatCost(result.remaining, result.currency)}`, 'success');
+    addLog('info', 'API费用使用记录', `${result.items?.length ?? 0} 条记录`);
   } catch (error) {
     setStatus(error.message, 'error');
     addLog('error', '用量查询失败', error.message);
@@ -1266,12 +1266,18 @@ function updateAccountBadge() {
   const isPublicAccess = Boolean(state.account.publicAccess);
   $('accountBadge').textContent = isPublicAccess
     ? '游客模式 · 可直接使用'
-    : `${state.account.username} · 剩余 ${state.account.remaining} 秒`;
+    : `${state.account.username} · 余额 ${formatCost(state.account.remaining, state.account.currency)}`;
   $('adminLink').hidden = isPublicAccess || state.account.role !== 'admin';
   $('loginLink').hidden = !isPublicAccess;
   $('logoutLink').hidden = isPublicAccess;
   $('submitBtn').disabled = state.account.remaining <= 0;
-  $('submitBtn').title = state.account.remaining <= 0 ? '额度已用完，请联系管理员' : '';
+  $('submitBtn').title = state.account.remaining <= 0 ? 'API费用余额不足，请联系管理员' : '';
+}
+
+function formatCost(value, currency = '¥') {
+  const amount = Number(value || 0);
+  const text = Number.isInteger(amount) ? String(amount) : amount.toFixed(4).replace(/0+$/, '').replace(/\.$/, '');
+  return `${currency || '¥'}${text}`;
 }
 
 async function apiFetch(url, options = {}) {

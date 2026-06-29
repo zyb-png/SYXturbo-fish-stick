@@ -27,8 +27,8 @@ async function loadUsers() {
 function renderSummary(users, maxAdmins) {
   $('totalUsers').textContent = String(users.length);
   $('adminUsers').textContent = `${users.filter(user => user.role === 'admin').length} / ${maxAdmins}`;
-  $('totalQuota').textContent = String(users.reduce((sum, user) => sum + user.quota, 0));
-  $('totalUsed').textContent = String(users.reduce((sum, user) => sum + user.used, 0));
+  $('totalQuota').textContent = formatCost(users.reduce((sum, user) => sum + Number(user.quota || 0), 0), users[0]?.currency);
+  $('totalUsed').textContent = formatCost(users.reduce((sum, user) => sum + Number(user.used || 0), 0), users[0]?.currency);
 }
 
 function renderUsers(users) {
@@ -37,14 +37,14 @@ function renderUsers(users) {
       <td><strong>${escapeHtml(user.username)}</strong></td>
       <td>${user.phone ? escapeHtml(user.phone) : '未填写'}</td>
       <td>${user.role === 'admin' ? '管理员' : '普通账号'}</td>
-      <td>${user.quota}</td>
-      <td>${user.used}</td>
-      <td><strong>${user.remaining}</strong></td>
+      <td>${formatCost(user.quota, user.currency)}</td>
+      <td>${formatCost(user.used, user.currency)}</td>
+      <td><strong>${formatCost(user.remaining, user.currency)}</strong></td>
       <td><span class="status ${user.enabled ? '' : 'disabled'}">${user.enabled ? '启用' : '停用'}</span></td>
       <td>${formatTime(user.lastLoginAt)}</td>
       <td>
         <div class="row-actions">
-          <button data-action="quota" type="button">设置额度</button>
+          <button data-action="quota" type="button">设置费用</button>
           <button data-action="phone" type="button">手机号</button>
           <button data-action="password" type="button">重置密码</button>
           <button data-action="role" type="button">${user.role === 'admin' ? '改为普通账号' : '设为管理员'}</button>
@@ -86,7 +86,7 @@ async function handleUserAction(userId, action, users) {
   if (!user) return;
   try {
     if (action === 'quota') {
-      const value = prompt(`设置 ${user.username} 的视频秒数总额度`, String(user.quota));
+      const value = prompt(`设置 ${user.username} 的 API 费用额度`, String(user.quota));
       if (value === null) return;
       await updateUser(userId, { quota: Number(value) });
     } else if (action === 'phone') {
@@ -138,6 +138,12 @@ function showMessage(message, error = false) {
 
 function formatTime(value) {
   return value ? new Date(value).toLocaleString() : '尚未登录';
+}
+
+function formatCost(value, currency = '¥') {
+  const amount = Number(value || 0);
+  const text = Number.isInteger(amount) ? String(amount) : amount.toFixed(4).replace(/0+$/, '').replace(/\.$/, '');
+  return `${currency || '¥'}${text}`;
 }
 
 function escapeHtml(value) {

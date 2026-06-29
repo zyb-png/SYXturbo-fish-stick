@@ -22,6 +22,8 @@ const REGISTER_DEFAULT_QUOTA = validateStartupQuota(process.env.REGISTER_DEFAULT
 const PUBLIC_ACCESS = readBoolean(process.env.PUBLIC_ACCESS || env.PUBLIC_ACCESS, true);
 const PUBLIC_ACCOUNT_USERNAME = validateStartupUsername(process.env.PUBLIC_ACCOUNT_USERNAME || env.PUBLIC_ACCOUNT_USERNAME || 'public');
 const PUBLIC_ACCOUNT_QUOTA = validateStartupQuota(process.env.PUBLIC_ACCOUNT_QUOTA || env.PUBLIC_ACCOUNT_QUOTA || 1000000);
+const API_COST_PER_SECOND = validateStartupMoney(process.env.API_COST_PER_SECOND || env.API_COST_PER_SECOND || 1);
+const API_COST_CURRENCY = process.env.API_COST_CURRENCY || env.API_COST_CURRENCY || '¥';
 const MAX_ADMIN_ACCOUNTS = 4;
 const SESSION_MAX_AGE_SECONDS = 172800;
 const sessions = new Map();
@@ -151,6 +153,8 @@ const server = http.createServer(async (req, res) => {
           quota: auth.user.quota,
           used: auth.user.used,
           remaining: getRemainingQuota(auth.user),
+          currency: API_COST_CURRENCY,
+          costPerSecond: API_COST_PER_SECOND,
           items: [...(auth.user.usage || [])].reverse().slice(0, 50),
         });
         return;
@@ -345,7 +349,7 @@ async function handleRegister(req, res) {
       accounts.users.push(user);
       return publicUser(user);
     });
-    serveRegisterPage(res, '', `注册成功：${created.username}。请返回登录，管理员分配额度后即可生成视频。`);
+    serveRegisterPage(res, '', `注册成功：${created.username}。请返回登录，管理员分配 API 费用额度后即可生成视频。`);
   } catch (error) {
     serveRegisterPage(res, error.message || '注册失败');
   }
@@ -381,7 +385,7 @@ function serveLoginPage(res, hasError = false, adminLogin = false) {
 <body>
   <main>
     <div class="mark">钰汐</div>
-    <h1>${adminLogin ? '额度管理后台' : '宋钰汐视频生成'}</h1>
+    <h1>${adminLogin ? '费用管理后台' : '宋钰汐视频生成'}</h1>
     <p>${adminLogin ? '仅管理员账号可以进入' : '使用个人账号登录 Seedance 工作台'}</p>
     ${error}
     <form method="post" action="${adminLogin ? '/admin/login' : '/login'}">
@@ -433,7 +437,7 @@ function serveRegisterPage(res, errorMessage = '', successMessage = '') {
   <main>
     <div class="mark">钰汐</div>
     <h1>注册账号</h1>
-    <p>注册后默认 0 秒额度，管理员审核并分配额度后即可生成视频。</p>
+    <p>注册后默认 0 费用额度，管理员审核并分配 API 费用额度后即可生成视频。</p>
     ${status}
     <form method="post" action="/register">
       <label>手机号<input name="phone" inputmode="tel" autocomplete="tel" pattern="1[3-9][0-9]{9}" required ${disabled}></label>
@@ -499,6 +503,8 @@ function publicUser(user) {
     quota: user.quota,
     used: user.used,
     remaining: getRemainingQuota(user),
+    currency: API_COST_CURRENCY,
+    costPerSecond: API_COST_PER_SECOND,
     enabled: user.enabled !== false,
     createdAt: user.createdAt,
     lastLoginAt: user.lastLoginAt || null,
@@ -506,7 +512,7 @@ function publicUser(user) {
 }
 
 function getRemainingQuota(user) {
-  return Math.max(0, Number(user.quota || 0) - Number(user.used || 0));
+  return roundMoney(Math.max(0, Number(user.quota || 0) - Number(user.used || 0)));
 }
 
 async function ensureAccountsFile() {
@@ -547,8 +553,8 @@ async function readAccounts() {
     users: Array.isArray(value.users) ? value.users.map(user => ({
       ...user,
       phone: String(user.phone || ''),
-      quota: Math.max(0, Math.floor(Number(user.quota || 0))),
-      used: Math.max(0, Math.floor(Number(user.used || 0))),
+      quota: normalizeMoney(user.quota),
+      used: normalizeMoney(user.used),
       usage: Array.isArray(user.usage) ? user.usage : [],
       enabled: user.enabled !== false,
     })) : [],
@@ -745,15 +751,33 @@ function validateNewPassword(value) {
 
 function validateQuota(value) {
   const quota = Number(value);
-  if (!Number.isInteger(quota) || quota < 0 || quota > 1000000) {
-    throw httpError(400, '额度需为 0-1000000 的整数');
+  if (!Number.isFinite(quota) || quota < 0 || quota > 1000000) {
+    throw httpError(400, '费用额度需为 0-1000000 的数字');
   }
-  return quota;
+  return roundMoney(quota);
 }
 
 function validateStartupQuota(value) {
   const quota = Number(value);
-  return Number.isInteger(quota) && quota >= 0 ? quota : 0;
+  return Number.isFinite(quota) && quota >= 0 ? roundMoney(quota) : 0;
+}
+
+function validateStartupMoney(value) {
+  const amount = Number(value);
+  return Number.isFinite(amount) && amount >= 0 ? roundMoney(amount) : 1;
+}
+
+function normalizeMoney(value) {
+  const amount = Number(value);
+  return Number.isFinite(amount) && amount >= 0 ? roundMoney(amount) : 0;
+}
+
+function roundMoney(value) {
+  return Math.round((Number(value) || 0) * 10000) / 10000;
+}
+
+function formatMoney(value) {
+  return `${API_COST_CURRENCY}${roundMoney(value).toFixed(4).replace(/0+$/, '').replace(/\.$/, '')}`;
 }
 
 function readBoolean(value, fallback = false) {
@@ -852,7 +876,7 @@ async function proxyApi(req, res) {
   let reservation = null;
   if (isGenerationRequest) {
     const requestSummary = safeRequestSummary(body);
-    const chargeAmount = validateGenerationDuration(requestSummary.duration);
+    const chargeAmount = estimateGenerationCost(requestSummary.duration);
     reservation = await reserveGenerationQuota(req.auth.user.id, {
       endpoint: url.pathname,
       request: requestSummary,
@@ -860,9 +884,10 @@ async function proxyApi(req, res) {
     });
     if (!reservation.allowed) {
       sendJson(res, 402, {
-        error: `个人额度不足：本次 ${chargeAmount} 秒视频需要 ${chargeAmount} 点额度`,
+        error: `费用余额不足：本次预计需要 ${formatMoney(chargeAmount)}，当前剩余 ${formatMoney(reservation.user.remaining)}`,
         code: 'QUOTA_EXHAUSTED',
         required: chargeAmount,
+        currency: API_COST_CURRENCY,
         quota: reservation.user.quota,
         used: reservation.user.used,
         remaining: reservation.user.remaining,
@@ -888,8 +913,13 @@ async function proxyApi(req, res) {
       await refundGenerationQuota(req.auth.user.id, reservation.usageId, reason);
     } else if (reservation) {
       await finalizeGenerationUsage(req.auth.user.id, reservation.usageId, text);
-    } else if (req.method === 'GET' && url.pathname.startsWith('/api/video/tasks/') && isFailedTaskResponse(text)) {
-      await refundFailedTaskQuota(req.auth.user.id, readTaskId(text) || decodeURIComponent(url.pathname.slice('/api/video/tasks/'.length)));
+    } else if (req.method === 'GET' && url.pathname.startsWith('/api/video/tasks/')) {
+      const taskId = readTaskId(text) || decodeURIComponent(url.pathname.slice('/api/video/tasks/'.length));
+      if (isFailedTaskResponse(text)) {
+        await refundFailedTaskQuota(req.auth.user.id, taskId);
+      } else {
+        await updateTaskUsageCost(req.auth.user.id, taskId, text);
+      }
     }
     res.writeHead(upstream.status, {
       'Content-Type': upstream.headers.get('content-type') || 'application/json; charset=utf-8',
@@ -908,17 +938,19 @@ async function reserveGenerationQuota(userId, context) {
   return mutateAccounts(accounts => {
     const user = accounts.users.find(item => item.id === userId && item.enabled !== false);
     if (!user) throw httpError(401, '账号已失效，请重新登录');
-    const amount = context.amount;
+    const amount = normalizeMoney(context.amount);
     if (getRemainingQuota(user) < amount) {
       return { allowed: false, user: publicUser(user) };
     }
     const usageId = crypto.randomUUID();
-    user.used += amount;
+    user.used = roundMoney(Number(user.used || 0) + amount);
     user.usage = Array.isArray(user.usage) ? user.usage : [];
     user.usage.push({
       id: usageId,
       type: 'video_generation',
       amount,
+      currency: API_COST_CURRENCY,
+      costPerSecond: API_COST_PER_SECOND,
       status: 'reserved',
       endpoint: context.endpoint,
       request: context.request,
@@ -933,7 +965,16 @@ async function finalizeGenerationUsage(userId, usageId, responseText) {
   await mutateAccounts(accounts => {
     const user = accounts.users.find(item => item.id === userId);
     const usage = user?.usage?.find(item => item.id === usageId);
-    if (!usage) return;
+    if (!user || !usage) return;
+    const apiCost = extractApiCost(responseText);
+    if (apiCost !== null) {
+      const estimatedAmount = normalizeMoney(usage.amount);
+      const actualAmount = normalizeMoney(apiCost);
+      user.used = roundMoney(Math.max(0, Number(user.used || 0) - estimatedAmount + actualAmount));
+      usage.estimatedAmount = estimatedAmount;
+      usage.amount = actualAmount;
+      usage.apiCost = actualAmount;
+    }
     usage.status = 'charged';
     usage.taskId = readTaskId(responseText);
     usage.completedAt = new Date().toISOString();
@@ -945,7 +986,7 @@ async function refundGenerationQuota(userId, usageId, reason) {
     const user = accounts.users.find(item => item.id === userId);
     const usage = user?.usage?.find(item => item.id === usageId);
     if (!user || !usage || usage.status === 'refunded') return;
-    user.used = Math.max(0, Number(user.used || 0) - Number(usage.amount || 0));
+    user.used = roundMoney(Math.max(0, Number(user.used || 0) - Number(usage.amount || 0)));
     usage.status = 'refunded';
     usage.reason = reason;
     usage.completedAt = new Date().toISOString();
@@ -966,12 +1007,12 @@ function safeRequestSummary(body) {
   }
 }
 
-function validateGenerationDuration(value) {
+function estimateGenerationCost(value) {
   const duration = Number(value);
   if (!Number.isInteger(duration) || duration < 1 || duration > 3600) {
-    throw httpError(400, '视频时长无效，无法计算额度');
+    throw httpError(400, '视频时长无效，无法计算预估费用');
   }
-  return duration;
+  return roundMoney(duration * API_COST_PER_SECOND);
 }
 
 function readTaskId(text) {
@@ -992,16 +1033,83 @@ function isFailedTaskResponse(text) {
   }
 }
 
+function extractApiCost(text) {
+  try {
+    const payload = JSON.parse(text || '{}');
+    return findCostValue(payload);
+  } catch {
+    return null;
+  }
+}
+
+function findCostValue(value, depth = 0, seen = new Set()) {
+  if (!value || typeof value !== 'object' || depth > 6 || seen.has(value)) return null;
+  seen.add(value);
+  const costKeys = [
+    'cost',
+    'fee',
+    'price',
+    'amount',
+    'total_cost',
+    'totalCost',
+    'total_fee',
+    'totalFee',
+    'api_cost',
+    'apiCost',
+    'billing_amount',
+    'billingAmount',
+  ];
+  for (const key of costKeys) {
+    const cost = parseCostNumber(value[key]);
+    if (cost !== null) return cost;
+  }
+  for (const key of ['billing', 'usage', 'cost_detail', 'costDetail', 'data', 'result', 'detail']) {
+    const nested = findCostValue(value[key], depth + 1, seen);
+    if (nested !== null) return nested;
+  }
+  return null;
+}
+
+function parseCostNumber(value) {
+  if (typeof value === 'number' && Number.isFinite(value) && value >= 0) return roundMoney(value);
+  if (typeof value === 'string') {
+    const normalized = value.replace(/[^\d.-]/g, '');
+    if (!normalized) return null;
+    const amount = Number(normalized);
+    if (Number.isFinite(amount) && amount >= 0) return roundMoney(amount);
+  }
+  return null;
+}
+
 async function refundFailedTaskQuota(userId, taskId) {
   if (!taskId) return;
   await mutateAccounts(accounts => {
     const user = accounts.users.find(item => item.id === userId);
     const usage = user?.usage?.find(item => item.taskId === taskId && item.status === 'charged');
     if (!user || !usage) return;
-    user.used = Math.max(0, Number(user.used || 0) - Number(usage.amount || 0));
+    user.used = roundMoney(Math.max(0, Number(user.used || 0) - Number(usage.amount || 0)));
     usage.status = 'refunded';
     usage.reason = '视频任务失败';
     usage.completedAt = new Date().toISOString();
+  });
+}
+
+async function updateTaskUsageCost(userId, taskId, responseText) {
+  if (!taskId) return;
+  const apiCost = extractApiCost(responseText);
+  if (apiCost === null) return;
+  await mutateAccounts(accounts => {
+    const user = accounts.users.find(item => item.id === userId);
+    const usage = user?.usage?.find(item => item.taskId === taskId && item.status === 'charged');
+    if (!user || !usage) return;
+    const currentAmount = normalizeMoney(usage.amount);
+    const actualAmount = normalizeMoney(apiCost);
+    if (currentAmount === actualAmount) return;
+    user.used = roundMoney(Math.max(0, Number(user.used || 0) - currentAmount + actualAmount));
+    usage.estimatedAmount = usage.estimatedAmount ?? currentAmount;
+    usage.amount = actualAmount;
+    usage.apiCost = actualAmount;
+    usage.costUpdatedAt = new Date().toISOString();
   });
 }
 
