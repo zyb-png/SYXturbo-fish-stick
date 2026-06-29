@@ -1,6 +1,7 @@
 FROM swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/library/node:22-alpine AS deps
 
 WORKDIR /app
+ENV ONNXRUNTIME_NODE_INSTALL=skip
 RUN corepack enable
 COPY package.json pnpm-lock.yaml .npmrc ./
 RUN corepack pnpm install --frozen-lockfile
