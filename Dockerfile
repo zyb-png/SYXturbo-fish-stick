@@ -4,7 +4,7 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 
-COPY index.html styles.css app.js server.mjs admin.html admin.css admin.js ./
+COPY index.html styles.css app.js server.mjs ./
 COPY assets ./assets
 
 ENV PORT=4178

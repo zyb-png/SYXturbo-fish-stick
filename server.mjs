@@ -24,7 +24,6 @@ const PUBLIC_ACCOUNT_USERNAME = validateStartupUsername(process.env.PUBLIC_ACCOU
 const PUBLIC_ACCOUNT_QUOTA = validateStartupQuota(process.env.PUBLIC_ACCOUNT_QUOTA || env.PUBLIC_ACCOUNT_QUOTA || 1000000);
 const API_COST_PER_SECOND = validateStartupMoney(process.env.API_COST_PER_SECOND || env.API_COST_PER_SECOND || 1);
 const API_COST_CURRENCY = process.env.API_COST_CURRENCY || env.API_COST_CURRENCY || '¥';
-const MAX_ADMIN_ACCOUNTS = 4;
 const SESSION_MAX_AGE_SECONDS = 172800;
 const sessions = new Map();
 let accountsMutationQueue = Promise.resolve();
@@ -82,20 +81,12 @@ const server = http.createServer(async (req, res) => {
       serveRegisterPage(res);
       return;
     }
-    if (requestUrl.pathname === '/admin/login' && req.method === 'GET') {
-      serveLoginPage(res, false, true);
-      return;
-    }
     if (requestUrl.pathname === '/login' && req.method === 'POST') {
       await handleLogin(req, res);
       return;
     }
     if (requestUrl.pathname === '/register' && req.method === 'POST') {
       await handleRegister(req, res);
-      return;
-    }
-    if (requestUrl.pathname === '/admin/login' && req.method === 'POST') {
-      await handleLogin(req, res, true);
       return;
     }
     if (requestUrl.pathname === '/logout') {
@@ -108,17 +99,7 @@ const server = http.createServer(async (req, res) => {
       res.end();
       return;
     }
-    const isAdminRequest = isAdminPath(requestUrl.pathname);
     const sessionAuth = await getAuthenticatedUser(req);
-    if (!sessionAuth && isAdminRequest) {
-      if (req.url?.startsWith('/api/')) {
-        sendJson(res, 401, { error: '请先使用管理员账号登录' });
-      } else {
-        res.writeHead(303, { 'Location': '/admin/login', 'Cache-Control': 'no-store' });
-        res.end();
-      }
-      return;
-    }
     const auth = sessionAuth || (PUBLIC_ACCESS ? await getPublicAccessUser() : null);
     if (!auth) {
       if (req.url?.startsWith('/api/')) {
@@ -130,14 +111,6 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     req.auth = auth;
-    if (req.url === '/admin' || req.url === '/admin/' || req.url === '/admin.html') {
-      if (auth.user.role !== 'admin') {
-        sendJson(res, 403, { error: '仅管理员可以访问账号管理页面' });
-        return;
-      }
-      await serveFile(path.join(__dirname, 'admin.html'), res);
-      return;
-    }
     if (req.url?.startsWith('/api/')) {
       if (req.url === '/api/session' && req.method === 'GET') {
         sendJson(res, 200, { ...publicUser(auth.user), publicAccess: Boolean(auth.publicAccess) });
@@ -157,10 +130,6 @@ const server = http.createServer(async (req, res) => {
           costPerSecond: API_COST_PER_SECOND,
           items: [...(auth.user.usage || [])].reverse().slice(0, 50),
         });
-        return;
-      }
-      if (req.url.startsWith('/api/admin/')) {
-        await handleAdminApi(req, res, auth);
         return;
       }
       if (req.url.startsWith('/api/app-state')) {
@@ -259,13 +228,6 @@ async function getPublicAccessUser() {
   };
 }
 
-function isAdminPath(pathname) {
-  return pathname === '/admin'
-    || pathname === '/admin/'
-    || pathname === '/admin.html'
-    || pathname.startsWith('/api/admin/');
-}
-
 function parseCookies(cookieHeader) {
   return Object.fromEntries(cookieHeader.split(';').map(part => {
     const separator = part.indexOf('=');
@@ -274,7 +236,7 @@ function parseCookies(cookieHeader) {
   }).filter(([key]) => key));
 }
 
-async function handleLogin(req, res, adminLogin = false) {
+async function handleLogin(req, res) {
   const body = (await readBody(req)).toString('utf8');
   const form = new URLSearchParams(body);
   const username = form.get('username') || '';
@@ -285,7 +247,7 @@ async function handleLogin(req, res, adminLogin = false) {
       item.username.toLowerCase() === login
       || String(item.phone || '').toLowerCase() === login
     ));
-  if (user && user.enabled !== false && verifyPassword(password, user.password) && (!adminLogin || user.role === 'admin')) {
+  if (user && user.enabled !== false && verifyPassword(password, user.password)) {
     const sessionToken = crypto.randomBytes(32).toString('hex');
     sessions.set(sessionToken, {
       userId: user.id,
@@ -296,13 +258,13 @@ async function handleLogin(req, res, adminLogin = false) {
     await writeAccounts(accounts);
     res.writeHead(303, {
       'Set-Cookie': `manfei_session=${sessionToken}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${SESSION_MAX_AGE_SECONDS}`,
-      'Location': adminLogin ? '/admin' : '/?welcome=1',
+      'Location': '/?welcome=1',
       'Cache-Control': 'no-store',
     });
     res.end();
     return;
   }
-  serveLoginPage(res, true, adminLogin);
+  serveLoginPage(res, true);
 }
 
 async function handleRegister(req, res) {
@@ -349,17 +311,17 @@ async function handleRegister(req, res) {
       accounts.users.push(user);
       return publicUser(user);
     });
-    serveRegisterPage(res, '', `注册成功：${created.username}。请返回登录，管理员分配 API 费用额度后即可生成视频。`);
+    serveRegisterPage(res, '', `注册成功：${created.username}。请返回登录，运营方分配 API 费用额度后即可生成视频。`);
   } catch (error) {
     serveRegisterPage(res, error.message || '注册失败');
   }
 }
 
-function serveLoginPage(res, hasError = false, adminLogin = false) {
+function serveLoginPage(res, hasError = false) {
   const error = hasError
-    ? `<p class="error">${adminLogin ? '管理员账号或密码错误' : '用户名或密码错误'}</p>`
+    ? '<p class="error">用户名或密码错误</p>'
     : '';
-  const registerLink = !adminLogin && REGISTRATION_ENABLED
+  const registerLink = REGISTRATION_ENABLED
     ? '<p class="login-extra">还没有账号？<a href="/register">立即注册</a></p>'
     : '';
   const html = `<!doctype html>
@@ -367,7 +329,7 @@ function serveLoginPage(res, hasError = false, adminLogin = false) {
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>${adminLogin ? '管理员登录' : '登录'} · 宋钰汐视频生成</title>
+  <title>登录 · 宋钰汐视频生成</title>
   <style>
     *{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:#030504;color:#eee2c9;font-family:system-ui,-apple-system,sans-serif}
     main{width:min(360px,calc(100vw - 32px));border:1px solid rgba(212,164,77,.55);border-radius:8px;background:#090c0a;padding:28px;box-shadow:0 20px 60px #000}
@@ -385,10 +347,10 @@ function serveLoginPage(res, hasError = false, adminLogin = false) {
 <body>
   <main>
     <div class="mark">钰汐</div>
-    <h1>${adminLogin ? '费用管理后台' : '宋钰汐视频生成'}</h1>
-    <p>${adminLogin ? '仅管理员账号可以进入' : '使用个人账号登录 Seedance 工作台'}</p>
+    <h1>宋钰汐视频生成</h1>
+    <p>使用个人账号登录 Seedance 工作台</p>
     ${error}
-    <form method="post" action="${adminLogin ? '/admin/login' : '/login'}">
+    <form method="post" action="/login">
       <label>用户名 / 手机号<input name="username" autocomplete="username" autofocus required></label>
       <label>密码<span class="password-wrap"><input name="password" type="password" autocomplete="current-password" required><button class="password-toggle" type="button" aria-label="显示密码" title="显示密码">◉</button></span></label>
       <button type="submit">登录</button>
@@ -437,7 +399,7 @@ function serveRegisterPage(res, errorMessage = '', successMessage = '') {
   <main>
     <div class="mark">钰汐</div>
     <h1>注册账号</h1>
-    <p>注册后默认 0 费用额度，管理员审核并分配 API 费用额度后即可生成视频。</p>
+    <p>注册后默认 0 费用额度，运营方审核并分配 API 费用额度后即可生成视频。</p>
     ${status}
     <form method="post" action="/register">
       <label>手机号<input name="phone" inputmode="tel" autocomplete="tel" pattern="1[3-9][0-9]{9}" required ${disabled}></label>
@@ -446,7 +408,7 @@ function serveRegisterPage(res, errorMessage = '', successMessage = '') {
       <label>确认密码<span class="password-wrap"><input name="confirmPassword" type="password" autocomplete="new-password" minlength="8" maxlength="128" required ${disabled}><button class="password-toggle" type="button" aria-label="显示密码" title="显示密码" ${disabled}>◉</button></span></label>
       <label>短信验证码<input name="smsCode" inputmode="numeric" autocomplete="one-time-code" required ${disabled}></label>
       <label>邀请码<input name="inviteCode" autocomplete="off" required ${disabled}></label>
-      <p class="hint">当前短信验证码由管理员配置，之后可接入火山短信自动发送。</p>
+      <p class="hint">当前短信验证码由运营方配置，之后可接入火山短信自动发送。</p>
       <button type="submit" ${disabled}>注册</button>
     </form>
     <p class="extra"><a href="/login">返回登录</a></p>
@@ -519,7 +481,7 @@ async function ensureAccountsFile() {
   try {
     await fs.access(ACCOUNTS_FILE);
   } catch {
-    const username = APP_USERNAME || 'admin';
+    const username = APP_USERNAME || 'user';
     const password = APP_PASSWORD || crypto.randomBytes(12).toString('base64url');
     const initial = {
       version: 1,
@@ -529,7 +491,7 @@ async function ensureAccountsFile() {
         username,
         phone: '',
         password: hashPassword(password),
-        role: 'admin',
+        role: 'user',
         quota: 1000,
         used: 0,
         enabled: true,
@@ -540,7 +502,7 @@ async function ensureAccountsFile() {
     };
     await writeAccounts(initial);
     if (!APP_PASSWORD) {
-      console.warn(`[accounts] 已创建管理员 ${username}，临时密码：${password}`);
+      console.warn(`[accounts] 已创建初始账号 ${username}，临时密码：${password}`);
     }
   }
 }
@@ -579,125 +541,6 @@ function mutateAccounts(mutator) {
   });
   accountsMutationQueue = operation.catch(() => {});
   return operation;
-}
-
-async function handleAdminApi(req, res, auth) {
-  if (auth.user.role !== 'admin') {
-    sendJson(res, 403, { error: '仅管理员可以管理账号' });
-    return;
-  }
-  const url = new URL(req.url || '/', `http://localhost:${PORT}`);
-  const userPrefix = '/api/admin/users/';
-  if (url.pathname === '/api/admin/users' && req.method === 'GET') {
-    const accounts = await readAccounts();
-    sendJson(res, 200, {
-      maxAdmins: MAX_ADMIN_ACCOUNTS,
-      users: accounts.users.map(publicUser),
-    });
-    return;
-  }
-  if (url.pathname === '/api/admin/users' && req.method === 'POST') {
-    const payload = JSON.parse((await readBody(req)).toString('utf8') || '{}');
-    const created = await mutateAccounts(accounts => {
-      const username = validateUsername(payload.username);
-      const password = validateNewPassword(payload.password);
-      const phone = payload.phone ? validatePhone(payload.phone) : '';
-      const role = payload.role === 'admin' ? 'admin' : 'user';
-      const quota = validateQuota(payload.quota);
-      if (accounts.users.some(user => user.username.toLowerCase() === username.toLowerCase())) {
-        throw httpError(409, '账号名已存在');
-      }
-      if (phone && accounts.users.some(user => String(user.phone || '') === phone)) {
-        throw httpError(409, '手机号已注册');
-      }
-      if (role === 'admin' && accounts.users.filter(user => user.role === 'admin').length >= MAX_ADMIN_ACCOUNTS) {
-        throw httpError(400, `管理员账号最多 ${MAX_ADMIN_ACCOUNTS} 个`);
-      }
-      const user = {
-        id: crypto.randomUUID(),
-        username,
-        phone,
-        password: hashPassword(password),
-        role,
-        quota,
-        used: 0,
-        enabled: true,
-        usage: [],
-        createdAt: new Date().toISOString(),
-        lastLoginAt: null,
-      };
-      accounts.users.push(user);
-      return publicUser(user);
-    });
-    sendJson(res, 201, created);
-    return;
-  }
-  if (url.pathname.startsWith(userPrefix)) {
-    const userId = decodeURIComponent(url.pathname.slice(userPrefix.length));
-    if (!userId) {
-      sendJson(res, 404, { error: '账号不存在' });
-      return;
-    }
-    if (req.method === 'PATCH') {
-      const payload = JSON.parse((await readBody(req)).toString('utf8') || '{}');
-      const updated = await mutateAccounts(accounts => {
-        const user = accounts.users.find(item => item.id === userId);
-        if (!user) throw httpError(404, '账号不存在');
-        if (payload.username !== undefined) {
-          const username = validateUsername(payload.username);
-          if (accounts.users.some(item => item.id !== user.id && item.username.toLowerCase() === username.toLowerCase())) {
-            throw httpError(409, '账号名已存在');
-          }
-          user.username = username;
-        }
-        if (payload.phone !== undefined) {
-          const phone = payload.phone ? validatePhone(payload.phone) : '';
-          if (phone && accounts.users.some(item => item.id !== user.id && String(item.phone || '') === phone)) {
-            throw httpError(409, '手机号已注册');
-          }
-          user.phone = phone;
-        }
-        if (payload.password) user.password = hashPassword(validateNewPassword(payload.password));
-        if (payload.quota !== undefined) user.quota = validateQuota(payload.quota);
-        if (payload.enabled !== undefined) user.enabled = Boolean(payload.enabled);
-        if (payload.role !== undefined) {
-          const role = payload.role === 'admin' ? 'admin' : 'user';
-          const adminCount = accounts.users.filter(item => item.role === 'admin').length;
-          if (role === 'admin' && user.role !== 'admin' && adminCount >= MAX_ADMIN_ACCOUNTS) {
-            throw httpError(400, `管理员账号最多 ${MAX_ADMIN_ACCOUNTS} 个`);
-          }
-          if (role !== 'admin' && user.role === 'admin' && adminCount <= 1) {
-            throw httpError(400, '至少保留一个管理员账号');
-          }
-          user.role = role;
-        }
-        return publicUser(user);
-      });
-      sendJson(res, 200, updated);
-      return;
-    }
-    if (req.method === 'DELETE') {
-      if (userId === auth.user.id) {
-        sendJson(res, 400, { error: '不能删除当前登录的管理员账号' });
-        return;
-      }
-      await mutateAccounts(accounts => {
-        const index = accounts.users.findIndex(item => item.id === userId);
-        if (index < 0) throw httpError(404, '账号不存在');
-        const user = accounts.users[index];
-        if (user.role === 'admin' && accounts.users.filter(item => item.role === 'admin').length <= 1) {
-          throw httpError(400, '至少保留一个管理员账号');
-        }
-        accounts.users.splice(index, 1);
-      });
-      for (const [token, session] of sessions) {
-        if (session.userId === userId) sessions.delete(token);
-      }
-      sendJson(res, 200, { deleted: true });
-      return;
-    }
-  }
-  sendJson(res, 404, { error: '未知的管理员接口' });
 }
 
 function validateUsername(value) {

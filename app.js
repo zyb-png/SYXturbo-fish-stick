@@ -1267,11 +1267,10 @@ function updateAccountBadge() {
   $('accountBadge').textContent = isPublicAccess
     ? '游客模式 · 可直接使用'
     : `${state.account.username} · 余额 ${formatCost(state.account.remaining, state.account.currency)}`;
-  $('adminLink').hidden = isPublicAccess || state.account.role !== 'admin';
   $('loginLink').hidden = !isPublicAccess;
   $('logoutLink').hidden = isPublicAccess;
   $('submitBtn').disabled = state.account.remaining <= 0;
-  $('submitBtn').title = state.account.remaining <= 0 ? 'API费用余额不足，请联系管理员' : '';
+  $('submitBtn').title = state.account.remaining <= 0 ? 'API费用余额不足，请联系运营方' : '';
 }
 
 function formatCost(value, currency = '¥') {
