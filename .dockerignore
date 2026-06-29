@@ -1,0 +1,13 @@
+.git
+.next
+node_modules
+assets
+runtime
+.env
+.env.local
+.env.*.local
+assets-config.json
+storyboard-next*.log
+storyboard-next.pid
+*.tsbuildinfo
+.DS_Store
