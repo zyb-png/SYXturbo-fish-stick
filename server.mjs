@@ -19,6 +19,9 @@ const REGISTRATION_ENABLED = readBoolean(process.env.REGISTRATION_ENABLED || env
 const REGISTER_INVITE_CODES = parseList(process.env.REGISTER_INVITE_CODES || env.REGISTER_INVITE_CODES || 'SYX2026');
 const REGISTER_SMS_CODE = String(process.env.REGISTER_SMS_CODE || env.REGISTER_SMS_CODE || '123456').trim();
 const REGISTER_DEFAULT_QUOTA = validateStartupQuota(process.env.REGISTER_DEFAULT_QUOTA || env.REGISTER_DEFAULT_QUOTA || 0);
+const PUBLIC_ACCESS = readBoolean(process.env.PUBLIC_ACCESS || env.PUBLIC_ACCESS, true);
+const PUBLIC_ACCOUNT_USERNAME = validateStartupUsername(process.env.PUBLIC_ACCOUNT_USERNAME || env.PUBLIC_ACCOUNT_USERNAME || 'public');
+const PUBLIC_ACCOUNT_QUOTA = validateStartupQuota(process.env.PUBLIC_ACCOUNT_QUOTA || env.PUBLIC_ACCOUNT_QUOTA || 1000000);
 const MAX_ADMIN_ACCOUNTS = 4;
 const SESSION_MAX_AGE_SECONDS = 172800;
 const sessions = new Map();
@@ -65,6 +68,11 @@ const server = http.createServer(async (req, res) => {
     }
     const requestUrl = new URL(req.url || '/', `http://localhost:${PORT}`);
     if (requestUrl.pathname === '/login' && req.method === 'GET') {
+      if (PUBLIC_ACCESS) {
+        res.writeHead(303, { 'Location': '/', 'Cache-Control': 'no-store' });
+        res.end();
+        return;
+      }
       serveLoginPage(res);
       return;
     }
@@ -93,12 +101,23 @@ const server = http.createServer(async (req, res) => {
       if (sessionToken) sessions.delete(sessionToken);
       res.writeHead(303, {
         'Set-Cookie': 'manfei_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0',
-        'Location': '/login',
+        'Location': PUBLIC_ACCESS ? '/' : '/login',
       });
       res.end();
       return;
     }
-    const auth = await getAuthenticatedUser(req);
+    const isAdminRequest = isAdminPath(requestUrl.pathname);
+    const sessionAuth = await getAuthenticatedUser(req);
+    if (!sessionAuth && isAdminRequest) {
+      if (req.url?.startsWith('/api/')) {
+        sendJson(res, 401, { error: '请先使用管理员账号登录' });
+      } else {
+        res.writeHead(303, { 'Location': '/admin/login', 'Cache-Control': 'no-store' });
+        res.end();
+      }
+      return;
+    }
+    const auth = sessionAuth || (PUBLIC_ACCESS ? await getPublicAccessUser() : null);
     if (!auth) {
       if (req.url?.startsWith('/api/')) {
         sendJson(res, 401, { error: '请先登录' });
@@ -167,6 +186,7 @@ server.listen(PORT, () => {
   console.log(`Proxy target: ${API_BASE}`);
   console.log(tosClient ? `TOS bucket: ${TOS_CONFIG.bucket}` : 'TOS upload: not configured');
   console.log(`Account system: enabled (${ACCOUNTS_FILE})`);
+  console.log(PUBLIC_ACCESS ? `Public access: enabled (${PUBLIC_ACCOUNT_USERNAME})` : 'Public access: disabled');
 });
 
 function getSessionToken(req) {
@@ -189,6 +209,57 @@ async function getAuthenticatedUser(req) {
   }
   session.expiresAt = Date.now() + SESSION_MAX_AGE_SECONDS * 1000;
   return { token, session, user, accounts };
+}
+
+async function getPublicAccessUser() {
+  let accounts = await readAccounts();
+  let user = accounts.users.find(item => item.username.toLowerCase() === PUBLIC_ACCOUNT_USERNAME.toLowerCase());
+  if (!user) {
+    user = await mutateAccounts(value => {
+      const publicUserAccount = {
+        id: crypto.randomUUID(),
+        username: PUBLIC_ACCOUNT_USERNAME,
+        phone: '',
+        password: hashPassword(crypto.randomBytes(24).toString('base64url')),
+        role: 'user',
+        quota: PUBLIC_ACCOUNT_QUOTA,
+        used: 0,
+        enabled: true,
+        usage: [],
+        createdAt: new Date().toISOString(),
+        lastLoginAt: null,
+      };
+      value.users.push(publicUserAccount);
+      return publicUserAccount;
+    });
+    accounts = await readAccounts();
+  }
+
+  if (user.enabled === false || user.role !== 'user' || Number(user.quota || 0) < PUBLIC_ACCOUNT_QUOTA) {
+    user = await mutateAccounts(value => {
+      const publicUserAccount = value.users.find(item => item.username.toLowerCase() === PUBLIC_ACCOUNT_USERNAME.toLowerCase());
+      publicUserAccount.enabled = true;
+      publicUserAccount.role = 'user';
+      publicUserAccount.quota = Math.max(Number(publicUserAccount.quota || 0), PUBLIC_ACCOUNT_QUOTA);
+      return publicUserAccount;
+    });
+    accounts = await readAccounts();
+  }
+
+  return {
+    token: 'public-access',
+    session: null,
+    user,
+    accounts,
+    publicAccess: true,
+  };
+}
+
+function isAdminPath(pathname) {
+  return pathname === '/admin'
+    || pathname === '/admin/'
+    || pathname === '/admin.html'
+    || pathname.startsWith('/api/admin/');
 }
 
 function parseCookies(cookieHeader) {
@@ -608,6 +679,14 @@ function validateUsername(value) {
     throw httpError(400, '账号名需为 3-32 位字母、数字、下划线、点或短横线');
   }
   return username;
+}
+
+function validateStartupUsername(value) {
+  try {
+    return validateUsername(value);
+  } catch {
+    return 'public';
+  }
 }
 
 function validatePhone(value) {
