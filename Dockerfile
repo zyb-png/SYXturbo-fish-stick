@@ -24,6 +24,7 @@ ENV PORT=5001
 ENV DEPLOY_RUN_PORT=5001
 
 RUN corepack enable
+RUN apk add --no-cache bash
 COPY --from=builder /app/package.json /app/pnpm-lock.yaml /app/.npmrc ./
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/.next ./.next
