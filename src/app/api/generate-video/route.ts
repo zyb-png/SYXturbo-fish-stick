@@ -4,6 +4,7 @@ import {
   getManfeiVideoStatus,
   prepareManfeiImageAssets,
 } from '@/lib/manfei';
+import { requireUserLoginResponse } from '@/lib/auth-guard';
 import {
   bindCreationPointTask,
   failCreationPointTask,
@@ -71,6 +72,9 @@ async function monitorVideoSettlement(taskId: string): Promise<void> {
 
 export async function POST(request: NextRequest) {
   let creationPointTaskId = '';
+  const auth = await requireUserLoginResponse();
+  if (auth.response) return auth.response;
+
   try {
     const body = await request.json();
     const prompt = cleanVideoPrompt(body.prompt);

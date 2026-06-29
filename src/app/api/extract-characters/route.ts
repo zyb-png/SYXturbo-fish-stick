@@ -2,11 +2,15 @@ import { NextRequest, NextResponse } from 'next/server';
 import { stream as oaiStream, invoke as oaiInvoke } from '@/lib/openai-client';
 import { estimateMessagesTokens, estimateTokens } from '@/lib/token-utils';
 import { tryExtractAndFixJSON, removeControlCharsInStrings } from '@/lib/json-utils';
+import { requireUserLoginResponse } from '@/lib/auth-guard';
 
 // 每批处理的人物数
 const BATCH_SIZE = 8;
 
 export async function POST(request: NextRequest) {
+  const auth = await requireUserLoginResponse();
+  if (auth.response) return auth.response;
+
   try {
     const { content, fileName, batch = 0, characterMarkers } = await request.json();
 
@@ -217,6 +221,18 @@ function extractLocalCharacterNames(content: string): string[] {
   return names;
 }
 
+function normalizeCharacterRole(role: any): string {
+  if (typeof role !== 'string' || !role.trim()) return '次要配角';
+  const normalized = role.trim();
+  if (normalized.includes('主角') && !normalized.includes('配角')) return '主角';
+  if (normalized.includes('主要配角')) return '主要配角';
+  if (normalized.includes('次要配角')) return '次要配角';
+  if (normalized.includes('龙套')) return '龙套';
+  if (normalized.includes('路人')) return '路人';
+  if (normalized.includes('背景') || normalized.includes('群众')) return '背景人物';
+  return '次要配角';
+}
+
 /**
  * 提取一批人物的详细信息
  */
@@ -237,22 +253,23 @@ async function extractBatchCharacters(
 7. 如果文本中有明确提到人物在不同场景的服装、发型变化，必须提取为多个造型
 8. 每个人物至少需要有一个造型（默认造型）
 9. 描述要适合真人电影风格，避免卡通化或过度夸张
+10. role 只能使用：主角、主要配角、次要配角、龙套、路人、背景人物
 
 每个人物包含：
 - id: 序号
 - name: 人物名称（必须与输入的人物名称完全一致）
-- role: 主角/主要配角/次要配角/龙套（必须填写）
+- role: 主角/主要配角/次要配角/龙套/路人/背景人物（必须填写）
 - age: 年龄（如：25岁、中年、老年等）
 - gender: 性别
 - personality: 性格特点数组（必须填写，至少2个）
 - appearance: 外貌详细描述（**必须填写，80-150字**，包含身高体型、发型、五官、皮肤质感、穿着风格等细节）
-- faceFeatures: 脸型特征对象（**必须填写**，包含脸型、眼睛、鼻子、嘴巴、肤色，这些特征在所有场景下保持一致）
+- faceFeatures: 固定脸型特征对象（**必须填写**，包含脸型、眼睛、鼻子、嘴巴、肤色，这些特征在所有场景下保持一致）
   - faceShape: 脸型（如：椭圆脸、圆脸、方脸、鹅蛋脸等）
   - eyes: 眼睛特征（如：双眼皮大眼睛、丹凤眼、杏眼等）
   - nose: 鼻子特征（如：高鼻梁、翘鼻、塌鼻等）
   - mouth: 嘴巴特征（如：樱桃小嘴、薄唇、丰唇等）
   - skinTone: 肤色（如：白皙、健康、小麦色等）
-- looks: 造型数组（**必须填写，至少1个**，每个人物在不同场景的造型）
+- looks: 不同场景/阶段造型数组（**必须填写，至少1个**，每个人物在不同场景或不同剧情阶段的造型）
   - id: 造型唯一标识（如：look-1, look-2）
   - scene: 适用场景（如：初见、战斗、婚礼、日常生活、工作等）
   - stage: 故事阶段（可选，如：前期、中期、后期）
@@ -498,7 +515,7 @@ async function extractBatchCharacters(
       return {
         id: globalId,
         name: charName,
-        role: getValue(matchedChar.role, '次要配角'),
+        role: normalizeCharacterRole(getValue(matchedChar.role, '次要配角')),
         age: getValue(matchedChar.age, defaultAge),
         gender: getValue(matchedChar.gender, defaultGender),
         personality: getValue(matchedChar.personality, defaultPersonality),
@@ -508,7 +525,7 @@ async function extractBatchCharacters(
           : generateDefaultAppearance(matchedChar),
         faceFeatures: matchedChar.faceFeatures || generateDefaultFaceFeatures(matchedChar),
         looks: getValue(matchedChar.looks, generateDefaultLooks(matchedChar)),
-        background: getValue(matchedChar.background, `${charName}在剧情中承担${getValue(matchedChar.role, '次要配角')}功能，主要围绕核心矛盾推进人物关系和事件冲突。`),
+        background: getValue(matchedChar.background, `${charName}在剧情中承担${normalizeCharacterRole(getValue(matchedChar.role, '次要配角'))}功能，主要围绕核心矛盾推进人物关系和事件冲突。`),
         keyRelationships: getValue(matchedChar.keyRelationships, []),
         arc: getValue(matchedChar.arc, `${charName}随着剧情推进经历立场、情绪或处境变化，形象服务于故事冲突和反转。`),
         keyScenes: getValue(matchedChar.keyScenes, []),
@@ -580,12 +597,12 @@ async function extractCharactersTraditional(
 ): Promise<any> {
   const systemPrompt = `你是一个专业的影视角色分析师。你的任务是：
 1. 分析给定的文本内容，提取所有人物角色
-2. 每个人物需要包含：姓名、角色类型、性格特点、外貌描述、关键关系
-3. 识别人物的重要程度（主角/主要配角/次要配角/龙套）
-4. 分析人物的性格弧光和发展轨迹
-5. **重要：提取人物的脸型特征**，包括脸型、眼睛、鼻子、嘴巴、肤色
-6. **重要：识别人物在不同场景的造型变化**，包括服装、发型、配饰、化妆
-7. 每个人物至少需要一个造型（默认造型）
+2. 每个人物必须生成 role、age、gender、personality、appearance、faceFeatures、looks、background、keyRelationships、arc、keyScenes、props
+3. role 只能使用：主角、主要配角、次要配角、龙套、路人、背景人物
+4. appearance 必须是 80-150 字外貌描述，包含身高体型、发型、五官、肤色质感、穿着风格
+5. faceFeatures 必须是固定脸型特征，包括脸型、眼睛、鼻子、嘴巴、肤色，后续所有造型都保持一致
+6. looks 必须识别人物在不同场景/阶段的造型变化，包括服装、发型、配饰、化妆、情绪状态
+7. background 写背景故事，keyRelationships 写人物关系，arc 写人物弧光，keyScenes 写关键场景，props 写标志性道具
 
 请以 JSON 格式返回结果，格式如下：
 {
@@ -594,11 +611,11 @@ async function extractCharactersTraditional(
     {
       "id": 1,
       "name": "人物名称",
-      "role": "主角/主要配角/次要配角/龙套",
+      "role": "主角/主要配角/次要配角/龙套/路人/背景人物",
       "age": "年龄",
       "gender": "性别",
       "personality": ["性格特点1", "性格特点2"],
-      "appearance": "外貌描述",
+      "appearance": "80-150字外貌描述，包含身高体型、发型、五官、肤色质感、穿着风格",
       "faceFeatures": {
         "faceShape": "脸型",
         "eyes": "眼睛特征",
@@ -627,13 +644,6 @@ async function extractCharactersTraditional(
       ],
       "arc": "人物弧光/发展轨迹",
       "keyScenes": ["关键出场场景1", "关键出场场景2"],
-      "costume": ["服装特点1", "服装特点2"],
-      "costumeDetails": {
-        "mainOutfit": "主要服装描述",
-        "accessories": ["配饰1", "配饰2"],
-        "colorScheme": "主要颜色搭配",
-        "styleNotes": "风格特点说明"
-      },
       "props": ["标志性道具1", "标志性道具2"]
     }
   ]
@@ -681,6 +691,13 @@ async function extractCharactersTraditional(
   const result = tryExtractAndFixJSON(fullResponse);
 
   if (result) {
+    if (Array.isArray(result.characters)) {
+      result.characters = result.characters.map((character: any) => ({
+        ...character,
+        role: normalizeCharacterRole(character.role),
+      }));
+    }
+
     return {
       ...result,
       tokenUsage: {

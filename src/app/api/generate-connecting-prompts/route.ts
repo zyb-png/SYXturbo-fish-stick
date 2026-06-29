@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { stream as oaiStream, invoke as oaiInvoke } from '@/lib/openai-client';
 import { estimateMessagesTokens, estimateTokens } from '@/lib/token-utils';
+import { requireUserLoginResponse } from '@/lib/auth-guard';
 
 // 设置 API 路由超时时间为 5 分钟（LLM 生成需要较长时间）
 export const maxDuration = 600; // 单位：秒
@@ -28,6 +29,9 @@ interface ImageStoryboardSettings {
 }
 
 export async function POST(request: NextRequest) {
+  const auth = await requireUserLoginResponse();
+  if (auth.response) return auth.response;
+
   try {
     const { 
       imageStoryboards, 

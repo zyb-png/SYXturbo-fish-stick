@@ -15,6 +15,7 @@ import {
   InsufficientCreationPointsError,
 } from '@/lib/creation-points';
 import { calculateDeepSeekCreationPoints } from '@/lib/provider-pricing';
+import { requireUserLoginResponse } from '@/lib/auth-guard';
 
 interface Segment {
   id: number;
@@ -979,6 +980,9 @@ function createFallbackShots(
 
 export async function POST(request: NextRequest) {
   let creationPointTaskId = '';
+  const auth = await requireUserLoginResponse();
+  if (auth.response) return auth.response;
+
   try {
     const { chapterContent, chapterTitle, characters, scenes, chapterSummary, charactersData, scenesData, propsData } = await request.json();
 

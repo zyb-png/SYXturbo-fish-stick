@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { SEEDANCE_CONFIG, cleanPrompt, resolveAssetUrl, getSeedanceApiKey, getSeedanceConfig } from '@/lib/seedance';
+import { requireUserLoginResponse } from '@/lib/auth-guard';
 import {
   bindCreationPointTask,
   completeCreationPointTask,
@@ -24,7 +25,7 @@ async function createSeedanceTask(
   } = {}
 ): Promise<{ taskId: string } | null> {
   const apiKey = getSeedanceApiKey();
-  if (!apiKey) throw new Error('未配置 Seedance API Key，请在右上角「设置」中填写');
+  if (!apiKey) throw new Error('未配置 Seedance API Key，请联系管理员配置视频接口');
   const seedanceConfig = getSeedanceConfig();
 
   try {
@@ -215,6 +216,9 @@ async function pollTaskCompletion(
  */
 export async function POST(request: NextRequest) {
   let creationPointTaskId = '';
+  const auth = await requireUserLoginResponse();
+  if (auth.response) return auth.response;
+
   try {
     const body = await request.json();
 
@@ -233,7 +237,7 @@ export async function POST(request: NextRequest) {
     }
 
     if (!getSeedanceApiKey()) {
-      return NextResponse.json({ success: false, error: '未配置 Seedance API Key，请在右上角「设置」中填写' }, { status: 500 });
+      return NextResponse.json({ success: false, error: '未配置 Seedance API Key，请联系管理员配置视频接口' }, { status: 500 });
     }
 
     console.log('=== Seedance 2.0 视频编辑请求 ===');

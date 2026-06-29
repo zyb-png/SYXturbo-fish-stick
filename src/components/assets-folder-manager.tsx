@@ -12,9 +12,9 @@ import {
 } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { 
   FolderOpen, 
-  Check, 
   Loader2,
   MapPin,
   Users,
@@ -23,7 +23,6 @@ import {
   RefreshCw,
   FolderTree,
   Download,
-  Info,
   FileImage,
   FileVideo,
   ChevronRight,
@@ -79,6 +78,8 @@ const FOLDER_MAP: Record<string, { name: string; icon: React.ReactNode; color: s
   storyboards: { name: '分镜图片', icon: <Film className="w-4 h-4" />, color: 'text-purple-500' },
   videos: { name: '视频文件', icon: <FileVideo className="w-4 h-4" />, color: 'text-red-500' },
 };
+
+const BATCH_DOWNLOAD_TOOLTIP = '为避免 Codex 内置浏览器批量写入文件时闪退，批量下载会稳定保存到系统下载目录中的独立文件夹。';
 
 interface AssetsFolderManagerProps {
   refreshTrigger?: number; // 当此值变化时刷新数据
@@ -136,50 +137,52 @@ export function AssetsFolderManager({ refreshTrigger }: AssetsFolderManagerProps
     }
   };
 
+  const fetchFolderFilesForDownload = async (folderKey: string): Promise<AssetFile[]> => {
+    let data;
+    try {
+      const s3Response = await fetch(`/api/s3-assets-list?folder=${folderKey}`);
+      const s3Data = await s3Response.json();
+      if (s3Data.success && s3Data.files && s3Data.files.length > 0) {
+        data = {
+          success: true,
+          files: s3Data.files.map((file: any) => ({
+            name: file.fileName || file.name,
+            size: 0,
+            sizeFormatted: '未知',
+            createdAt: new Date(file.timestamp).toISOString(),
+            modifiedAt: new Date(file.timestamp).toISOString(),
+            url: file.url,
+            key: file.key,
+          })),
+        };
+      }
+    } catch (s3Error) {
+      console.log('S3 文件列表加载失败，尝试本地文件系统:', s3Error);
+    }
+
+    if (!data || !data.files || data.files.length === 0) {
+      const folderName = FOLDER_MAP[folderKey]?.name || folderKey;
+      const response = await fetch(`/api/assets-list?folder=${encodeURIComponent(folderName)}`);
+      data = await response.json();
+    }
+
+    if (!data.success) {
+      throw new Error(data.error || '加载文件列表失败');
+    }
+
+    return data.files || [];
+  };
+
   // 加载文件夹内容
   const loadFolderFiles = async (folderKey: string) => {
     setIsLoadingFiles(true);
     try {
-      // 首先尝试从 S3 获取文件列表
-      let data;
-      try {
-        const s3Response = await fetch(`/api/s3-assets-list?folder=${folderKey}`);
-        const s3Data = await s3Response.json();
-        if (s3Data.success && s3Data.files && s3Data.files.length > 0) {
-          // 转换 S3 格式到本地格式
-          data = {
-            success: true,
-            files: s3Data.files.map((file: any) => ({
-              name: file.fileName || file.name,
-              size: 0,
-              sizeFormatted: '未知',
-              createdAt: new Date(file.timestamp).toISOString(),
-              modifiedAt: new Date(file.timestamp).toISOString(),
-              url: file.url,
-              key: file.key,
-            })),
-          };
-        }
-      } catch (s3Error) {
-        console.log('S3 文件列表加载失败，尝试本地文件系统:', s3Error);
-      }
-      
-      // 如果 S3 没有数据，尝试从本地文件系统获取
-      if (!data || !data.files || data.files.length === 0) {
-        const folderName = FOLDER_MAP[folderKey]?.name || folderKey;
-        const response = await fetch(`/api/assets-list?folder=${encodeURIComponent(folderName)}`);
-        data = await response.json();
-      }
-      
-      if (data.success) {
-        setFolderFiles(data.files);
-        setCurrentFolder(folderKey);
-      } else {
-        toast.error(data.error || '加载文件列表失败');
-      }
+      const files = await fetchFolderFilesForDownload(folderKey);
+      setFolderFiles(files);
+      setCurrentFolder(folderKey);
     } catch (error) {
       console.error('加载文件列表失败:', error);
-      toast.error('加载文件列表失败');
+      toast.error(error instanceof Error ? error.message : '加载文件列表失败');
     } finally {
       setIsLoadingFiles(false);
     }
@@ -220,10 +223,11 @@ export function AssetsFolderManager({ refreshTrigger }: AssetsFolderManagerProps
     }
   };
 
-  // 批量保存某个类别的全部本地资产到下载目录
+  // 批量保存某个类别的全部资产到下载目录，避免浏览器目录写入导致桌面端闪退
   const batchDownloadFolder = async (folderKey: string) => {
     setDownloadingFolder(folderKey);
     try {
+      toast.info('正在保存到下载目录，请稍等...', { duration: 3000 });
       const response = await fetch('/api/assets-batch-download', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -479,20 +483,28 @@ export function AssetsFolderManager({ refreshTrigger }: AssetsFolderManagerProps
                 <span className="font-medium">{FOLDER_MAP[currentFolder]?.name}</span>
               </span>
               <div className="ml-auto flex items-center gap-2">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => batchDownloadFolder(currentFolder)}
-                  disabled={downloadingFolder === currentFolder || folderFiles.length === 0}
-                  title="保存本类别全部文件到下载目录"
-                >
-                  {downloadingFolder === currentFolder ? (
-                    <Loader2 className="w-4 h-4 mr-1 animate-spin" />
-                  ) : (
-                    <Download className="w-4 h-4 mr-1" />
-                  )}
-                  批量下载
-                </Button>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <span className="inline-flex">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => batchDownloadFolder(currentFolder)}
+                        disabled={downloadingFolder === currentFolder || folderFiles.length === 0}
+                      >
+                        {downloadingFolder === currentFolder ? (
+                          <Loader2 className="w-4 h-4 mr-1 animate-spin" />
+                        ) : (
+                          <Download className="w-4 h-4 mr-1" />
+                        )}
+                        批量下载
+                      </Button>
+                    </span>
+                  </TooltipTrigger>
+                  <TooltipContent side="top" sideOffset={8} className="max-w-[260px] text-center leading-5">
+                    {BATCH_DOWNLOAD_TOOLTIP}
+                  </TooltipContent>
+                </Tooltip>
                 <Badge variant="secondary">
                   {folderFiles.length} 个文件
                 </Badge>
@@ -585,21 +597,6 @@ export function AssetsFolderManager({ refreshTrigger }: AssetsFolderManagerProps
         ) : (
           /* 主视图 */
           <div className="flex-1 overflow-y-auto space-y-6">
-            {/* 说明提示 */}
-            <div className="bg-blue-50 dark:bg-blue-950 border border-blue-200 dark:border-blue-800 rounded-lg p-4">
-              <div className="flex gap-3">
-                <Info className="w-5 h-5 text-blue-500 flex-shrink-0 mt-0.5" />
-                <div className="space-y-2 text-sm">
-                  <p className="text-blue-700 dark:text-blue-300 font-medium">
-                    资产保存位置: {config?.assetsPath || 'assets'}
-                  </p>
-                  <p className="text-blue-600 dark:text-blue-400">
-                    点击下方文件夹卡片可查看详细文件列表，也可以按类别批量保存到下载目录。
-                  </p>
-                </div>
-              </div>
-            </div>
-
             {/* 资产文件夹状态 */}
             {config && (
               <div className="space-y-3">
@@ -674,60 +671,37 @@ export function AssetsFolderManager({ refreshTrigger }: AssetsFolderManagerProps
                           <ChevronRight className="w-3 h-3 ml-1" />
                         </Button>
                         <div className="flex items-center gap-1">
-                          <Button
-                            type="button"
-                            variant="outline"
-                            size="sm"
-                            className="h-7 px-2 text-xs"
-                            disabled={isDownloadingThisFolder || count === 0}
-                            title="保存本类别全部文件到下载目录"
-                            onClick={() => batchDownloadFolder(key)}
-                          >
-                            {isDownloadingThisFolder ? (
-                              <Loader2 className="w-3 h-3 mr-1 animate-spin" />
-                            ) : (
-                              <Download className="w-3 h-3 mr-1" />
-                            )}
-                            批量下载
-                          </Button>
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <span className="inline-flex">
+                                <Button
+                                  type="button"
+                                  variant="outline"
+                                  size="sm"
+                                  className="h-7 px-2 text-xs"
+                                  disabled={isDownloadingThisFolder || count === 0}
+                                  onClick={() => batchDownloadFolder(key)}
+                                >
+                                  {isDownloadingThisFolder ? (
+                                    <Loader2 className="w-3 h-3 mr-1 animate-spin" />
+                                  ) : (
+                                    <Download className="w-3 h-3 mr-1" />
+                                  )}
+                                  批量下载
+                                </Button>
+                              </span>
+                            </TooltipTrigger>
+                            <TooltipContent side="top" sideOffset={8} className="max-w-[260px] text-center leading-5">
+                              {BATCH_DOWNLOAD_TOOLTIP}
+                            </TooltipContent>
+                          </Tooltip>
                         </div>
                       </div>
                     </div>
                   )})}
                 </div>
-
-                {/* 状态指示 */}
-                <div className="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-800 rounded-lg">
-                  <div className="flex items-center gap-2">
-                    {assetsExist ? (
-                      <>
-                        <Check className="w-4 h-4 text-green-500" />
-                        <span className="text-sm text-green-700 dark:text-green-400">
-                          资产文件夹已就绪
-                        </span>
-                      </>
-                    ) : (
-                      <span className="text-sm text-yellow-600 dark:text-yellow-400">
-                        资产文件夹未初始化
-                      </span>
-                    )}
-                  </div>
-                </div>
               </div>
             )}
-
-            {/* 导出提示 */}
-            <div className="p-4 border-t">
-              <div className="flex items-center gap-3">
-                <Download className="w-5 h-5 text-gray-400" />
-                <div>
-                  <p className="text-sm font-medium">批量下载资产</p>
-                  <p className="text-xs text-gray-500">
-                    点击每个类别的「批量下载」，会保存到下载目录里的独立文件夹
-                  </p>
-                </div>
-              </div>
-            </div>
           </div>
         )}
       </DialogContent>

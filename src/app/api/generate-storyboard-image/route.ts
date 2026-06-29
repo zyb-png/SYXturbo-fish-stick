@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { S3Storage } from 'coze-coding-dev-sdk';
 import { invoke as oaiInvoke } from '@/lib/openai-client';
 import { getRunningHubConfigSync } from '@/lib/app-settings';
+import { requireUserLoginResponse } from '@/lib/auth-guard';
 import {
   completeCreationPointTask,
   failCreationPointTask,
@@ -544,6 +545,9 @@ function getAssetsPath(): string {
 
 export async function POST(request: NextRequest) {
   let creationPointTaskId = '';
+  const auth = await requireUserLoginResponse();
+  if (auth.response) return auth.response;
+
   try {
     const {
       chapterTitle,
@@ -565,7 +569,7 @@ export async function POST(request: NextRequest) {
     const runninghubConfig = getRunningHubConfigSync();
     const runninghubKey = runninghubConfig.apiKey;
     if (!runninghubKey) {
-      return NextResponse.json({ error: '未配置 RunningHub API Key，请在右上角「设置」中填写' }, { status: 500 });
+      return NextResponse.json({ error: '未配置 RunningHub API Key，请联系管理员配置图片生成接口' }, { status: 500 });
     }
     const runninghubEndpoints = buildRunningHubEndpoints(runninghubConfig.baseUrl);
 

@@ -186,7 +186,7 @@ async function uploadToPublicStorage(
     !config.accessKeyId ||
     !config.secretAccessKey
   ) {
-    throw new Error('本地图片需要先上传到火山 TOS。请在「设置 → 火山 TOS 素材存储」填写 Endpoint、接入点别名、AK 和 SK');
+    throw new Error('本地图片需要先上传到火山 TOS。素材存储未配置，请联系管理员');
   }
 
   const key = `manfei-assets/${hash}${getFileExtension(contentType)}`;
@@ -218,7 +218,7 @@ async function uploadToPublicStorage(
 async function manfeiFetch(pathname: string, init?: RequestInit): Promise<Response> {
   const config = getManfeiConfigSync();
   if (!config.apiKey) {
-    throw new Error('未配置 manfei Token，请在右上角「设置」中填写');
+    throw new Error('未配置 manfei Token，请联系管理员配置视频生成接口');
   }
 
   return fetch(`${config.baseUrl}${pathname}`, {

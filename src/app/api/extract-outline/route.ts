@@ -2,11 +2,15 @@ import { NextRequest, NextResponse } from 'next/server';
 import { stream as oaiStream, invoke as oaiInvoke } from '@/lib/openai-client';
 import { estimateMessagesTokens, estimateTokens } from '@/lib/token-utils';
 import { tryExtractAndFixJSON } from '@/lib/json-utils';
+import { requireUserLoginResponse } from '@/lib/auth-guard';
 
 // 每批处理的章节数
 const BATCH_SIZE = 5;
 
 export async function POST(request: NextRequest) {
+  const auth = await requireUserLoginResponse();
+  if (auth.response) return auth.response;
+
   try {
     const { content, fileName, batch = 1, episodeMarkers: clientEpisodeMarkers, basicInfo } = await request.json();
 
@@ -76,8 +80,9 @@ export async function POST(request: NextRequest) {
     
     console.log(`处理第 ${batch}/${totalBatches} 批，集数:`, currentBatchEpisodes.map(e => `[${e.number}] ${e.marker}`).join(', '));
 
-    // 从原文中提取每个章节的实际内容
+    // 从原文中提取每个章节的实际内容，再用模型生成短剧情概括
     const batchResult = extractChapterContentFromOriginal(content, currentBatchEpisodes);
+    const summaryResult = await summarizeChapterContents(batchResult.chapters);
     
     const hasMore = batch < totalBatches;
 
@@ -86,10 +91,10 @@ export async function POST(request: NextRequest) {
       title: scriptBasicInfo?.title || fileName.replace(/\.[^.]+$/, ''),
       summary: scriptBasicInfo?.summary || '',
       totalChapters: episodeMarkers.length,
-      chapters: batchResult.chapters,
+      chapters: summaryResult.chapters,
       tokenUsage: {
-        input: batchResult.inputTokens,
-        output: batchResult.outputTokens,
+        input: batchResult.inputTokens + summaryResult.inputTokens,
+        output: batchResult.outputTokens + summaryResult.outputTokens,
         timestamp: Date.now(),
       },
     };
@@ -239,7 +244,7 @@ function isValidChapterTitleCandidate(line: string, markerPattern: RegExp): bool
  * 提取剧本基本信息
  */
 async function extractBasicInfo( content: string, fileName: string): Promise<any> {
-  const systemPrompt = `提取剧本的基本信息。只返回JSON格式：{"title":"标题","summary":"摘要100字"}`;
+  const systemPrompt = `提取剧本的基本信息。summary要用100字左右概括整体剧情，不摘抄原文或台词。只返回JSON格式：{"title":"标题","summary":"整体剧情概括"}`;
   
   const messages = [
     { role: 'system' as const, content: systemPrompt },
@@ -257,10 +262,7 @@ async function extractBasicInfo( content: string, fileName: string): Promise<any
     }
   } catch (error: any) {
     console.warn('大纲基本信息模型提取失败，使用文件名和原文摘要兜底:', error?.message || error);
-    const summary = content
-      .replace(/\s+/g, ' ')
-      .trim()
-      .substring(0, 100);
+    const summary = buildLocalChapterSummary(content);
     return {
       title: fileName.replace(/\.[^.]+$/, ''),
       summary,
@@ -274,6 +276,113 @@ async function extractBasicInfo( content: string, fileName: string): Promise<any
   return {
     title: info.title || fileName.replace(/\.[^.]+$/, ''),
     summary: info.summary || '',
+    inputTokens: estimateMessagesTokens(messages),
+    outputTokens: estimateTokens(response),
+  };
+}
+
+function normalizeSummaryText(text: unknown): string {
+  if (typeof text !== 'string') return '';
+  return text
+    .replace(/\r?\n+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .replace(/^["“]+|["”]+$/g, '')
+    .trim();
+}
+
+function buildLocalChapterSummary(content: string): string {
+  const lines = String(content || '')
+    .split(/\r?\n/)
+    .map(line => line.trim())
+    .filter(Boolean)
+    .filter(line => !/^第[一二三四五六七八九十百千\d]+[集章节]/.test(line))
+    .map(line => line.replace(/^[^：:\n]{1,18}[：:]\s*/, ''))
+    .filter(line => line.length > 0 && (!isLikelySceneOrActionLine(line) || line.length > 18));
+
+  const compact = normalizeSummaryText(lines.join(' ') || content);
+  if (!compact) return '该章节内容较少，建议手动补充';
+  return compact.length > 60 ? `${compact.substring(0, 60)}...` : compact;
+}
+
+function normalizeGeneratedSummary(summary: unknown, fallbackContent: string): string {
+  const cleaned = normalizeSummaryText(summary);
+  if (!cleaned) return buildLocalChapterSummary(fallbackContent);
+  return cleaned.length > 120 ? `${cleaned.substring(0, 120)}...` : cleaned;
+}
+
+async function summarizeChapterContents(
+  chapters: any[]
+): Promise<{ chapters: any[]; inputTokens: number; outputTokens: number }> {
+  if (!chapters.length) {
+    return { chapters, inputTokens: 0, outputTokens: 0 };
+  }
+
+  const fallbackChapters = chapters.map(chapter => ({
+    ...chapter,
+    summary: buildLocalChapterSummary(chapter.content || ''),
+  }));
+
+  const chapterPayload = chapters.map(chapter => ({
+    chapterNumber: chapter.chapterNumber,
+    title: chapter.title || `第${chapter.chapterNumber}集`,
+    content: normalizeSummaryText(chapter.content || '').substring(0, 3000),
+  }));
+
+  const systemPrompt = `你是剧情大纲编辑，请为每集生成50字左右的剧情概括。
+
+规则：
+1. 只概括剧情，不保留原文句式，不摘抄台词，不输出长段原文。
+2. 用第三人称写清本集核心冲突、关键转折和结尾钩子。
+3. 每集summary约50个中文字符，允许略短或略长。
+4. 只返回JSON：{"chapters":[{"chapterNumber":1,"summary":"50字左右剧情概括"}]}`;
+
+  const messages = [
+    { role: 'system' as const, content: systemPrompt },
+    { role: 'user' as const, content: `请为以下章节生成短剧情概括：\n${JSON.stringify(chapterPayload, null, 2)}` },
+  ];
+
+  let response = '';
+  try {
+    const stream = oaiStream(messages, {
+      temperature: 0.2,
+    });
+
+    for await (const chunk of stream) {
+      if (chunk.content) response += chunk.content.toString();
+    }
+  } catch (error: any) {
+    console.warn('章节短摘要模型生成失败，使用本地短摘要兜底:', error?.message || error);
+    return {
+      chapters: fallbackChapters,
+      inputTokens: estimateMessagesTokens(messages),
+      outputTokens: 0,
+    };
+  }
+
+  const parsed = tryExtractAndFixJSON(response);
+  const summaries = Array.isArray(parsed)
+    ? parsed
+    : (parsed && Array.isArray(parsed.chapters) ? parsed.chapters : []);
+
+  const summaryByChapter = new Map<number, string>();
+  for (const item of summaries) {
+    const chapterNumber = Number(item?.chapterNumber);
+    const summary = normalizeSummaryText(item?.summary);
+    if (Number.isFinite(chapterNumber) && summary) {
+      summaryByChapter.set(chapterNumber, summary);
+    }
+  }
+
+  const updatedChapters = chapters.map(chapter => ({
+    ...chapter,
+    summary: normalizeGeneratedSummary(
+      summaryByChapter.get(Number(chapter.chapterNumber)),
+      chapter.content || ''
+    ),
+  }));
+
+  return {
+    chapters: updatedChapters,
     inputTokens: estimateMessagesTokens(messages),
     outputTokens: estimateTokens(response),
   };
@@ -361,19 +470,16 @@ function extractChapterContentFromOriginal(
       chapterContent = chapterContent.substring(0, 8000) + '...';
     }
     
-    // 生成摘要（取前200字）
-    const summary = chapterContent.substring(0, 200).replace(/\n/g, ' ').trim();
-    
     // 如果内容仍然为空，添加默认内容
     if (chapterContent.length === 0) {
-      chapterContent = summary || '该章节内容较少，建议手动补充';
+      chapterContent = '该章节内容较少，建议手动补充';
       console.warn(`[章节提取] 第${current.ep}集内容为空，使用默认内容`);
     }
     
     chapters.push({
       chapterNumber: current.ep,
       title: title,
-      summary: summary.length > 50 ? summary.substring(0, 50) + '...' : summary,
+      summary: buildLocalChapterSummary(chapterContent),
       characters: [], // 人物将从原文中提取
       scenes: [], // 场景将从原文中提取
       content: chapterContent,
@@ -387,7 +493,7 @@ function extractChapterContentFromOriginal(
       chapters.push({
         chapterNumber: number,
         title: `第${number}集`,
-        summary: '未能从原文中提取该章节内容',
+        summary: '该章节内容未能提取，建议重新上传或手动补充',
         characters: [],
         scenes: [],
         content: '该章节内容未能从原文中正确提取，建议重新上传文件或手动补充章节内容。',
@@ -429,11 +535,12 @@ async function generateBatchChapters(
    - 冲突与转折
 2. content 是用于生成分镜的核心素材，必须足够详细
 3. 如果原文中有具体情节，要详细展开描述
+4. summary 只做50字左右剧情概括，不摘抄原文或台词
 
 每集包含：
 - chapterNumber: 章节号
 - title: 标题
-- summary: 摘要(50字内)
+- summary: 50字左右剧情概括
 - characters: 主要人物数组
 - scenes: 关键场景数组
 - content: 详细情节描述(500-1000字，必须详细！)
@@ -544,11 +651,11 @@ async function generateOutlineTraditional(
 
 规则：
 1. 按情节发展拆分章节，最多10个章节
-2. 章节摘要控制在50字以内
+2. 章节summary用50字左右概括剧情，不摘抄原文或台词
 3. content 字段必须详细描述该章节的完整情节（500-1000字），包括场景描述、人物对话要点、关键事件发展、情感变化、冲突与转折
 
 输出JSON：
-{"title":"标题","summary":"摘要100字","totalChapters":N,"chapters":[{"chapterNumber":1,"title":"章节标题","summary":"摘要50字","characters":["人物"],"scenes":["场景"],"content":"详细的情节描述，包括场景、对话要点、事件发展、情感变化等，500-1000字..."}]}`;
+{"title":"标题","summary":"整体剧情概括100字左右","totalChapters":N,"chapters":[{"chapterNumber":1,"title":"章节标题","summary":"50字左右剧情概括","characters":["人物"],"scenes":["场景"],"content":"详细的情节描述，包括场景、对话要点、事件发展、情感变化等，500-1000字..."}]}`;
 
   const messages = [
     { role: 'system' as const, content: systemPrompt },
@@ -566,7 +673,7 @@ async function generateOutlineTraditional(
     }
   } catch (error: any) {
     console.warn('传统大纲模型生成失败，使用全文兜底:', error?.message || error);
-    const summary = content.replace(/\s+/g, ' ').trim().substring(0, 100);
+    const summary = buildLocalChapterSummary(content);
     const chapterContent = content.substring(0, 8000);
     return {
       title: fileName.replace(/\.[^.]+$/, ''),
@@ -575,7 +682,7 @@ async function generateOutlineTraditional(
       chapters: [{
         chapterNumber: 1,
         title: '第1章',
-        summary: summary.substring(0, 50),
+        summary,
         characters: [],
         scenes: [],
         content: chapterContent,

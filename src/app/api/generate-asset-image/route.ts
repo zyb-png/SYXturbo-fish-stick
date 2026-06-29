@@ -3,6 +3,7 @@ import { S3Storage } from 'coze-coding-dev-sdk';
 import fs from 'fs';
 import path from 'path';
 import { getRunningHubConfigSync } from '@/lib/app-settings';
+import { requireUserLoginResponse } from '@/lib/auth-guard';
 import {
   completeCreationPointTask,
   failCreationPointTask,
@@ -217,8 +218,11 @@ async function runRunningHubImageToImage(
 
 export async function POST(request: NextRequest) {
   let creationPointTaskId = '';
+  const auth = await requireUserLoginResponse();
+  if (auth.response) return auth.response;
+
   try {
-    const { type, data, currentCount, lookId, referenceImageUrl, customPrompt } = await request.json();
+    const { type, data, currentCount, lookId, referenceImageUrl, customPrompt, imageVariant, assetImageName } = await request.json();
 
     if (!type || !data) {
       return NextResponse.json(
@@ -240,16 +244,20 @@ export async function POST(request: NextRequest) {
     if (!runningHubApiKey) {
       return NextResponse.json({
         success: false,
-        error: '未配置 RunningHub API Key，请在右上角「设置」中填写',
+        error: '未配置 RunningHub API Key，请联系管理员配置图片生成接口',
       });
     }
     const apiKey = runningHubApiKey.trim();
     const endpoints = buildRunningHubEndpoints(runningHubConfig.baseUrl);
 
+    const resolvedImageVariant = imageVariant || (type === 'character' ? (lookId ? 'character-look' : 'character-face') : undefined);
+
     // 根据类型构建提示词
-    const prompt = customPrompt || buildPrompt(type, data, lookId);
+    const prompt = customPrompt || buildPrompt(type, data, lookId, resolvedImageVariant);
     const sizeConfig = IMAGE_SIZES[type as keyof typeof IMAGE_SIZES] || IMAGE_SIZES.scene;
-    const aspectRatio = ASPECT_RATIO_MAP[sizeConfig.ratio] || '16:9';
+    const aspectRatio = type === 'character'
+      ? (resolvedImageVariant === 'character-face' ? '1:1' : resolvedImageVariant === 'character-four-view' ? '16:9' : '9:16')
+      : (ASPECT_RATIO_MAP[sizeConfig.ratio] || '16:9');
 
     console.log(`[RunningHub] 生成${type}图片，提示词:`, prompt.substring(0, 100));
     console.log(`[RunningHub] 宽高比: ${aspectRatio}, 分辨率: 2k, 质量: medium`);
@@ -311,7 +319,8 @@ export async function POST(request: NextRequest) {
       throw new Error(`下载图片失败: ${imageResponse.status}`);
     }
     const imageBuffer = Buffer.from(await imageResponse.arrayBuffer());
-    const localResult = await saveToLocalAssets(type, data.name || `asset-${data.id}`, imageBuffer, lookId);
+    const outputName = assetImageName || (resolvedImageVariant === 'character-four-view' ? `${data.name || `asset-${data.id}`}的四视图` : (data.name || `asset-${data.id}`));
+    const localResult = await saveToLocalAssets(type, outputName, imageBuffer, lookId);
 
     let storedImageUrl = localResult.localUrl;
     let imageKey = localResult.fileName;
@@ -327,7 +336,7 @@ export async function POST(request: NextRequest) {
           region: "cn-beijing",
         });
         const lookSuffix = lookId ? `_${lookId}` : '';
-        const fileName = `assets/${type}/${data.name || data.id}${lookSuffix}_${Date.now()}.png`;
+        const fileName = `assets/${type}/${outputName || data.id}${lookSuffix}_${Date.now()}.png`;
         imageKey = await storage.uploadFile({
           fileContent: imageBuffer,
           fileName,
@@ -350,7 +359,7 @@ export async function POST(request: NextRequest) {
       success: true,
       type,
       id: data.id,
-      name: data.name,
+      name: outputName,
       imageUrl: storedImageUrl,
       localUrl: localResult.localUrl,
       imageKey,
@@ -358,6 +367,7 @@ export async function POST(request: NextRequest) {
       provider: 'runninghub',
       model: imageModel,
       lookId,
+      imageVariant: resolvedImageVariant,
     });
   } catch (error: any) {
     if (creationPointTaskId) {
@@ -379,7 +389,7 @@ export async function POST(request: NextRequest) {
 }
 
 // 根据类型构建真人风格图片提示词
-function buildPrompt(type: string, data: any, lookId?: string): string {
+function buildPrompt(type: string, data: any, lookId?: string, imageVariant?: string): string {
   const parts: string[] = [];
 
   switch (type) {
@@ -419,54 +429,71 @@ function buildPrompt(type: string, data: any, lookId?: string): string {
       const currentLook = lookId && data.looks?.find((l: any) => l.id === lookId);
       const lookPrompt = currentLook?.description?.trim();
 
-      if (lookPrompt) {
-        // 如果造型有专门提示词，优先使用
-        parts.push(lookPrompt);
-      } else {
-        // 否则使用通用提示词结构
-        parts.push('【核心要求】人物全身照，必须完整展示人物从头到脚的整体形象');
-        parts.push('【核心要求】纯白色背景，背景为干净的白色，无任何杂物或装饰');
-        parts.push('【核心要求】画面中不能出现任何字幕、文字、水印、标题、说明文字');
-        parts.push('【核心要求】4K高清画质，画面细腻有质感，细节丰富');
-        parts.push('真人电影风格人物全身照');
+      const faceParts: string[] = [];
+      if (data.faceFeatures) {
+        const ff = data.faceFeatures;
+        if (ff.faceShape) faceParts.push(`脸型：${ff.faceShape}`);
+        if (ff.eyes) faceParts.push(`眼睛：${ff.eyes}`);
+        if (ff.nose) faceParts.push(`鼻子：${ff.nose}`);
+        if (ff.mouth) faceParts.push(`嘴巴：${ff.mouth}`);
+        if (ff.skinTone) faceParts.push(`肤色：${ff.skinTone}`);
+      }
+
+      const appendCharacterIdentity = () => {
         if (data.name) parts.push(`人物：${data.name}`);
         if (data.role) parts.push(`角色：${data.role}`);
-
-        if (data.faceFeatures) {
-          const ff = data.faceFeatures;
-          if (ff.faceShape) parts.push(`脸型：${ff.faceShape}`);
-          if (ff.eyeShape) parts.push(`眼睛：${ff.eyeShape}`);
-          if (ff.noseShape) parts.push(`鼻子：${ff.noseShape}`);
-          if (ff.lipShape) parts.push(`嘴唇：${ff.lipShape}`);
-          if (ff.browShape) parts.push(`眉毛：${ff.browShape}`);
-          if (ff.faceFeatures) parts.push(`面部特征：${ff.faceFeatures}`);
-        }
-
         if (data.age) parts.push(`年龄：${data.age}`);
         if (data.gender) parts.push(`性别：${data.gender}`);
         if (data.appearance) parts.push(`外貌：${data.appearance}`);
-        if (data.style) parts.push(`风格：${data.style}`);
+        if (data.personality) parts.push(`气质：${Array.isArray(data.personality) ? data.personality.join('、') : data.personality}`);
+        if (faceParts.length > 0) parts.push(`固定面部特征：${faceParts.join('，')}`);
+      };
 
-        if (data.clothing && data.clothing.length > 0) {
-          parts.push(`服装：${data.clothing.join('、')}`);
-        }
-        if (data.personality) parts.push(`气质：${data.personality}`);
-
-        // 如果造型有服装/发型等信息也加入
+      const appendLookDetails = () => {
+        if (lookPrompt) parts.push(`当前造型说明：${lookPrompt}`);
         if (currentLook) {
+          if (currentLook.scene) parts.push(`适用场景：${currentLook.scene}`);
+          if (currentLook.stage) parts.push(`剧情阶段：${currentLook.stage}`);
           if (currentLook.costume) parts.push(`服装：${currentLook.costume}`);
           if (currentLook.hairstyle) parts.push(`发型：${currentLook.hairstyle}`);
           if (currentLook.accessories?.length) parts.push(`配饰：${currentLook.accessories.join('、')}`);
           if (currentLook.makeup) parts.push(`化妆：${currentLook.makeup}`);
           if (currentLook.mood) parts.push(`情绪：${currentLook.mood}`);
         }
+      };
 
-        if (isMainCharacter) {
-          parts.push('【主角光环】人物外貌出众，气质独特，具有主角气质');
+      if (imageVariant === 'character-four-view') {
+        parts.push('严格按照参考图像，制作一张专业的角色概念设计图。使用干净、纯白背景，以技术模型转场的形式呈现，同时确保与参考图像的视觉风格完全匹配（相同的写实程度、渲染方法、纹理、色彩处理和整体美感）。');
+        parts.push('将构图安排为4列排列：左1为一张高度精细的特写肖像：正面脸部肖像；左2为全身站立的正面视图；左3为全身站立的侧面视图（面向左侧）；左4为全身站立的背面视图。');
+        parts.push('确保每个面板上的身份保持一致。让拍摄对象保持放松的A型站姿，各视图之间保持一致的尺寸和对齐，确保解剖准确，轮廓清晰；确保间距均匀，面板分离清晰，全身肖像系列采用统一的构图和一致的头高，各肖像之间的面部尺寸保持一致。');
+        parts.push('所有面板的照明应保持一致（方向、强度和柔和度相同），阴影自然且受控，在不产生剧烈情绪变化的情况下保留细节。输出一张清晰、可打印的参考图，细节锐利。避免裁剪、重叠、杂乱背景和动态姿势。比例：16:9。');
+        parts.push('【一致性要求】必须严格参考输入图片的人脸，保持脸型、眼睛、鼻子、嘴巴、肤色、年龄感一致。');
+        parts.push('【禁止】不要文字、字幕、水印、标签、编号，不要多人不同脸，不要裁切脚部。');
+        appendCharacterIdentity();
+        appendLookDetails();
+      } else {
+        if (imageVariant === 'character-look') {
+          parts.push('【核心要求】人物换装全身照，使用参考图保持同一人物脸型五官一致，只改变服装造型');
+          parts.push('【构图要求】全身站姿，从头到脚完整可见，真人电影风格，纯白色背景，干净无杂物');
+          parts.push('【一致性要求】人脸必须与参考图保持一致，脸型、眼睛、鼻子、嘴巴、肤色、年龄感不变');
+          parts.push('【皮肤要求】人脸干净清爽，肤色均匀，保留真实皮肤质感，不要脏斑，不要油光，不要过度磨皮');
+          parts.push('【禁止】无文字、无字幕、无水印，不要换脸，不要夸张卡通，不要裁切身体');
+          appendCharacterIdentity();
+          appendLookDetails();
+        } else {
+          parts.push('【核心要求】人物人脸近景照片，只生成头部到肩部的人脸近景，不生成全身');
+          parts.push('【核心要求】纯白色背景，背景干净明亮，无任何杂物或装饰');
+          parts.push('【皮肤要求】人脸干净清爽，肤色均匀，保留真实皮肤质感，不要脏斑，不要皮肤油光，不要脏污，不要过度磨皮');
+          parts.push('【画质要求】真人电影风格证件照/头像照质感，4K高清，面部五官清晰，自然柔光');
+          parts.push('【禁止】不要全身照，不要半身环境照，不要文字、字幕、水印、标题、说明文字');
+          appendCharacterIdentity();
+          if (isMainCharacter) {
+            parts.push('【主角光环】人物外貌出众，气质独特，具有主角气质');
+          }
         }
       }
       parts.push('4K超高清，人物细节清晰，高清面部特征，真实皮肤质感');
-      parts.push('【再次强调】纯白色背景，全身照，无文字，无字幕，无水印');
+      parts.push('【再次强调】纯白色背景，无文字，无字幕，无水印');
       break;
 
     case 'prop':

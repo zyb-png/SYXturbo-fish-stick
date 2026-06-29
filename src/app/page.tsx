@@ -29,6 +29,7 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from '@/components/ui/alert-dialog';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { 
   Upload, 
   FileText, 
@@ -72,6 +73,7 @@ import { ProjectExporter } from '@/components/project-exporter';
 import { CreationPointsWallet } from '@/components/creation-points-wallet';
 import { ImageLibrarySelector } from '@/components/image-library-selector';
 import { StorageMonitor } from '@/components/storage-monitor';
+import { WorkspaceModeSwitch } from '@/components/workspace-mode-switch';
 import { usePersistentState, usePersistentStateManager, STORAGE_KEYS, TokenUsage, INITIAL_TOKEN_USAGE } from '@/hooks/usePersistentState';
 
 interface Chapter {
@@ -114,6 +116,13 @@ interface CharacterLook {
   accessories: string[];
   makeup: string;
   mood: string;
+  imageUrl?: string;
+  isCustom?: boolean;
+  isGenerating?: boolean;
+  generatingStatus?: string;
+  fourViewImageUrl?: string;
+  isGeneratingFourView?: boolean;
+  fourViewStatus?: string;
 }
 
 // 脸型特征接口
@@ -175,7 +184,12 @@ function inferCharacterAge(name: string, current?: string): string {
 }
 
 function inferCharacterRole(name: string, current?: string): string {
-  if (isUsefulText(current)) return current;
+  if (isUsefulText(current)) {
+    if (current.includes('龙套')) return '龙套';
+    if (current.includes('路人')) return '路人';
+    if (current.includes('背景') || current.includes('群众')) return '背景人物';
+    return current;
+  }
   if (name === '方宇') return '主角';
   if (/李春梅|赵桂芳|张敏|周特助|张村长/.test(name)) return '主要配角';
   return '次要配角';
@@ -564,6 +578,8 @@ const DEFAULT_APP_CONNECTION_SETTINGS: AppConnectionSettings = {
   },
 };
 
+const SHOW_DEVELOPER_SETTINGS = process.env.NEXT_PUBLIC_SHOW_DEVELOPER_SETTINGS === 'true';
+
 // 提取状态接口
 interface ExtractionStatus {
   scenes: 'pending' | 'loading' | 'success' | 'error' | 'batch_confirm';
@@ -588,6 +604,33 @@ export default function StoryboardGenerator() {
   const [appConnectionSettings, setAppConnectionSettings] = useState<AppConnectionSettings>(DEFAULT_APP_CONNECTION_SETTINGS);
   const [settingsLoading, setSettingsLoading] = useState(false);
   const [settingsSaving, setSettingsSaving] = useState(false);
+  const [loginRequiredOpen, setLoginRequiredOpen] = useState(false);
+  const [loginRequiredMessage, setLoginRequiredMessage] = useState('请先登录账号，再使用会消耗创作点的 AI 功能。');
+
+  const showLoginRequired = useCallback((message = '请先登录账号，再使用会消耗创作点的 AI 功能。') => {
+    setLoginRequiredMessage(message);
+    setLoginRequiredOpen(true);
+  }, []);
+
+  const openLoginFromRequired = useCallback(() => {
+    setLoginRequiredOpen(false);
+    window.dispatchEvent(new CustomEvent('manfei:open-login'));
+  }, []);
+
+  const requireLoginBeforePaidAction = useCallback(async () => {
+    try {
+      const response = await fetch('/api/creation-points', { cache: 'no-store' });
+      const result = await response.json();
+      if (!response.ok || !result?.account?.id) {
+        showLoginRequired('该功能会调用 AI 接口并消耗创作点，请先登录账号。');
+        return false;
+      }
+      return true;
+    } catch {
+      showLoginRequired('暂时无法确认登录状态，请先登录账号后再重试。');
+      return false;
+    }
+  }, [showLoginRequired]);
 
   const updateAppConnectionSetting = useCallback((
     section: keyof AppConnectionSettings,
@@ -694,8 +737,29 @@ export default function StoryboardGenerator() {
   }, [appConnectionSettings]);
 
   useEffect(() => {
-    loadAppConnectionSettings();
+    if (SHOW_DEVELOPER_SETTINGS) {
+      loadAppConnectionSettings();
+    }
   }, [loadAppConnectionSettings]);
+
+  useEffect(() => {
+    const originalFetch = window.fetch.bind(window);
+    window.fetch = async (input, init) => {
+      const response = await originalFetch(input, init);
+      if (response.status === 401) {
+        void response.clone().json().then((result) => {
+          if (result?.code === 'LOGIN_REQUIRED') {
+            showLoginRequired(result.error || '请先登录账号，再使用会消耗创作点的 AI 功能。');
+          }
+        }).catch(() => undefined);
+      }
+      return response;
+    };
+
+    return () => {
+      window.fetch = originalFetch;
+    };
+  }, [showLoginRequired]);
   
   // 列表展开/折叠状态（场景、人物、道具）
   const [expandedSections, setExpandedSections] = useState<Record<string, boolean>>({
@@ -1210,9 +1274,9 @@ export default function StoryboardGenerator() {
           const cleaned = parsed.characters.map((char: any) => ({
             ...char,
             looks: char.looks?.map((l: any) => {
-              if (l.isGenerating) {
+              if (l.isGenerating || l.isGeneratingFourView) {
                 hasStaleState = true;
-                return { ...l, isGenerating: false, generatingStatus: undefined };
+                return { ...l, isGenerating: false, generatingStatus: undefined, isGeneratingFourView: false, fourViewStatus: undefined };
               }
               return l;
             }),
@@ -1350,19 +1414,21 @@ export default function StoryboardGenerator() {
   // 清除所有数据（包括本地状态和S3资产）
   const handleClearAllData = useCallback(async () => {
     try {
-      // 先清除 S3 上的资产文件
+      // 先清除本地和云端资产文件
       const response = await fetch('/api/clear-assets', {
         method: 'POST',
       });
       const result = await response.json();
       
       if (result.success) {
-        console.log(`已清除 S3 资产: ${result.totalDeleted} 个文件`);
+        const localDeleted = result.local?.totalDeleted ?? 0;
+        const s3Deleted = result.s3?.totalDeleted ?? 0;
+        console.log(`已清除资产: 本地 ${localDeleted} 个文件，云端 ${s3Deleted} 个文件`);
       } else {
-        console.warn('清除 S3 资产失败:', result.error);
+        console.warn('清除资产失败:', result.error);
       }
     } catch (error) {
-      console.warn('清除 S3 资产请求失败:', error);
+      console.warn('清除资产请求失败:', error);
     }
 
     // 清除本地状态
@@ -1444,6 +1510,40 @@ export default function StoryboardGenerator() {
     }, 30_000);
   };
 
+  const buildEditableProjectState = () => ({
+    storyboard_active_tab: activeTab,
+    storyboard_collapsed_prompt_chapters: collapsedPromptChapters,
+    storyboard_collapsed_storyboard_chapters: collapsedStoryboardChapters,
+    storyboard_collapsed_storyboard_total_chapters: collapsedStoryboardTotalChapters,
+    storyboard_data_version: dataVersion,
+    globalImageSettings,
+    [STORAGE_KEYS.STORYBOARD_BATCH_INFO]: batchInfo,
+    [STORAGE_KEYS.CURRENT_STEP]: currentStep,
+    [STORAGE_KEYS.UPLOADED_FILE]: uploadedFileName,
+    [STORAGE_KEYS.FILE_CONTENT]: fileContent,
+    [STORAGE_KEYS.SCENES_DATA]: scenesData,
+    [STORAGE_KEYS.CHARACTERS_DATA]: charactersData,
+    [STORAGE_KEYS.PROPS_DATA]: propsData,
+    [STORAGE_KEYS.OUTLINE]: outline,
+    [STORAGE_KEYS.OUTLINE_BATCH_INFO]: outlineBatchInfo,
+    [STORAGE_KEYS.SCENE_BATCH_INFO]: sceneBatchInfo,
+    [STORAGE_KEYS.CHARACTER_BATCH_INFO]: characterBatchInfo,
+    [STORAGE_KEYS.PROP_BATCH_INFO]: propBatchInfo,
+    [STORAGE_KEYS.EXTRACTION_STATUS]: extractionStatus,
+    [STORAGE_KEYS.TOKEN_USAGE]: tokenUsage,
+    [STORAGE_KEYS.STEP_CONFIRMED]: stepConfirmed,
+    [STORAGE_KEYS.SELECTED_CHAPTER]: selectedChapter,
+    [STORAGE_KEYS.STORYBOARD]: storyboard,
+    [STORAGE_KEYS.IMAGE_STORYBOARDS]: imageStoryboards,
+    [STORAGE_KEYS.CONNECTING_PROMPTS]: connectingPrompts,
+    [STORAGE_KEYS.VIDEO_RESULTS]: videoResults,
+    [STORAGE_KEYS.VIDEO_TOTAL_DURATION]: videoTotalDuration,
+    [STORAGE_KEYS.PROGRESS]: progress,
+    [STORAGE_KEYS.VIDEO_RATIO]: videoRatio,
+    [STORAGE_KEYS.ASSET_IMAGES]: assetImagesObj,
+    [STORAGE_KEYS.CHAPTER_STORYBOARDS]: chapterStoryboards,
+  });
+
   const handleExportChapterPrompts = async (cs: ChapterStoryboard) => {
     if (!cs.videoPrompts?.length && !cs.promptGroups?.length) {
       toast.error('这一集还没有可导出的提示词');
@@ -1504,132 +1604,61 @@ export default function StoryboardGenerator() {
     }
   };
 
-  const handleExportProject = async (projectName: string) => {
+  const handleExportProject = async (projectName: string): Promise<boolean> => {
     setIsExporting(true);
+    const toastId = toast.loading('正在打包完整项目，请稍等...');
     try {
-      // 收集所有状态数据
-      const state = {
-        currentStep,
-        uploadedFileName,
-        fileContent,
-        scenesData,
-        charactersData,
-        propsData,
-        outline,
-        selectedChapter,
-        storyboard,
-        imageStoryboards,
-        connectingPrompts,
-        videoResults,
-        videoTotalDuration,
-        progress,
-        videoRatio,
-        assetImagesObj,
-        stepConfirmed,
-        extractionStatus,
-      };
+      const state = buildEditableProjectState();
 
       const response = await fetch('/api/project-export-state', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ state, projectName }),
+        body: JSON.stringify({ state, projectName, saveToDownloads: true }),
       });
 
       if (!response.ok) {
-        throw new Error('导出失败');
+        const data = await response.json().catch(() => null);
+        throw new Error(data?.error || '导出失败');
       }
 
-      // 获取 blob 并下载
+      const contentType = response.headers.get('Content-Type') || '';
+      if (contentType.includes('application/json')) {
+        const data = await response.json();
+        if (!data?.success) {
+          throw new Error(data?.error || '导出失败');
+        }
+
+        toast.dismiss(toastId);
+        toast.success(`完整项目已保存到下载目录：${data.fileName}`, {
+          description: data.filePath,
+          duration: 8000,
+        });
+        if (data.filePath) {
+          navigator.clipboard.writeText(data.filePath).catch(() => undefined);
+        }
+        return true;
+      }
+
       const blob = await response.blob();
-      const url = window.URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      const contentDisposition = response.headers.get('Content-Disposition');
-      let filename = `${projectName}.zip`;
-      if (contentDisposition) {
-        const match = contentDisposition.match(/filename="?([^"]+)"?/);
-        if (match) filename = decodeURIComponent(match[1]);
-      }
-      a.download = filename;
-      document.body.appendChild(a);
-      a.click();
-      window.URL.revokeObjectURL(url);
-      document.body.removeChild(a);
-
-      toast.success('项目导出成功');
+      if (blob.size === 0) throw new Error('导出文件为空，请重新尝试');
+      const filename = getDownloadFilename(response.headers.get('Content-Disposition'), `${projectName}.zip`);
+      downloadBlob(blob, filename);
+      toast.dismiss(toastId);
+      toast.success(`完整项目已下载：${filename}`);
+      return true;
     } catch (error) {
       console.error('导出失败:', error);
+      toast.dismiss(toastId);
       toast.error(getNetworkErrorMessage(error, '导出项目'));
+      return false;
     } finally {
       setIsExporting(false);
     }
   };
 
-  // 导出HTML工程文件
-  const handleExportProjectHTML = async (projectName: string) => {
-    setIsExporting(true);
-    try {
-      // 收集所有状态数据
-      const state = {
-        currentStep,
-        uploadedFileName,
-        fileContent,
-        scenesData,
-        charactersData,
-        propsData,
-        outline,
-        selectedChapter,
-        storyboard,
-        imageStoryboards,
-        connectingPrompts,
-        videoResults,
-        videoTotalDuration,
-        progress,
-        videoRatio,
-        assetImagesObj,
-        stepConfirmed,
-        extractionStatus,
-      };
-
-      const response = await fetch('/api/project-export-html', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ state, projectName }),
-      });
-
-      if (!response.ok) {
-        throw new Error('导出失败');
-      }
-
-      // 获取 HTML 并下载
-      const htmlContent = await response.text();
-      const blob = new Blob([htmlContent], { type: 'text/html; charset=utf-8' });
-      const url = window.URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      const contentDisposition = response.headers.get('Content-Disposition');
-      let filename = `${projectName}.html`;
-      if (contentDisposition) {
-        const match = contentDisposition.match(/filename="?([^"]+)"?/);
-        if (match) filename = decodeURIComponent(match[1]);
-      }
-      a.download = filename;
-      document.body.appendChild(a);
-      a.click();
-      window.URL.revokeObjectURL(url);
-      document.body.removeChild(a);
-
-      toast.success('HTML工程文件导出成功，双击即可打开查看');
-    } catch (error) {
-      console.error('导出HTML失败:', error);
-      toast.error(getNetworkErrorMessage(error, '导出HTML'));
-    } finally {
-      setIsExporting(false);
-    }
-  };
-
-  const handleImportProject = async (file: File) => {
+  const handleImportProject = async (file: File): Promise<boolean> => {
     setIsImporting(true);
+    const toastId = toast.loading('正在导入项目，请稍等...');
     try {
       const formData = new FormData();
       formData.append('file', file);
@@ -1641,18 +1670,58 @@ export default function StoryboardGenerator() {
 
       const data = await response.json();
 
-      if (!data.success) {
+      if (!response.ok || !data.success) {
         throw new Error(data.error || '导入失败');
       }
 
       // 恢复项目状态到 localStorage
       if (data.projectState) {
         const restoredState: Record<string, string> = {};
+        const legacyProjectStateKeyMap: Record<string, string> = {
+          activeTab: 'storyboard_active_tab',
+          collapsedPromptChapters: 'storyboard_collapsed_prompt_chapters',
+          collapsedStoryboardChapters: 'storyboard_collapsed_storyboard_chapters',
+          collapsedStoryboardTotalChapters: 'storyboard_collapsed_storyboard_total_chapters',
+          dataVersion: 'storyboard_data_version',
+          globalImageSettings: 'globalImageSettings',
+          batchInfo: STORAGE_KEYS.STORYBOARD_BATCH_INFO,
+          currentStep: STORAGE_KEYS.CURRENT_STEP,
+          uploadedFileName: STORAGE_KEYS.UPLOADED_FILE,
+          fileContent: STORAGE_KEYS.FILE_CONTENT,
+          scenesData: STORAGE_KEYS.SCENES_DATA,
+          charactersData: STORAGE_KEYS.CHARACTERS_DATA,
+          propsData: STORAGE_KEYS.PROPS_DATA,
+          outline: STORAGE_KEYS.OUTLINE,
+          outlineBatchInfo: STORAGE_KEYS.OUTLINE_BATCH_INFO,
+          sceneBatchInfo: STORAGE_KEYS.SCENE_BATCH_INFO,
+          characterBatchInfo: STORAGE_KEYS.CHARACTER_BATCH_INFO,
+          propBatchInfo: STORAGE_KEYS.PROP_BATCH_INFO,
+          extractionStatus: STORAGE_KEYS.EXTRACTION_STATUS,
+          tokenUsage: STORAGE_KEYS.TOKEN_USAGE,
+          stepConfirmed: STORAGE_KEYS.STEP_CONFIRMED,
+          selectedChapter: STORAGE_KEYS.SELECTED_CHAPTER,
+          storyboard: STORAGE_KEYS.STORYBOARD,
+          imageStoryboards: STORAGE_KEYS.IMAGE_STORYBOARDS,
+          connectingPrompts: STORAGE_KEYS.CONNECTING_PROMPTS,
+          videoResults: STORAGE_KEYS.VIDEO_RESULTS,
+          videoTotalDuration: STORAGE_KEYS.VIDEO_TOTAL_DURATION,
+          progress: STORAGE_KEYS.PROGRESS,
+          videoRatio: STORAGE_KEYS.VIDEO_RATIO,
+          assetImagesObj: STORAGE_KEYS.ASSET_IMAGES,
+          chapterStoryboards: STORAGE_KEYS.CHAPTER_STORYBOARDS,
+        };
+
         Object.entries(data.projectState).forEach(([key, value]) => {
-          if (key.startsWith('storyboard_')) {
+          const targetKey = key.startsWith('storyboard_') || key === 'globalImageSettings'
+            ? key
+            : legacyProjectStateKeyMap[key];
+
+          if (targetKey) {
             const serialized = JSON.stringify(value);
-            localStorage.setItem(key, serialized);
-            restoredState[key] = serialized;
+            localStorage.setItem(targetKey, serialized);
+            if (targetKey.startsWith('storyboard_')) {
+              restoredState[targetKey] = serialized;
+            }
           }
         });
 
@@ -1667,6 +1736,7 @@ export default function StoryboardGenerator() {
         }
       }
 
+      toast.dismiss(toastId);
       toast.success(`项目导入成功！\n场景: ${data.stats.scenes} | 人物: ${data.stats.characters} | 道具: ${data.stats.props} | 分镜: ${data.stats.storyboards} | 视频: ${data.stats.videos}`, {
         duration: 5000,
       });
@@ -1675,9 +1745,12 @@ export default function StoryboardGenerator() {
       setTimeout(() => {
         window.location.reload();
       }, 1500);
+      return true;
     } catch (error) {
       console.error('导入失败:', error);
+      toast.dismiss(toastId);
       toast.error(getNetworkErrorMessage(error, '导入项目'));
+      return false;
     } finally {
       setIsImporting(false);
     }
@@ -1748,6 +1821,7 @@ export default function StoryboardGenerator() {
       toast.error('请先上传文件');
       return;
     }
+    if (!(await requireLoginBeforePaidAction())) return;
     
     setExtractionStatus(prev => ({ ...prev, [type]: 'loading' }));
 
@@ -1866,6 +1940,7 @@ export default function StoryboardGenerator() {
       toast.error('请先上传文件');
       return;
     }
+    if (!(await requireLoginBeforePaidAction())) return;
     
     toast.info('正在重新提取所有内容...');
     
@@ -2032,6 +2107,8 @@ export default function StoryboardGenerator() {
     episodeMarkers?: Array<{ number: number; marker: string }> | number[],
     autoContinue = true
   ) => {
+    if (!(await requireLoginBeforePaidAction())) return;
+
     try {
       const response = await fetch('/api/extract-outline', {
         method: 'POST',
@@ -2165,6 +2242,7 @@ export default function StoryboardGenerator() {
       toast.error('无法继续提取场景');
       return;
     }
+    if (!(await requireLoginBeforePaidAction())) return;
     
     const nextBatch = sceneBatchInfo.currentBatch + 1;
     
@@ -2234,6 +2312,7 @@ export default function StoryboardGenerator() {
       toast.error('无法继续提取人物');
       return;
     }
+    if (!(await requireLoginBeforePaidAction())) return;
     
     const nextBatch = characterBatchInfo.currentBatch + 1;
     
@@ -2303,6 +2382,7 @@ export default function StoryboardGenerator() {
       toast.error('无法继续提取道具');
       return;
     }
+    if (!(await requireLoginBeforePaidAction())) return;
     
     const nextBatch = propBatchInfo.currentBatch + 1;
     
@@ -2372,6 +2452,7 @@ export default function StoryboardGenerator() {
       toast.error('无法继续提取');
       return;
     }
+    if (!(await requireLoginBeforePaidAction())) return;
     
     const nextBatch = outlineBatchInfo.currentBatch + 1;
     
@@ -2395,6 +2476,8 @@ export default function StoryboardGenerator() {
 
   // 并行提取四个维度
   const extractAllParallel = async (content: string, fileName: string) => {
+    if (!(await requireLoginBeforePaidAction())) return;
+
     setCurrentStep(1);
     setProgress(20);
     toast.info('正在并行提取场景、人物、道具和大纲，较长剧本可能需要几分钟...');
@@ -3441,7 +3524,11 @@ export default function StoryboardGenerator() {
   };
 
   // 确认当前步骤并进入下一步
-  const confirmStep = (step: 'upload' | 'extraction' | 'storyboard' | 'assets' | 'prompts' | 'videos') => {
+  const confirmStep = async (step: 'upload' | 'extraction' | 'storyboard' | 'assets' | 'prompts' | 'videos') => {
+    if (step === 'upload' && fileContent && uploadedFile) {
+      if (!(await requireLoginBeforePaidAction())) return;
+    }
+
     if (step === 'extraction') {
       const expectedChapters = outlineBatchInfo?.totalEpisodes || outline?.totalChapters || 0;
       const extractedChapters = Math.max(
@@ -3458,6 +3545,7 @@ export default function StoryboardGenerator() {
 
       if (!isExtractionComplete) {
         if (!isOutlineComplete && fileContent) {
+          if (!(await requireLoginBeforePaidAction())) return;
           setExtractionStatus(prev => ({ ...prev, outline: 'loading' }));
           toast.info(`大纲还没提取完：${extractedChapters}/${expectedChapters} 章，正在继续补齐...`);
           void extractOutlineBatch(
@@ -3485,7 +3573,7 @@ export default function StoryboardGenerator() {
         setCurrentStep(1);
         setProgress(15);
         if (fileContent && uploadedFile) {
-          extractAllParallel(fileContent, uploadedFile.name);
+          void extractAllParallel(fileContent, uploadedFile.name);
         }
         break;
       case 'extraction':
@@ -3532,7 +3620,7 @@ export default function StoryboardGenerator() {
         setProgress(80);
         toast.info('开始生成视频片段...');
         if (connectingPrompts && imageStoryboards.length > 0 && storyboard) {
-          generateVideos(connectingPrompts.shotPrompts, imageStoryboards, storyboard.chapterTitle);
+          void generateVideos(connectingPrompts.shotPrompts, imageStoryboards, storyboard.chapterTitle);
         }
         break;
       case 'videos':
@@ -3744,6 +3832,8 @@ export default function StoryboardGenerator() {
 
   // 生成分镜脚本
   const generateStoryboard = async (chapter: Chapter) => {
+    if (!(await requireLoginBeforePaidAction())) return;
+
     setIsProcessing(true);
     setProgress(50);
     setSelectedChapter(chapter);
@@ -3826,6 +3916,10 @@ export default function StoryboardGenerator() {
 
   // 生成单个章节的文字分镜（用于并行生成）- SSE流式版本，支持逐行显示
   const generateSingleStoryboard = async (chapter: Chapter): Promise<{ chapter: Chapter; storyboard: Storyboard | null; error?: string }> => {
+    if (!(await requireLoginBeforePaidAction())) {
+      return { chapter, storyboard: null, error: '请先登录账号后再生成文字分镜' };
+    }
+
     const taskId = `storyboard-${chapter.chapterNumber}-${Date.now()}`;
 
     // 调试日志：检查章节内容
@@ -4070,6 +4164,7 @@ export default function StoryboardGenerator() {
   // 重新生成单个章节的文字分镜
   const regenerateSingleStoryboard = async (chapterNumber: number) => {
     if (!outline?.chapters) return;
+    if (!(await requireLoginBeforePaidAction())) return;
     
     const chapter = outline.chapters.find(c => c.chapterNumber === chapterNumber);
     if (!chapter) {
@@ -4118,6 +4213,8 @@ export default function StoryboardGenerator() {
       toast.error('没有章节可生成分镜');
       return;
     }
+    if (!(await requireLoginBeforePaidAction())) return;
+
     storyboardBatchCancelledRef.current = false;
 
     const chapters = outline.chapters;
@@ -4293,6 +4390,8 @@ export default function StoryboardGenerator() {
 
   // 生成分镜串联提示词
   const generateConnectingPrompts = async (images: ImageStoryboard[], chapterTitle: string) => {
+    if (!(await requireLoginBeforePaidAction())) return;
+
     setIsProcessing(true);
     setProgress(85);
     
@@ -4337,6 +4436,8 @@ export default function StoryboardGenerator() {
 
   // 基于文字分镜直接生成提示词（跳过图片分镜）
   const generateConnectingPromptsFromStoryboard = async (storyboardData: Storyboard, chapterTitle: string) => {
+    if (!(await requireLoginBeforePaidAction())) return;
+
     setIsProcessing(true);
     setProgress(70);
     
@@ -4421,6 +4522,10 @@ export default function StoryboardGenerator() {
     payload: Record<string, unknown>,
     onTaskCreated?: (taskId: string) => void,
   ) => {
+    if (!(await requireLoginBeforePaidAction())) {
+      throw new Error('请先登录账号后再生成视频');
+    }
+
     const response = await fetch('/api/generate-video', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -4510,6 +4615,8 @@ export default function StoryboardGenerator() {
   }, [chapterStoryboards, setChapterStoryboards]);
 
   const generatePromptGroupVideo = async (cs: ChapterStoryboard, pg: PromptGroup, retryVideoId?: string) => {
+    if (!(await requireLoginBeforePaidAction())) return;
+
     const groupKey = getPromptGroupVideoKey(pg);
     const existingVideos = cs.shotVideos?.find(sv => sv.shotNumber === groupKey)?.videos || [];
     const videoId = retryVideoId || `group-video-${cs.chapterNumber}-${pg.groupIndex}-${Date.now()}`;
@@ -4682,6 +4789,8 @@ export default function StoryboardGenerator() {
     images: ImageStoryboard[], 
     chapterTitle: string
   ) => {
+    if (!(await requireLoginBeforePaidAction())) return;
+
     setIsProcessing(true);
     setProgress(95);
     
@@ -4755,6 +4864,8 @@ export default function StoryboardGenerator() {
 
   // 重新生成视频（带自定义提示词）
   const regenerateVideo = async (shotNumber: number, customPrompt?: string) => {
+    if (!(await requireLoginBeforePaidAction())) return;
+
     const videoItem = videoResults.find(v => v.shotNumber === shotNumber);
     const imageStoryboard = imageStoryboards.find(s => s.shotNumber === shotNumber);
     if (!videoItem && !customPrompt) return;
@@ -4791,6 +4902,8 @@ export default function StoryboardGenerator() {
 
   // 批量重新生成所有视频
   const regenerateAllVideos = async () => {
+    if (!(await requireLoginBeforePaidAction())) return;
+
     if (videoResults.length === 0 || !connectingPrompts?.shotPrompts) {
       toast.error('没有视频可重新生成');
       return;
@@ -4972,6 +5085,7 @@ export default function StoryboardGenerator() {
       if (!options?.silent) toast.error('素材名称缺失，无法生成图片');
       return false;
     }
+    if (!(await requireLoginBeforePaidAction())) return false;
 
     // 使用素材的名称作为 key，确保唯一性（名称是唯一的，id 可能在分批时重复）
     const assetId = `${type}-${data.name}`;
@@ -5104,6 +5218,8 @@ export default function StoryboardGenerator() {
   };
 
   const generateAllAssetImages = async (type: 'scene' | 'character' | 'prop') => {
+    if (!(await requireLoginBeforePaidAction())) return;
+
     if (stepConfirmed.assets) {
       toast.warning('素材已确认，如需重新生成请先撤回到素材确认步骤');
       return;
@@ -5283,8 +5399,24 @@ export default function StoryboardGenerator() {
     });
   };
 
+  const getCharacterFaceReferenceImage = (character: any): string | undefined => {
+    const assetKey = `character-${character?.name}`;
+    const existingAsset = assetImages.get(assetKey);
+    const faceImage = existingAsset?.images?.find((img: any) => img.imageUrl && !img.isGenerating)?.imageUrl;
+    if (faceImage) return faceImage;
+
+    for (const look of character?.looks || []) {
+      if (look?.imageUrl) return look.imageUrl;
+      if (look?.fourViewImageUrl) return look.fourViewImageUrl;
+    }
+
+    return undefined;
+  };
+
   // 生成人物造型图片
   const handleGenerateCharacterLookImage = async (character: any, lookId: string) => {
+    if (!(await requireLoginBeforePaidAction())) return;
+
     setIsGeneratingImage(true);
     const generationKey = getLookGenerationKey(character, lookId);
     let statusTimer1: ReturnType<typeof setTimeout> | undefined;
@@ -5300,24 +5432,11 @@ export default function StoryboardGenerator() {
       updateLookById(lookId, { imageUrl: '', isGenerating: true, generatingStatus: '正在提交到 AI 绘图服务...' }, character);
       toast.info(`开始生成 ${character.name} - ${look.scene || lookId} 造型图片`);
 
-      // 查找人物已有的图片作为换装参考
-      let referenceImageUrl: string | undefined;
-      const assetKey = `character-${character.name}`;
-      const existingAsset = assetImages.get(assetKey);
-      if (existingAsset?.images?.length) {
-        const firstImage = existingAsset.images.find((img: any) => img.imageUrl);
-        if (firstImage?.imageUrl) {
-          referenceImageUrl = firstImage.imageUrl;
-        }
-      }
-      // 也检查 looks 中是否有已生成的图片
-      if (!referenceImageUrl && character.looks) {
-        for (const look of character.looks) {
-          if (look.imageUrl) {
-            referenceImageUrl = look.imageUrl;
-            break;
-          }
-        }
+      const referenceImageUrl = getCharacterFaceReferenceImage(character);
+      if (!referenceImageUrl) {
+        updateLookById(lookId, { isGenerating: false, generatingStatus: undefined }, character);
+        toast.warning(`请先生成 ${character.name} 的基础人脸近景图，再进行换装`);
+        return;
       }
 
       // 启动进度更新定时器
@@ -5336,7 +5455,8 @@ export default function StoryboardGenerator() {
           type: 'character',
           data: character,
           lookId,
-          referenceImageUrl: referenceImageUrl || undefined,
+          referenceImageUrl,
+          imageVariant: 'character-look',
         }),
         signal: controller.signal,
       });
@@ -5369,6 +5489,91 @@ export default function StoryboardGenerator() {
       } else {
         console.error('生成造型图片失败:', error);
         toast.error('造型图片生成失败');
+      }
+    } finally {
+      setIsGeneratingImage(false);
+    }
+  };
+
+  // 生成人物指定造型的四视图
+  const handleGenerateCharacterFourView = async (character: any, lookId: string) => {
+    if (!(await requireLoginBeforePaidAction())) return;
+
+    setIsGeneratingImage(true);
+    let statusTimer1: ReturnType<typeof setTimeout> | undefined;
+    let statusTimer2: ReturnType<typeof setTimeout> | undefined;
+    let fetchTimeout: ReturnType<typeof setTimeout> | undefined;
+
+    try {
+      const look = character.looks?.find((l: any) => l.id === lookId);
+      if (!look) {
+        toast.error('造型不存在');
+        return;
+      }
+
+      const referenceImageUrl = look.imageUrl || getCharacterFaceReferenceImage(character);
+      if (!referenceImageUrl) {
+        toast.warning(`请先生成 ${character.name} 的基础人脸近景图，再生成四视图`);
+        return;
+      }
+
+      updateLookById(lookId, {
+        fourViewImageUrl: '',
+        isGeneratingFourView: true,
+        fourViewStatus: '正在提交四视图生成任务...',
+      }, character);
+      toast.info(`开始生成 ${character.name}的四视图`);
+
+      statusTimer1 = setTimeout(() => updateLookById(lookId, { fourViewStatus: 'AI 正在生成四视图（约30~90秒）...' }, character), 5000);
+      statusTimer2 = setTimeout(() => updateLookById(lookId, { fourViewStatus: '四视图生成中，请耐心等待...' }, character), 30000);
+
+      const controller = new AbortController();
+      fetchTimeout = setTimeout(() => controller.abort(), 120000);
+
+      const response = await fetch('/api/generate-asset-image', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          type: 'character',
+          data: character,
+          lookId,
+          referenceImageUrl,
+          imageVariant: 'character-four-view',
+          assetImageName: `${character.name}的四视图`,
+        }),
+        signal: controller.signal,
+      });
+
+      clearTimeout(fetchTimeout);
+      fetchTimeout = undefined;
+      clearTimeout(statusTimer1);
+      statusTimer1 = undefined;
+      clearTimeout(statusTimer2);
+      statusTimer2 = undefined;
+
+      const result = await response.json();
+
+      if (result.success) {
+        updateLookById(lookId, {
+          fourViewImageUrl: result.localUrl || result.imageUrl,
+          isGeneratingFourView: false,
+          fourViewStatus: undefined,
+        }, character);
+        toast.success(`${character.name}的四视图生成成功`);
+      } else {
+        updateLookById(lookId, { isGeneratingFourView: false, fourViewStatus: undefined }, character);
+        toast.error(result.error || '四视图生成失败');
+      }
+    } catch (error: any) {
+      if (fetchTimeout) clearTimeout(fetchTimeout);
+      if (statusTimer1) clearTimeout(statusTimer1);
+      if (statusTimer2) clearTimeout(statusTimer2);
+      updateLookById(lookId, { isGeneratingFourView: false, fourViewStatus: undefined }, character);
+      if (error?.name === 'AbortError') {
+        toast.error('四视图生成超时（超过2分钟），请重试');
+      } else {
+        console.error('生成四视图失败:', error);
+        toast.error('四视图生成失败');
       }
     } finally {
       setIsGeneratingImage(false);
@@ -5426,6 +5631,7 @@ export default function StoryboardGenerator() {
       toast.error('请先生成或上传造型图片');
       return;
     }
+    if (!(await requireLoginBeforePaidAction())) return;
 
     setIsGeneratingImage(true);
     try {
@@ -5469,6 +5675,8 @@ export default function StoryboardGenerator() {
     referenceImageUrl: string,
     customPrompt?: string
   ) => {
+    if (!(await requireLoginBeforePaidAction())) return;
+
     // 使用素材的名称作为 key，确保唯一性（名称是唯一的，id 可能在分批时重复）
     const assetId = `${type}-${data.name}`;
     const currentAsset = assetImages.get(assetId);
@@ -5790,6 +5998,22 @@ export default function StoryboardGenerator() {
 
   return (
     <div className="black-mirror-shell min-h-screen px-4 py-6 sm:px-6 lg:px-8">
+      <AlertDialog open={loginRequiredOpen} onOpenChange={setLoginRequiredOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>需要先登录账号</AlertDialogTitle>
+            <AlertDialogDescription className="leading-6">
+              {loginRequiredMessage}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>先不登录</AlertDialogCancel>
+            <AlertDialogAction onClick={openLoginFromRequired}>
+              去登录
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
       <div className="black-mirror-lines" aria-hidden="true">
         <span className="mirror-line mirror-line-one" />
         <span className="mirror-line mirror-line-two" />
@@ -5804,12 +6028,12 @@ export default function StoryboardGenerator() {
               <div className="black-mirror-brand">
                 <span className="brand-star brand-star-left" aria-hidden="true">✦</span>
                 <h1 className="black-mirror-title font-serif text-3xl font-semibold sm:text-4xl">
-                  宋钰汐
+                  MM钰汐
                 </h1>
                 <span className="brand-star brand-star-right" aria-hidden="true">✧</span>
               </div>
               <p className="mt-2 text-sm text-stone-400 sm:text-base">
-                全网唯一免费平台，从脚本到视频，一站式工作流
+                seedance满血版，seedance海外版，从未有过的顺滑创作体验。
               </p>
               <div className="mt-3 flex items-start gap-2 text-left">
                 <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-400" />
@@ -5819,26 +6043,28 @@ export default function StoryboardGenerator() {
               </div>
             </div>
             {/* 资产管理按钮 */}
-            <div className="black-mirror-toolbar flex flex-wrap gap-2 xl:max-w-[760px] xl:justify-end">
-              <Dialog open={settingsOpen} onOpenChange={setSettingsOpen}>
-                <DialogTrigger asChild>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="gap-2"
-                    onClick={() => loadAppConnectionSettings()}
-                  >
-                    <Settings className="w-4 h-4" />
-                    设置
-                  </Button>
-                </DialogTrigger>
-                <DialogContent className="sm:max-w-2xl max-h-[85vh] overflow-y-auto">
-                  <DialogHeader>
-                    <DialogTitle>接口设置</DialogTitle>
-                    <DialogDescription>
-                      Key 保存在本机，接口地址默认使用当前推荐地址。
-                    </DialogDescription>
-                  </DialogHeader>
+            <div className="black-mirror-toolbar flex flex-wrap items-center gap-2 xl:max-w-[840px] xl:justify-end">
+              <WorkspaceModeSwitch active="workflow" />
+              {SHOW_DEVELOPER_SETTINGS && (
+                <Dialog open={settingsOpen} onOpenChange={setSettingsOpen}>
+                  <DialogTrigger asChild>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="gap-2"
+                      onClick={() => loadAppConnectionSettings()}
+                    >
+                      <Settings className="w-4 h-4" />
+                      设置
+                    </Button>
+                  </DialogTrigger>
+                  <DialogContent className="sm:max-w-2xl max-h-[85vh] overflow-y-auto">
+                    <DialogHeader>
+                      <DialogTitle>接口设置</DialogTitle>
+                      <DialogDescription>
+                        Key 保存在本机，接口地址默认使用当前推荐地址。
+                      </DialogDescription>
+                    </DialogHeader>
 
                   <div className="grid gap-5 py-2">
                     <div className="rounded-md border p-4 space-y-3">
@@ -6060,8 +6286,9 @@ export default function StoryboardGenerator() {
                       保存设置
                     </Button>
                   </DialogFooter>
-                </DialogContent>
-              </Dialog>
+                  </DialogContent>
+                </Dialog>
+              )}
               {/* 保存状态指示器 */}
               <div className="flex items-center gap-1 px-2 py-1 text-xs text-green-600 dark:text-green-400">
                 <Save className="w-3 h-3" />
@@ -6071,16 +6298,23 @@ export default function StoryboardGenerator() {
               <CreationPointsWallet />
               {/* 清除数据按钮 */}
               <AlertDialog>
-                <AlertDialogTrigger asChild>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="gap-2 text-orange-600 hover:text-orange-700"
-                  >
-                    <RotateCcw className="w-4 h-4" />
-                    清除数据
-                  </Button>
-                </AlertDialogTrigger>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <AlertDialogTrigger asChild>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="gap-2 text-orange-600 hover:text-orange-700"
+                      >
+                        <RotateCcw className="w-4 h-4" />
+                        清除数据
+                      </Button>
+                    </AlertDialogTrigger>
+                  </TooltipTrigger>
+                  <TooltipContent side="bottom" className="max-w-72 leading-5">
+                    清除后数据将彻底删除且无法恢复，请慎重点击。建议先点击“项目文件”提前打包备份。
+                  </TooltipContent>
+                </Tooltip>
                 <AlertDialogContent>
                   <AlertDialogHeader>
                     <div className="flex items-center gap-3">
@@ -6121,7 +6355,6 @@ export default function StoryboardGenerator() {
               {/* 项目导入导出 */}
               <ProjectExporter
                 onExport={handleExportProject}
-                onExportHTML={handleExportProjectHTML}
                 onImport={handleImportProject}
                 isExporting={isExporting}
                 isImporting={isImporting}
@@ -6460,7 +6693,10 @@ export default function StoryboardGenerator() {
                   <div className="space-y-4">
                     <div>
                       <h3 className="font-bold text-lg mb-2">{outline.title}</h3>
-                      <p className="text-sm text-gray-600 dark:text-gray-400">
+                      <p
+                        className="text-sm text-gray-600 dark:text-gray-400 line-clamp-2"
+                        title={outline.summary || ''}
+                      >
                         {outline.summary}
                       </p>
                     </div>
@@ -6514,7 +6750,10 @@ export default function StoryboardGenerator() {
                             </Badge>
                             <div className="flex-1 min-w-0">
                               <h4 className="font-medium text-sm">{chapter.title}</h4>
-                              <p className="text-xs text-gray-500 mt-1 line-clamp-2">
+                              <p
+                                className="text-xs text-gray-500 mt-1 line-clamp-2"
+                                title={chapter.summary || ''}
+                              >
                                 {chapter.summary}
                               </p>
                             </div>
@@ -7289,19 +7528,44 @@ export default function StoryboardGenerator() {
                                                   >
                                                     ✕ 取消
                                                   </Button>
-                                                ) : (
+                                                ) : look.isGeneratingFourView ? (
                                                   <Button
                                                     size="sm"
-                                                    variant="ghost"
+                                                    variant="secondary"
                                                     className="h-6 text-xs"
-                                                    onClick={(e) => {
-                                                      e.stopPropagation();
-                                                      handleGenerateCharacterLookImage(char, look.id);
-                                                    }}
-                                                    disabled={Boolean(look.isGenerating || isBatchAssetGenerating)}
+                                                    disabled
                                                   >
-                                                    {assetImages.get(`character-${char.name}`)?.images?.some((img: any) => img.imageUrl) ? '换装' : '生成图片'}
+                                                    <Loader2 className="w-3 h-3 mr-1 animate-spin" />
+                                                    四视图
                                                   </Button>
+                                                ) : (
+                                                  <div className="flex gap-1">
+                                                    <Button
+                                                      size="sm"
+                                                      variant="ghost"
+                                                      className="h-6 text-xs"
+                                                      onClick={(e) => {
+                                                        e.stopPropagation();
+                                                        handleGenerateCharacterLookImage(char, look.id);
+                                                      }}
+                                                      disabled={Boolean(look.isGenerating || isBatchAssetGenerating)}
+                                                    >
+                                                      换装
+                                                    </Button>
+                                                    <Button
+                                                      size="sm"
+                                                      variant="outline"
+                                                      className="h-6 text-xs"
+                                                      onClick={(e) => {
+                                                        e.stopPropagation();
+                                                        handleGenerateCharacterFourView(char, look.id);
+                                                      }}
+                                                      disabled={Boolean(look.isGeneratingFourView || isBatchAssetGenerating)}
+                                                      title="一键生成该套衣服的四视图"
+                                                    >
+                                                      四视图
+                                                    </Button>
+                                                  </div>
                                                 )}
                                               </div>
                                               {editingLookKey === `${char.id}-${look.id}` ? (
@@ -7444,6 +7708,64 @@ export default function StoryboardGenerator() {
                                                       自
                                                     </Badge>
                                                   )}
+                                                </div>
+                                              ) : null}
+                                              {/* 显示该造型的四视图 */}
+                                              {look.isGeneratingFourView ? (
+                                                <div className="mt-2">
+                                                  <div className="w-full h-24 bg-gray-100 dark:bg-gray-800 rounded flex items-center justify-center">
+                                                    <Loader2 className="w-6 h-6 animate-spin text-gray-400" />
+                                                  </div>
+                                                  <p className="text-xs text-center text-gray-500 mt-1">{look.fourViewStatus || '四视图生成中'}</p>
+                                                </div>
+                                              ) : look.fourViewImageUrl ? (
+                                                <div className="mt-2 relative group/four-view">
+                                                  <div className="mb-1 text-xs font-medium text-gray-500">{char.name}的四视图</div>
+                                                  <img
+                                                    src={look.fourViewImageUrl}
+                                                    alt={`${char.name}的四视图`}
+                                                    className="w-full h-auto object-contain rounded max-h-64"
+                                                    onClick={() => openImagePreview(look.fourViewImageUrl, `${char.name}的四视图`, 'character')}
+                                                  />
+                                                  <div className={`absolute top-5 right-0 flex gap-0.5 transition-opacity ${isAssetsConfirmed ? 'hidden' : 'opacity-0 group-hover/four-view:opacity-100'}`}>
+                                                    <Button
+                                                      size="icon"
+                                                      variant="secondary"
+                                                      className="h-4 w-4 bg-white/90"
+                                                      title="预览"
+                                                      onClick={(e) => {
+                                                        e.stopPropagation();
+                                                        openImagePreview(look.fourViewImageUrl, `${char.name}的四视图`, 'character');
+                                                      }}
+                                                    >
+                                                      <Eye className="w-2 h-2" />
+                                                    </Button>
+                                                    <Button
+                                                      size="icon"
+                                                      variant="secondary"
+                                                      className="h-4 w-4 bg-white/90"
+                                                      title="下载"
+                                                      onClick={(e) => {
+                                                        e.stopPropagation();
+                                                        downloadImage(look.fourViewImageUrl, `${char.name}的四视图`);
+                                                      }}
+                                                    >
+                                                      <Download className="w-2 h-2" />
+                                                    </Button>
+                                                    <Button
+                                                      size="icon"
+                                                      variant="destructive"
+                                                      className="h-4 w-4 bg-white/90"
+                                                      title="删除"
+                                                      disabled={isAssetsConfirmed || isGeneratingImage}
+                                                      onClick={(e) => {
+                                                        e.stopPropagation();
+                                                        updateLookById(look.id, { fourViewImageUrl: undefined }, char);
+                                                      }}
+                                                    >
+                                                      <Trash2 className="w-2 h-2" />
+                                                    </Button>
+                                                  </div>
                                                 </div>
                                               ) : null}
                                               {/* 上传按钮（没有图片时显示） */}

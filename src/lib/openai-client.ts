@@ -208,7 +208,7 @@ async function invokeRequest(
 
     if (!config.apiKey) {
       clearTimeout(timer);
-      throw new Error('未配置文本模型 API Key，请在右上角「设置」中填写');
+      throw new Error('未配置文本模型 API Key，请联系管理员配置文本分析接口');
     }
 
     try {
@@ -286,7 +286,7 @@ async function* streamRequest(
 
     if (!config.apiKey) {
       clearTimeout(timer);
-      throw new Error('未配置文本模型 API Key，请在右上角「设置」中填写');
+      throw new Error('未配置文本模型 API Key，请联系管理员配置文本分析接口');
     }
 
     try {

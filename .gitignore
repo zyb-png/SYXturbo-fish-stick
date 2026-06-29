@@ -23,9 +23,6 @@ coverage/
 .env.development.local
 .env.test.local
 .env.production.local
-*.pem
-*.key
-*.p12
 
 # Logs
 logs/
@@ -41,12 +38,6 @@ pids
 *.pid
 *.seed
 *.pid.lock
-assets/
-assets-config.json
-public/assets/
-runtime/
-storyboard-next.err.log
-storyboard-next.out.log
 
 # Diagnostic reports
 report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json

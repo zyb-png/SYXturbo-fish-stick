@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { invoke as oaiInvoke } from '@/lib/openai-client';
+import { requireUserLoginResponse } from '@/lib/auth-guard';
 
 export const maxDuration = 300;
 
@@ -192,6 +193,9 @@ ${refText}
 }
 
 export async function POST(request: NextRequest) {
+  const auth = await requireUserLoginResponse();
+  if (auth.response) return auth.response;
+
   try {
     const payload = await request.json() as StoryboardPromptPayload;
     const {

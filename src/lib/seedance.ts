@@ -80,7 +80,7 @@ export async function createSeedanceTask(
   } = {}
 ): Promise<{ taskId: string } | null> {
   const apiKey = getSeedanceApiKey();
-  if (!apiKey) throw new Error('未配置 Seedance API Key，请在右上角「设置」中填写');
+  if (!apiKey) throw new Error('未配置 Seedance API Key，请联系管理员配置视频接口');
   const seedanceConfig = getSeedanceConfig();
 
   const { ratio = '9:16', duration = 15 } = options;

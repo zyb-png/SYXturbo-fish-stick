@@ -4,7 +4,7 @@ import './globals.css';
 
 export const metadata: Metadata = {
   title: {
-    default: '宋钰汐',
+    default: 'MM钰汐，一站式工作流。',
     template: '%s | 扣子编程',
   },
   description:
@@ -24,11 +24,11 @@ export const metadata: Metadata = {
   //   icon: '',
   // },
   openGraph: {
-    title: '宋钰汐',
+    title: 'MM钰汐，一站式工作流。',
     description:
       '上传故事文件，自动提取大纲、生成分镜脚本、创作图片分镜与视频。',
     url: 'https://code.coze.cn',
-    siteName: '宋钰汐',
+    siteName: 'MM钰汐，一站式工作流。',
     locale: 'zh_CN',
     type: 'website',
     // images: [

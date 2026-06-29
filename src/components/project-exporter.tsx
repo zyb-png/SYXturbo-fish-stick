@@ -19,23 +19,19 @@ import {
   Loader2,
   CheckCircle2,
   AlertCircle,
-  Package,
-  FileCode,
-  Globe
+  Package
 } from 'lucide-react';
 import { toast } from 'sonner';
 
 interface ProjectExporterProps {
-  onExport: (projectName: string) => Promise<void>;
-  onExportHTML: (projectName: string) => Promise<void>;
-  onImport: (file: File) => Promise<void>;
+  onExport: (projectName: string) => Promise<boolean | void>;
+  onImport: (file: File) => Promise<boolean | void>;
   isExporting?: boolean;
   isImporting?: boolean;
 }
 
 export function ProjectExporter({ 
   onExport, 
-  onExportHTML,
   onImport, 
   isExporting = false, 
   isImporting = false 
@@ -46,19 +42,9 @@ export function ProjectExporter({
 
   const handleExportZip = async () => {
     try {
-      await onExport(projectName);
+      const exported = await onExport(projectName);
+      if (exported === false) return;
       setIsOpen(false);
-      toast.success('ZIP项目包导出成功');
-    } catch (error) {
-      toast.error('导出失败: ' + (error instanceof Error ? error.message : '未知错误'));
-    }
-  };
-
-  const handleExportHTML = async () => {
-    try {
-      await onExportHTML(projectName);
-      setIsOpen(false);
-      toast.success('HTML工程文件导出成功');
     } catch (error) {
       toast.error('导出失败: ' + (error instanceof Error ? error.message : '未知错误'));
     }
@@ -74,13 +60,9 @@ export function ProjectExporter({
     }
 
     try {
-      await onImport(file);
+      const imported = await onImport(file);
+      if (imported === false) return;
       setIsOpen(false);
-      toast.success('项目导入成功，页面即将刷新...');
-      // 刷新页面以加载新状态
-      setTimeout(() => {
-        window.location.reload();
-      }, 1500);
     } catch (error) {
       toast.error('导入失败: ' + (error instanceof Error ? error.message : '未知错误'));
     }
@@ -99,22 +81,22 @@ export function ProjectExporter({
           项目文件
         </Button>
       </DialogTrigger>
-      <DialogContent className="max-w-lg">
+      <DialogContent className="max-w-lg border-amber-400/45 bg-[#070706] text-amber-100 shadow-[0_0_46px_rgba(245,158,11,0.18)]">
         <DialogHeader>
-          <DialogTitle className="flex items-center gap-2">
-            <FileArchive className="w-5 h-5" />
+          <DialogTitle className="flex items-center gap-2 text-amber-100">
+            <FileArchive className="w-5 h-5 text-amber-300" />
             项目导入导出
           </DialogTitle>
-          <DialogDescription>
-            导出项目文件用于团队传输或备份，导入项目文件恢复工作进度
+          <DialogDescription className="text-amber-100/65">
+            完整项目会保存为 .zip，包含当前工作状态和本地素材；再次使用时导入 ZIP 即可恢复编辑。
           </DialogDescription>
         </DialogHeader>
 
         <div className="space-y-6 pt-4">
           {/* 导出部分 */}
           <div className="space-y-3">
-            <h4 className="text-sm font-medium flex items-center gap-2">
-              <Download className="w-4 h-4" />
+            <h4 className="text-sm font-medium flex items-center gap-2 text-amber-100">
+              <Download className="w-4 h-4 text-amber-300" />
               导出项目
             </h4>
             <div className="flex gap-2">
@@ -122,75 +104,56 @@ export function ProjectExporter({
                 value={projectName}
                 onChange={(e) => setProjectName(e.target.value)}
                 placeholder="项目名称"
-                className="flex-1"
+                className="flex-1 border-amber-400/35 bg-black/35 text-amber-50 placeholder:text-amber-100/35 focus-visible:ring-amber-300"
               />
             </div>
             
-            {/* 导出选项 */}
-            <div className="grid grid-cols-2 gap-3">
-              {/* HTML工程 */}
-              <button
-                onClick={handleExportHTML}
-                disabled={isExporting || !projectName.trim()}
-                className="flex flex-col items-center gap-2 p-4 border-2 border-purple-200 rounded-lg hover:border-purple-400 hover:bg-purple-50 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                <div className="w-10 h-10 rounded-full bg-purple-100 flex items-center justify-center">
-                  <Globe className="w-5 h-5 text-purple-600" />
-                </div>
-                <div className="text-center">
-                  <div className="font-medium text-sm">HTML工程</div>
-                  <div className="text-xs text-gray-500 mt-1">双击打开查看</div>
-                </div>
-                {isExporting ? (
-                  <Loader2 className="w-4 h-4 animate-spin text-purple-600" />
-                ) : (
-                  <Badge variant="secondary" className="text-xs">推荐</Badge>
-                )}
-              </button>
+            <div className="rounded-md border border-amber-400/35 bg-amber-500/10 px-3 py-2 text-xs leading-5 text-amber-100/78">
+              点击“保存完整项目”后会打包当前工作状态和本地素材，并稳定保存到系统下载目录：Downloads/AI故事分镜视频生成器/项目文件。
+            </div>
 
+            {/* 导出选项 */}
+            <div className="grid grid-cols-1 gap-3">
               {/* ZIP包 */}
               <button
                 onClick={handleExportZip}
                 disabled={isExporting || !projectName.trim()}
-                className="flex flex-col items-center gap-2 p-4 border-2 border-gray-200 rounded-lg hover:border-gray-400 hover:bg-gray-50 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                className="flex flex-col items-center gap-2 rounded-md border border-amber-400/60 bg-black/25 p-4 text-amber-100 transition-all hover:border-amber-300 hover:bg-amber-500/10 disabled:cursor-not-allowed disabled:opacity-50"
               >
-                <div className="w-10 h-10 rounded-full bg-gray-100 flex items-center justify-center">
-                  <FileArchive className="w-5 h-5 text-gray-600" />
+                <div className="flex h-10 w-10 items-center justify-center rounded-full border border-amber-300/40 bg-amber-400/14">
+                  <FileArchive className="h-5 w-5 text-amber-300" />
                 </div>
                 <div className="text-center">
-                  <div className="font-medium text-sm">ZIP项目包</div>
-                  <div className="text-xs text-gray-500 mt-1">完整数据备份</div>
+                  <div className="text-sm font-medium">保存完整项目</div>
+                  <div className="mt-1 text-xs text-amber-100/48">ZIP，可导入继续编辑</div>
                 </div>
+                {isExporting ? (
+                  <Loader2 className="h-4 w-4 animate-spin text-amber-300" />
+                ) : (
+                  <Badge className="border border-amber-300/30 bg-amber-500/12 text-xs text-amber-100 hover:bg-amber-500/16">推荐备份</Badge>
+                )}
               </button>
             </div>
 
             {/* 导出说明 */}
-            <div className="grid grid-cols-2 gap-2 text-xs">
-              <div className="p-2 bg-purple-50 rounded border border-purple-100">
-                <p className="font-medium text-purple-700 mb-1">HTML工程</p>
-                <ul className="text-purple-600 space-y-0.5">
-                  <li>• 独立HTML文件，双击打开</li>
-                  <li>• 离线查看，无需网络</li>
-                  <li>• 适合分享和展示</li>
-                </ul>
-              </div>
-              <div className="p-2 bg-gray-50 rounded border border-gray-200">
-                <p className="font-medium text-gray-700 mb-1">ZIP项目包</p>
-                <ul className="text-gray-600 space-y-0.5">
-                  <li>• 包含所有素材文件</li>
+            <div className="grid grid-cols-1 gap-2 text-xs">
+              <div className="rounded-md border border-amber-400/25 bg-black/28 p-3">
+                <p className="font-medium text-amber-200 mb-1">ZIP完整项目</p>
+                <ul className="text-amber-100/62 space-y-0.5">
+                  <li>• 包含当前全部工作状态</li>
+                  <li>• 包含本地素材、图片、视频</li>
                   <li>• 可导入恢复工作</li>
-                  <li>• 适合团队协作</li>
                 </ul>
               </div>
             </div>
           </div>
 
-          <div className="border-t pt-4" />
+          <div className="border-t border-amber-400/18 pt-4" />
 
           {/* 导入部分 */}
           <div className="space-y-3">
-            <h4 className="text-sm font-medium flex items-center gap-2">
-              <Upload className="w-4 h-4" />
+            <h4 className="text-sm font-medium flex items-center gap-2 text-amber-100">
+              <Upload className="w-4 h-4 text-amber-300" />
               导入项目
             </h4>
             <div className="flex flex-col gap-2">
@@ -203,7 +166,7 @@ export function ProjectExporter({
               />
               <Button
                 variant="outline"
-                className="w-full"
+                className="w-full border-amber-400/35 bg-black/25 text-amber-100 hover:border-amber-300 hover:bg-amber-500/10 hover:text-amber-50"
                 onClick={() => fileInputRef.current?.click()}
                 disabled={isImporting}
               >
@@ -220,46 +183,46 @@ export function ProjectExporter({
                 )}
               </Button>
             </div>
-            <div className="flex items-start gap-2 p-2 bg-yellow-50 dark:bg-yellow-900/20 rounded text-xs text-yellow-700 dark:text-yellow-400">
-              <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
-              <span>导入将覆盖当前所有数据，请先导出备份</span>
+            <div className="flex items-start gap-2 rounded-md border border-amber-400/25 bg-amber-500/10 p-2 text-xs text-amber-100/74">
+              <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-amber-300" />
+              <span>导入 ZIP 将覆盖当前所有数据；再次使用时请在这里选择之前保存的完整项目 ZIP。</span>
             </div>
           </div>
 
           {/* 说明 */}
-          <div className="space-y-2 p-3 bg-gray-50 dark:bg-gray-800 rounded-lg">
-            <h5 className="text-xs font-medium text-gray-700 dark:text-gray-300">项目文件包含：</h5>
-            <div className="grid grid-cols-2 gap-2 text-xs text-gray-600 dark:text-gray-400">
+          <div className="space-y-2 rounded-md border border-amber-400/25 bg-black/28 p-3">
+            <h5 className="text-xs font-medium text-amber-200">项目文件包含：</h5>
+            <div className="grid grid-cols-2 gap-2 text-xs text-amber-100/62">
               <div className="flex items-center gap-1">
-                <CheckCircle2 className="w-3 h-3 text-green-500" />
+                <CheckCircle2 className="w-3 h-3 text-amber-300" />
                 项目元数据
               </div>
               <div className="flex items-center gap-1">
-                <CheckCircle2 className="w-3 h-3 text-green-500" />
+                <CheckCircle2 className="w-3 h-3 text-amber-300" />
                 工作状态
               </div>
               <div className="flex items-center gap-1">
-                <CheckCircle2 className="w-3 h-3 text-green-500" />
+                <CheckCircle2 className="w-3 h-3 text-amber-300" />
                 场景图片
               </div>
               <div className="flex items-center gap-1">
-                <CheckCircle2 className="w-3 h-3 text-green-500" />
+                <CheckCircle2 className="w-3 h-3 text-amber-300" />
                 人物图片
               </div>
               <div className="flex items-center gap-1">
-                <CheckCircle2 className="w-3 h-3 text-green-500" />
+                <CheckCircle2 className="w-3 h-3 text-amber-300" />
                 道具图片
               </div>
               <div className="flex items-center gap-1">
-                <CheckCircle2 className="w-3 h-3 text-green-500" />
+                <CheckCircle2 className="w-3 h-3 text-amber-300" />
                 分镜图片
               </div>
               <div className="flex items-center gap-1">
-                <CheckCircle2 className="w-3 h-3 text-green-500" />
+                <CheckCircle2 className="w-3 h-3 text-amber-300" />
                 视频文件
               </div>
               <div className="flex items-center gap-1">
-                <CheckCircle2 className="w-3 h-3 text-green-500" />
+                <CheckCircle2 className="w-3 h-3 text-amber-300" />
                 配置信息
               </div>
             </div>

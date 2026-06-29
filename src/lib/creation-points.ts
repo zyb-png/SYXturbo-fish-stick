@@ -1,7 +1,14 @@
 import fs from 'fs';
 import fsp from 'fs/promises';
 import path from 'path';
-import { randomUUID } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
+import {
+  getCurrentUserAccount,
+  getPublicAccountById,
+  hasLoginBonusGranted,
+  markLoginBonusGranted,
+  type PublicAccount,
+} from './account-store';
 
 export type CreationPointSource = 'paid' | 'bonus' | 'trial' | 'enterprise';
 export type CreationPointTaskStatus = 'frozen' | 'succeeded' | 'failed';
@@ -61,9 +68,20 @@ interface CreationPointTransaction {
   createdAt: string;
 }
 
+export interface CreationPointAccount {
+  id: string;
+  username?: string;
+  name?: string;
+  phone?: string;
+  wechat?: string;
+  status?: 'active' | 'pending' | 'disabled';
+  createdAt?: string;
+}
+
 interface CreationPointState {
   version: number;
   updatedAt: string;
+  account: CreationPointAccount | null;
   consumedPoints: number;
   batches: CreationPointBatch[];
   tasks: CreationPointTask[];
@@ -78,6 +96,7 @@ export interface CreationPointSummary {
 }
 
 export interface CreationPointSnapshot {
+  account: CreationPointAccount | null;
   summary: CreationPointSummary;
   batches: Array<CreationPointBatch & { available: boolean }>;
   pricing: CreationPointPricing[];
@@ -135,8 +154,10 @@ export const CREATION_POINT_PRICING: CreationPointPricing[] = [
 ];
 
 const STATE_FILE_NAME = 'creation-points.json';
-const INITIAL_TRIAL_POINTS = 500;
+const INITIAL_TRIAL_POINTS = 0;
 const INITIAL_TRIAL_DAYS = 30;
+const ADMIN_LOGIN_BONUS_POINTS = 500;
+const ADMIN_LOGIN_BONUS_LABEL = '管理员赠送默认额度';
 const STALE_TASK_MS = 24 * 60 * 60 * 1000;
 const MAX_TRANSACTIONS = 2_000;
 const MAX_TASKS = 1_000;
@@ -171,7 +192,22 @@ function resolveAssetsPath(): string {
   }
 }
 
-function getStatePath(): string {
+function getAccountStateFileName(accountId: string): string {
+  const safeId = accountId.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 48) || 'account';
+  const digest = createHash('sha256').update(accountId).digest('hex').slice(0, 12);
+  return `${safeId}-${digest}.json`;
+}
+
+function getStatePath(accountId?: string): string {
+  if (accountId) {
+    return path.join(
+      resolveAssetsPath(),
+      'project-state',
+      'creation-points',
+      'accounts',
+      getAccountStateFileName(accountId)
+    );
+  }
   return path.join(resolveAssetsPath(), 'project-state', STATE_FILE_NAME);
 }
 
@@ -183,15 +219,15 @@ function isBatchAvailable(batch: CreationPointBatch, now = Date.now()): boolean 
   return !batch.expiresAt || new Date(batch.expiresAt).getTime() > now;
 }
 
-function createInitialState(): CreationPointState {
+function createInitialState(account: CreationPointAccount | null = null): CreationPointState {
   const createdAt = nowIso();
-  const expiresAt = new Date(Date.now() + INITIAL_TRIAL_DAYS * 24 * 60 * 60 * 1000).toISOString();
-  const batchId = randomUUID();
-  return {
-    version: 1,
-    updatedAt: createdAt,
-    consumedPoints: 0,
-    batches: [{
+  const batches: CreationPointBatch[] = [];
+  const transactions: CreationPointTransaction[] = [];
+
+  if (INITIAL_TRIAL_POINTS > 0) {
+    const expiresAt = new Date(Date.now() + INITIAL_TRIAL_DAYS * 24 * 60 * 60 * 1000).toISOString();
+    const batchId = randomUUID();
+    batches.push({
       id: batchId,
       source: 'trial',
       label: '本机体验额度',
@@ -200,9 +236,8 @@ function createInitialState(): CreationPointState {
       frozenPoints: 0,
       createdAt,
       expiresAt,
-    }],
-    tasks: [],
-    transactions: [{
+    });
+    transactions.push({
       id: randomUUID(),
       taskId: null,
       batchId,
@@ -211,15 +246,56 @@ function createInitialState(): CreationPointState {
       featureCode: null,
       description: `发放本机体验额度，有效期 ${INITIAL_TRIAL_DAYS} 天`,
       createdAt,
-    }],
+    });
+  }
+
+  return {
+    version: 1,
+    updatedAt: createdAt,
+    account,
+    consumedPoints: 0,
+    batches,
+    tasks: [],
+    transactions,
   };
 }
 
-function normalizeState(input: unknown): CreationPointState {
+function accountFromPublicAccount(account: PublicAccount): CreationPointAccount {
+  return {
+    id: account.id,
+    username: account.username,
+    name: account.name,
+    phone: account.phone,
+    wechat: account.wechat,
+    status: account.status === 'disabled' ? 'disabled' : 'active',
+    createdAt: account.createdAt,
+  };
+}
+
+function normalizeAccount(account: unknown): CreationPointAccount | null {
+  if (!account || typeof account !== 'object') return null;
+  const raw = account as Partial<CreationPointAccount>;
+  const id = typeof raw.id === 'string' ? raw.id.trim() : '';
+  const name = typeof raw.name === 'string' ? raw.name.trim() : '';
+  if (!id && !name) return null;
+
+  return {
+      id: id || name,
+      username: typeof raw.username === 'string' && raw.username.trim() ? raw.username.trim() : undefined,
+      name: name || undefined,
+    phone: typeof raw.phone === 'string' && raw.phone.trim() ? raw.phone.trim() : undefined,
+    wechat: typeof raw.wechat === 'string' && raw.wechat.trim() ? raw.wechat.trim() : undefined,
+    status: raw.status === 'pending' || raw.status === 'disabled' ? raw.status : 'active',
+    createdAt: typeof raw.createdAt === 'string' ? raw.createdAt : undefined,
+  };
+}
+
+function normalizeState(input: unknown, account: CreationPointAccount | null = null): CreationPointState {
   const raw = input && typeof input === 'object' ? input as Partial<CreationPointState> : {};
   return {
     version: 1,
     updatedAt: typeof raw.updatedAt === 'string' ? raw.updatedAt : nowIso(),
+    account: account || normalizeAccount(raw.account),
     consumedPoints: Number.isFinite(raw.consumedPoints) ? Math.max(0, Number(raw.consumedPoints)) : 0,
     batches: Array.isArray(raw.batches) ? raw.batches : [],
     tasks: Array.isArray(raw.tasks) ? raw.tasks : [],
@@ -227,22 +303,22 @@ function normalizeState(input: unknown): CreationPointState {
   };
 }
 
-async function readState(): Promise<CreationPointState> {
-  const statePath = getStatePath();
+async function readState(account: CreationPointAccount | null = null): Promise<CreationPointState> {
+  const statePath = getStatePath(account?.id);
   try {
-    return normalizeState(JSON.parse(await fsp.readFile(statePath, 'utf-8')));
+    return normalizeState(JSON.parse(await fsp.readFile(statePath, 'utf-8')), account);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
       console.warn('[创作点] 读取账本失败，将创建新账本:', error);
     }
-    const initialState = createInitialState();
+    const initialState = createInitialState(account);
     await writeState(initialState);
     return initialState;
   }
 }
 
 async function writeState(state: CreationPointState): Promise<void> {
-  const statePath = getStatePath();
+  const statePath = getStatePath(state.account?.id);
   await fsp.mkdir(path.dirname(statePath), { recursive: true });
   const tempPath = `${statePath}.${randomUUID()}.tmp`;
   const nextState = {
@@ -255,15 +331,37 @@ async function writeState(state: CreationPointState): Promise<void> {
   await fsp.rename(tempPath, statePath);
 }
 
-function queueMutation<T>(mutation: (state: CreationPointState) => Promise<T> | T): Promise<T> {
+function queueMutation<T>(
+  account: CreationPointAccount,
+  mutation: (state: CreationPointState) => Promise<T> | T
+): Promise<T> {
   const run = mutationQueue.then(async () => {
-    const state = await readState();
+    const state = await readState(account);
+    state.account = account;
     const result = await mutation(state);
     await writeState(state);
     return result;
   });
   mutationQueue = run.then(() => undefined, () => undefined);
   return run;
+}
+
+async function resolveCurrentCreationPointAccount(): Promise<CreationPointAccount | null> {
+  const account = await getCurrentUserAccount();
+  return account ? accountFromPublicAccount(account) : null;
+}
+
+async function resolveCreationPointAccountById(accountId: string): Promise<CreationPointAccount> {
+  const account = await getPublicAccountById(accountId);
+  if (!account) throw new Error('账号不存在');
+  return accountFromPublicAccount(account);
+}
+
+async function requireCurrentCreationPointAccount(): Promise<CreationPointAccount> {
+  const account = await resolveCurrentCreationPointAccount();
+  if (!account) throw new Error('请先登录账号后再使用创作点');
+  if (account.status === 'disabled') throw new Error('账号已停用，请联系管理员');
+  return account;
 }
 
 function getPricing(featureCode: string): CreationPointPricing {
@@ -355,11 +453,131 @@ function releaseStaleTasks(state: CreationPointState): boolean {
   return changed;
 }
 
+function hasAdminLoginBonusBatch(state: CreationPointState): boolean {
+  return state.batches.some((batch) => (
+    batch.source === 'bonus' &&
+    batch.label === ADMIN_LOGIN_BONUS_LABEL
+  ));
+}
+
+function ensureAdminLoginBonus(state: CreationPointState): boolean {
+  if (!state.account?.id || ADMIN_LOGIN_BONUS_POINTS <= 0) return false;
+  if (hasAdminLoginBonusBatch(state)) return false;
+
+  const createdAt = nowIso();
+  const batchId = randomUUID();
+  state.batches.push({
+    id: batchId,
+    source: 'bonus',
+    label: ADMIN_LOGIN_BONUS_LABEL,
+    initialPoints: ADMIN_LOGIN_BONUS_POINTS,
+    remainingPoints: ADMIN_LOGIN_BONUS_POINTS,
+    frozenPoints: 0,
+    createdAt,
+    expiresAt: null,
+  });
+  appendTransaction(state, {
+    taskId: null,
+    batchId,
+    type: 'grant',
+    amount: ADMIN_LOGIN_BONUS_POINTS,
+    featureCode: null,
+    description: `管理员赠送默认额度 ${ADMIN_LOGIN_BONUS_POINTS.toLocaleString('zh-CN')} 点`,
+  });
+  return true;
+}
+
+function buildSnapshot(state: CreationPointState): CreationPointSnapshot {
+  const now = Date.now();
+  return {
+    account: state.account || null,
+    summary: getSummary(state),
+    batches: state.batches.map((batch) => ({ ...batch, available: isBatchAvailable(batch, now) })),
+    pricing: CREATION_POINT_PRICING,
+    transactions: [...state.transactions].reverse().slice(0, 100),
+    tasks: [...state.tasks].reverse().slice(0, 100),
+    updatedAt: state.updatedAt,
+  };
+}
+
+function emptySnapshot(): CreationPointSnapshot {
+  const createdAt = nowIso();
+  return {
+    account: null,
+    summary: {
+      availablePoints: 0,
+      frozenPoints: 0,
+      consumedPoints: 0,
+      totalGrantedPoints: 0,
+    },
+    batches: [],
+    pricing: CREATION_POINT_PRICING,
+    transactions: [],
+    tasks: [],
+    updatedAt: createdAt,
+  };
+}
+
+function grantPointsInState(
+  state: CreationPointState,
+  amount: number,
+  label: string,
+  source: CreationPointSource = 'bonus'
+): void {
+  const normalizedAmount = Math.max(0, Math.round(amount));
+  if (normalizedAmount <= 0) return;
+  const createdAt = nowIso();
+  const batchId = randomUUID();
+  state.batches.push({
+    id: batchId,
+    source,
+    label,
+    initialPoints: normalizedAmount,
+    remainingPoints: normalizedAmount,
+    frozenPoints: 0,
+    createdAt,
+    expiresAt: null,
+  });
+  appendTransaction(state, {
+    taskId: null,
+    batchId,
+    type: 'grant',
+    amount: normalizedAmount,
+    featureCode: null,
+    description: `${label} ${normalizedAmount.toLocaleString('zh-CN')} 点`,
+  });
+}
+
+function reduceAvailablePointsInState(state: CreationPointState, amount: number, description: string): void {
+  let remaining = Math.max(0, Math.round(amount));
+  if (remaining <= 0) return;
+  let reduced = 0;
+  for (const batch of getSpendableBatches(state)) {
+    if (remaining <= 0) break;
+    const used = Math.min(batch.remainingPoints, remaining);
+    batch.remainingPoints -= used;
+    reduced += used;
+    remaining -= used;
+  }
+  if (reduced <= 0) return;
+  state.consumedPoints += reduced;
+  appendTransaction(state, {
+    taskId: null,
+    batchId: null,
+    type: 'consume',
+    amount: reduced,
+    featureCode: null,
+    description,
+  });
+}
+
 export async function getPendingExternalCreationPointTasks(
   featureCode?: string
 ): Promise<PendingExternalCreationPointTask[]> {
+  const account = await resolveCurrentCreationPointAccount();
+  if (!account) return [];
   await mutationQueue;
-  const state = await readState();
+  const state = await readState(account);
   return state.tasks
     .filter((task) => (
       task.status === 'frozen' &&
@@ -375,19 +593,75 @@ export async function getPendingExternalCreationPointTasks(
 }
 
 export async function getCreationPointSnapshot(): Promise<CreationPointSnapshot> {
-  await queueMutation((state) => {
+  const account = await resolveCurrentCreationPointAccount();
+  if (!account) return emptySnapshot();
+  await queueMutation(account, (state) => {
     releaseStaleTasks(state);
   });
-  const state = await readState();
-  const now = Date.now();
-  return {
-    summary: getSummary(state),
-    batches: state.batches.map((batch) => ({ ...batch, available: isBatchAvailable(batch, now) })),
-    pricing: CREATION_POINT_PRICING,
-    transactions: [...state.transactions].reverse().slice(0, 100),
-    tasks: [...state.tasks].reverse().slice(0, 100),
-    updatedAt: state.updatedAt,
-  };
+  const state = await readState(account);
+  return buildSnapshot(state);
+}
+
+export async function getCreationPointSnapshotForAccount(accountId: string): Promise<CreationPointSnapshot> {
+  const account = await resolveCreationPointAccountById(accountId);
+  await mutationQueue;
+  const state = await readState(account);
+  return buildSnapshot(state);
+}
+
+export async function ensureLoginBonusForAccount(accountId: string): Promise<void> {
+  const account = await resolveCreationPointAccountById(accountId);
+  if (await hasLoginBonusGranted(account.id)) return;
+  let alreadyHadDefaultBonus = false;
+  let granted = false;
+  await queueMutation(account, (state) => {
+    alreadyHadDefaultBonus = hasAdminLoginBonusBatch(state);
+    if (alreadyHadDefaultBonus) return;
+    granted = ensureAdminLoginBonus(state);
+  });
+  if (alreadyHadDefaultBonus || granted) {
+    await markLoginBonusGranted(account.id);
+  }
+}
+
+export async function grantCreationPointsToAccount(input: {
+  accountId: string;
+  points: number;
+  label?: string;
+  source?: CreationPointSource;
+}): Promise<CreationPointSnapshot> {
+  const account = await resolveCreationPointAccountById(input.accountId);
+  await queueMutation(account, (state) => {
+    grantPointsInState(
+      state,
+      input.points,
+      input.label?.trim() || '管理员赠送额度',
+      input.source || 'bonus'
+    );
+  });
+  return getCreationPointSnapshotForAccount(account.id);
+}
+
+export async function setAccountAvailableCreationPoints(input: {
+  accountId: string;
+  points: number;
+}): Promise<CreationPointSnapshot> {
+  const account = await resolveCreationPointAccountById(input.accountId);
+  await queueMutation(account, (state) => {
+    const target = Math.max(0, Math.round(Number(input.points) || 0));
+    const current = getSummary(state).availablePoints;
+    const delta = target - current;
+    if (delta > 0) {
+      grantPointsInState(state, delta, '管理员设置额度', 'bonus');
+    } else if (delta < 0) {
+      reduceAvailablePointsInState(
+        state,
+        Math.abs(delta),
+        `管理员调整额度至 ${target.toLocaleString('zh-CN')} 点`
+      );
+    }
+  });
+  return getCreationPointSnapshotForAccount(account.id);
 }
 
 export async function freezeCreationPoints(input: {
@@ -396,7 +670,8 @@ export async function freezeCreationPoints(input: {
   points?: number;
   metadata?: Record<string, unknown>;
 }): Promise<{ taskId: string; frozenPoints: number }> {
-  return queueMutation((state) => {
+  const account = await requireCurrentCreationPointAccount();
+  return queueMutation(account, (state) => {
     releaseStaleTasks(state);
     const pricing = getPricing(input.featureCode);
     const quantity = Math.max(1, Math.ceil(Number(input.quantity) || 1));
@@ -457,7 +732,8 @@ export async function freezeCreationPoints(input: {
 }
 
 export async function bindCreationPointTask(taskId: string, externalTaskId: string): Promise<void> {
-  await queueMutation((state) => {
+  const account = await requireCurrentCreationPointAccount();
+  await queueMutation(account, (state) => {
     const task = state.tasks.find((item) => item.id === taskId);
     if (!task || task.status !== 'frozen') return;
     task.externalTaskId = externalTaskId;
@@ -473,7 +749,8 @@ export async function completeCreationPointTask(
     metadata?: Record<string, unknown>;
   }
 ): Promise<void> {
-  await queueMutation((state) => {
+  const account = await requireCurrentCreationPointAccount();
+  await queueMutation(account, (state) => {
     const task = state.tasks.find((item) => item.id === taskId);
     if (!task || task.status !== 'frozen') return;
 
@@ -547,7 +824,8 @@ export async function completeCreationPointTask(
 }
 
 export async function failCreationPointTask(taskId: string, reason = '任务失败'): Promise<void> {
-  await queueMutation((state) => {
+  const account = await requireCurrentCreationPointAccount();
+  await queueMutation(account, (state) => {
     const task = state.tasks.find((item) => item.id === taskId);
     if (!task) return;
     refundTaskInState(state, task, reason);
@@ -559,7 +837,8 @@ export async function settleCreationPointTaskByExternalId(
   outcome: 'success' | 'failure',
   reason?: string
 ): Promise<void> {
-  await queueMutation((state) => {
+  const account = await requireCurrentCreationPointAccount();
+  await queueMutation(account, (state) => {
     const task = state.tasks.find((item) => item.externalTaskId === externalTaskId);
     if (!task || task.status !== 'frozen') return;
     if (outcome === 'failure') {

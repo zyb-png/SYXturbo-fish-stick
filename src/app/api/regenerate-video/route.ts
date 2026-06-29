@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { S3Storage } from 'coze-coding-dev-sdk';
 import { SEEDANCE_CONFIG, cleanPrompt, getSeedanceApiKey, getSeedanceConfig, resolveAssetUrl as resolveImageUrl } from '@/lib/seedance';
+import { requireUserLoginResponse } from '@/lib/auth-guard';
 import {
   completeCreationPointTask,
   failCreationPointTask,
@@ -29,7 +30,7 @@ async function createSeedanceTask(
   } = {}
 ): Promise<{ taskId: string } | null> {
   const apiKey = getSeedanceApiKey();
-  if (!apiKey) throw new Error('未配置 Seedance API Key，请在右上角「设置」中填写');
+  if (!apiKey) throw new Error('未配置 Seedance API Key，请联系管理员配置视频接口');
   const seedanceConfig = getSeedanceConfig();
 
   try {
@@ -185,6 +186,9 @@ async function pollTaskCompletion(
 
 export async function POST(request: NextRequest) {
   let creationPointTaskId = '';
+  const auth = await requireUserLoginResponse();
+  if (auth.response) return auth.response;
+
   try {
     const body = await request.json();
     const { videoPrompt, imageUrl, duration = 15, ratio = '9:16' } = body;

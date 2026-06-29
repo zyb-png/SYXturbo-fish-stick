@@ -2,11 +2,15 @@ import { NextRequest, NextResponse } from 'next/server';
 import { stream as oaiStream, invoke as oaiInvoke } from '@/lib/openai-client';
 import { estimateMessagesTokens, estimateTokens } from '@/lib/token-utils';
 import { tryExtractAndFixJSON, removeControlCharsInStrings } from '@/lib/json-utils';
+import { requireUserLoginResponse } from '@/lib/auth-guard';
 
 // 每批处理的场景数
 const BATCH_SIZE = 8;
 
 export async function POST(request: NextRequest) {
+  const auth = await requireUserLoginResponse();
+  if (auth.response) return auth.response;
+
   try {
     const { content, fileName, batch = 0, sceneMarkers } = await request.json();
 
@@ -93,7 +97,6 @@ async function identifySceneMarkers( content: string, fileName: string): Promise
   const localScenes = extractLocalSceneNames(content);
   if (localScenes.length > 0) {
     console.log(`从剧本结构识别到 ${localScenes.length} 个场景:`, localScenes);
-    return localScenes.slice(0, 30);
   }
 
   const systemPrompt = `你是一个专业的影视场景分析师。请分析文本，识别所有独特的场景名称。
@@ -103,7 +106,7 @@ async function identifySceneMarkers( content: string, fileName: string): Promise
 2. 场景名称应该简洁明确（如：办公室、医院走廊、公园等）
 3. 合并相同场景的不同叫法（如"医院大厅"和"医院走廊"可以合并为"医院"）
 4. 按出场顺序排列
-5. 最多识别30个主要场景
+5. 不要遗漏文本中出现的场景
 
 输出JSON数组格式：
 ["场景1", "场景2", "场景3"]`;
@@ -124,8 +127,10 @@ async function identifySceneMarkers( content: string, fileName: string): Promise
     }
   } catch (error: any) {
     console.warn('场景名称模型识别失败，使用本地兜底:', error?.message || error);
-    return extractLocalSceneNames(content).slice(0, 30);
+    return localScenes;
   }
+
+  let modelScenes: string[] = [];
 
   // 清理响应内容，移除 markdown 代码块标记
   let cleanedResponse = response.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
@@ -137,9 +142,7 @@ async function identifySceneMarkers( content: string, fileName: string): Promise
       const sanitizedResponse = removeControlCharsInStrings(cleanedResponse);
       const parsed = JSON.parse(sanitizedResponse);
       if (Array.isArray(parsed)) {
-        // 去重：确保每个名称只出现一次
-        const uniqueNames = [...new Set(parsed.filter((s): s is string => typeof s === 'string'))];
-        return uniqueNames;
+        modelScenes = parsed.filter((s): s is string => typeof s === 'string');
       }
     } catch (e) {
       console.log('场景名称数组解析失败:', e);
@@ -148,22 +151,42 @@ async function identifySceneMarkers( content: string, fileName: string): Promise
   }
 
   // 解析场景名称数组
-  const result = tryExtractAndFixJSON(response);
-  if (Array.isArray(result)) {
-    // 去重：确保每个名称只出现一次
-    const uniqueNames = [...new Set(result.filter((s): s is string => typeof s === 'string'))];
-    return uniqueNames;
+  if (modelScenes.length === 0) {
+    const result = tryExtractAndFixJSON(response);
+    if (Array.isArray(result)) {
+      modelScenes = result.filter((s): s is string => typeof s === 'string');
+    }
   }
   
   // 尝试用正则提取
-  const matches = response.match(/"([^"]+)"/g);
-  if (matches) {
-    const names = matches.map(m => m.replace(/"/g, '')).filter(s => s.length > 0 && s.length < 50);
-    // 去重
-    return [...new Set(names)];
+  if (modelScenes.length === 0) {
+    const matches = response.match(/"([^"]+)"/g);
+    if (matches) {
+      modelScenes = matches.map(m => m.replace(/"/g, '')).filter(s => s.length > 0 && s.length < 50);
+    }
   }
 
-  return [];
+  const mergedScenes = mergeSceneNames(localScenes, modelScenes);
+  console.log(`合并场景名称: 本地 ${localScenes.length} 个，模型 ${modelScenes.length} 个，合并后 ${mergedScenes.length} 个`);
+  return mergedScenes;
+}
+
+function mergeSceneNames(...sceneGroups: string[][]): string[] {
+  const names: string[] = [];
+  const seen = new Set<string>();
+
+  for (const group of sceneGroups) {
+    for (const rawName of group) {
+      if (typeof rawName !== 'string') continue;
+      const name = rawName.trim();
+      const normalizedName = normalizeSceneNameForMatch(name);
+      if (!name || !normalizedName || seen.has(normalizedName)) continue;
+      seen.add(normalizedName);
+      names.push(name);
+    }
+  }
+
+  return names;
 }
 
 function extractLocalSceneNames(content: string): string[] {
@@ -203,6 +226,46 @@ function extractLocalSceneNames(content: string): string[] {
   }
 
   return names;
+}
+
+function normalizeSceneNameForMatch(rawName: unknown): string {
+  if (typeof rawName !== 'string') return '';
+  return rawName
+    .replace(/[【】]/g, '')
+    .replace(/\[[^\]]*]/g, '')
+    .replace(/（[^）]*）/g, '')
+    .replace(/\([^)]*\)/g, '')
+    .replace(/\s*(?:内|外|日|夜|晨|早|晚|上午|下午|黄昏|雨夜|白天|黑夜)\s*$/g, '')
+    .replace(/[，,。；;：:、\s]+/g, '')
+    .trim();
+}
+
+function findMatchingScene(scenes: any[], sceneName: string) {
+  const normalizedName = normalizeSceneNameForMatch(sceneName);
+  return scenes.find((scene) => {
+    if (!scene || typeof scene.name !== 'string') return false;
+    if (scene.name === sceneName) return true;
+    const normalizedScene = normalizeSceneNameForMatch(scene.name);
+    return normalizedScene === normalizedName || normalizedScene.includes(normalizedName) || normalizedName.includes(normalizedScene);
+  });
+}
+
+function hasUsefulList(value: unknown): value is string[] {
+  return Array.isArray(value) && value.some((item) => typeof item === 'string' && item.trim() && !item.includes('待补充'));
+}
+
+function inferSceneDefaults(sceneName: string) {
+  const isExterior = /外|室外|马路|街|巷|院子|门口|公园|村头/.test(sceneName);
+  const isNight = /夜|雨夜|黑夜/.test(sceneName);
+  const isMorning = /晨|早|上午/.test(sceneName);
+  const isEvening = /晚|黄昏/.test(sceneName);
+
+  return {
+    type: isExterior ? '室外' : '室内',
+    timeOfDay: isNight ? '夜晚' : isMorning ? '上午' : isEvening ? '傍晚' : '白天',
+    importance: '次要场景',
+    atmosphere: isNight ? '压抑、紧张' : '剧情推进',
+  };
 }
 
 /**
@@ -288,7 +351,8 @@ async function extractBatchScenes(
   // 重要：使用 sceneNames 的顺序来分配 id，确保名称和 id 正确对应
   const completeScenes = sceneNames.map((sceneName, idx) => {
     // 尝试从 LLM 返回的数据中找到匹配的场景
-    const matchedScene = scenes.find(s => s.name === sceneName);
+    const matchedScene = findMatchingScene(scenes, sceneName);
+    const defaults = inferSceneDefaults(sceneName);
     const defaultDescription = `该场景为"${sceneName}"，具体环境特点待补充描述。请根据剧本内容补充该场景的视觉特点、环境布局、氛围等信息。`;
     
     // 使用 sceneNames 的索引来生成全局唯一的 id
@@ -305,14 +369,14 @@ async function extractBatchScenes(
         id: globalId,
         name: sceneName,
         description: hasValidDescription ? matchedScene.description : defaultDescription,
-        type: matchedScene.type || '室内',
-        importance: matchedScene.importance || '次要场景',
-        timeOfDay: matchedScene.timeOfDay || '白天',
-        atmosphere: matchedScene.atmosphere || '普通',
-        keyEvents: matchedScene.keyEvents && matchedScene.keyEvents.length > 0 
+        type: matchedScene.type || defaults.type,
+        importance: matchedScene.importance || defaults.importance,
+        timeOfDay: matchedScene.timeOfDay || defaults.timeOfDay,
+        atmosphere: matchedScene.atmosphere || defaults.atmosphere,
+        keyEvents: hasUsefulList(matchedScene.keyEvents)
           ? matchedScene.keyEvents 
           : ['待补充关键事件'],
-        visualElements: matchedScene.visualElements && matchedScene.visualElements.length > 0 
+        visualElements: hasUsefulList(matchedScene.visualElements)
           ? matchedScene.visualElements 
           : ['待补充视觉元素'],
       };
@@ -322,10 +386,10 @@ async function extractBatchScenes(
         id: globalId,
         name: sceneName,
         description: defaultDescription,
-        type: '室内',
-        importance: '次要场景',
-        timeOfDay: '白天',
-        atmosphere: '普通',
+        type: defaults.type,
+        importance: defaults.importance,
+        timeOfDay: defaults.timeOfDay,
+        atmosphere: defaults.atmosphere,
         keyEvents: ['待补充关键事件'],
         visualElements: ['待补充视觉元素'],
       };
@@ -357,7 +421,7 @@ async function extractScenesTraditional(
 规则：
 1. 提取所有独特场景
 2. 合并相同场景的不同叫法
-3. 最多30个场景
+3. 不要遗漏文本中出现的场景
 
 输出JSON：
 {
@@ -393,7 +457,7 @@ async function extractScenesTraditional(
     }
   } catch (error: any) {
     console.warn('传统场景模型提取失败，使用本地兜底:', error?.message || error);
-    const localScenes = extractLocalSceneNames(content).slice(0, 30);
+    const localScenes = extractLocalSceneNames(content);
     const fallback = await extractBatchScenes(content, localScenes, 0);
     return {
       totalScenes: fallback.scenes.length,

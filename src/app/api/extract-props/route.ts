@@ -2,11 +2,15 @@ import { NextRequest, NextResponse } from 'next/server';
 import { stream as oaiStream, invoke as oaiInvoke } from '@/lib/openai-client';
 import { estimateMessagesTokens, estimateTokens } from '@/lib/token-utils';
 import { tryExtractAndFixJSON, removeControlCharsInStrings } from '@/lib/json-utils';
+import { requireUserLoginResponse } from '@/lib/auth-guard';
 
 // 每批处理的道具数
 const BATCH_SIZE = 8;
 
 export async function POST(request: NextRequest) {
+  const auth = await requireUserLoginResponse();
+  if (auth.response) return auth.response;
+
   try {
     const { content, fileName, batch = 0, propMarkers } = await request.json();
 
