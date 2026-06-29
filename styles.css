@@ -548,6 +548,13 @@ textarea:focus {
   color: var(--theme-accent);
 }
 
+.button-link.primary-link {
+  border-color: var(--theme-accent);
+  background: var(--theme-gradient);
+  color: #fff;
+  font-weight: 800;
+}
+
 .version-badge {
   display: inline-flex;
   align-items: center;

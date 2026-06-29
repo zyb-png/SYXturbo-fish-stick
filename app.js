@@ -1263,10 +1263,15 @@ async function refreshAccountSummary() {
 
 function updateAccountBadge() {
   if (!state.account) return;
-  $('accountBadge').textContent = `${state.account.username} · 剩余 ${state.account.remaining} 秒`;
-  $('adminLink').hidden = state.account.role !== 'admin';
+  const isPublicAccess = Boolean(state.account.publicAccess);
+  $('accountBadge').textContent = isPublicAccess
+    ? '游客模式 · 可直接使用'
+    : `${state.account.username} · 剩余 ${state.account.remaining} 秒`;
+  $('adminLink').hidden = isPublicAccess || state.account.role !== 'admin';
+  $('loginLink').hidden = !isPublicAccess;
+  $('logoutLink').hidden = isPublicAccess;
   $('submitBtn').disabled = state.account.remaining <= 0;
-  $('submitBtn').title = state.account.remaining <= 0 ? '个人额度已用完，请联系管理员' : '';
+  $('submitBtn').title = state.account.remaining <= 0 ? '额度已用完，请联系管理员' : '';
 }
 
 async function apiFetch(url, options = {}) {

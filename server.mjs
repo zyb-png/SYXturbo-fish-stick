@@ -68,7 +68,7 @@ const server = http.createServer(async (req, res) => {
     }
     const requestUrl = new URL(req.url || '/', `http://localhost:${PORT}`);
     if (requestUrl.pathname === '/login' && req.method === 'GET') {
-      if (PUBLIC_ACCESS) {
+      if (PUBLIC_ACCESS && !requestUrl.searchParams.has('manual')) {
         res.writeHead(303, { 'Location': '/', 'Cache-Control': 'no-store' });
         res.end();
         return;
@@ -138,11 +138,11 @@ const server = http.createServer(async (req, res) => {
     }
     if (req.url?.startsWith('/api/')) {
       if (req.url === '/api/session' && req.method === 'GET') {
-        sendJson(res, 200, publicUser(auth.user));
+        sendJson(res, 200, { ...publicUser(auth.user), publicAccess: Boolean(auth.publicAccess) });
         return;
       }
       if (req.url === '/api/me' && req.method === 'GET') {
-        sendJson(res, 200, publicUser(auth.user));
+        sendJson(res, 200, { ...publicUser(auth.user), publicAccess: Boolean(auth.publicAccess) });
         return;
       }
       if (req.url.startsWith('/api/usage') && req.method === 'GET') {
