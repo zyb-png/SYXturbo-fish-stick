@@ -35,7 +35,6 @@ interface AccountDraft {
   status: 'active' | 'disabled';
   password: string;
   setPoints: string;
-  grantPoints: string;
 }
 
 function formatPoints(value: number): string {
@@ -60,7 +59,6 @@ function createDraft(account: AdminAccountRow): AccountDraft {
     status: account.status,
     password: '',
     setPoints: String(account.wallet.availablePoints || 0),
-    grantPoints: '',
   };
 }
 
@@ -77,7 +75,6 @@ export default function AdminAccountsPage() {
     name: '',
     phone: '',
     wechat: '',
-    initialPoints: '0',
   });
 
   const totalAvailable = useMemo(
@@ -186,7 +183,6 @@ export default function AdminAccountsPage() {
     await postAction({
       action: 'create',
       ...newAccount,
-      initialPoints: Number(newAccount.initialPoints || 0),
     }, '账号已创建');
     setNewAccount({
       username: '',
@@ -194,7 +190,6 @@ export default function AdminAccountsPage() {
       name: '',
       phone: '',
       wechat: '',
-      initialPoints: '0',
     });
   };
 
@@ -209,7 +204,6 @@ export default function AdminAccountsPage() {
           status: 'active',
           password: '',
           setPoints: '0',
-          grantPoints: '',
         }),
         ...patch,
       },
@@ -310,16 +304,20 @@ export default function AdminAccountsPage() {
             </section>
 
             <section className="rounded-md border border-amber-400/25 bg-[#11100d] p-5">
-              <div className="mb-4 flex items-center gap-2 text-lg font-medium">
-                <Plus className="h-5 w-5 text-amber-300" />
-                新建账号
+              <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+                <div className="flex items-center gap-2 text-lg font-medium">
+                  <Plus className="h-5 w-5 text-amber-300" />
+                  新建账号
+                </div>
+                <div className="rounded-md border border-amber-400/25 bg-black/25 px-3 py-1.5 text-xs text-amber-100/70">
+                  默认赠送 500 点：用户首次登录自动发放一次，后台不可重复赠送
+                </div>
               </div>
-              <div className="grid grid-cols-1 gap-3 md:grid-cols-6">
+              <div className="grid grid-cols-1 gap-3 md:grid-cols-5">
                 <Input placeholder="账号" value={newAccount.username} onChange={(event) => setNewAccount({ ...newAccount, username: event.target.value })} className="border-amber-400/25 bg-black/35" />
                 <PasswordInput placeholder="密码" value={newAccount.password} onChange={(event) => setNewAccount({ ...newAccount, password: event.target.value })} className="border-amber-400/25 bg-black/35" />
                 <Input placeholder="姓名/备注" value={newAccount.name} onChange={(event) => setNewAccount({ ...newAccount, name: event.target.value })} className="border-amber-400/25 bg-black/35" />
                 <Input placeholder="微信" value={newAccount.wechat} onChange={(event) => setNewAccount({ ...newAccount, wechat: event.target.value })} className="border-amber-400/25 bg-black/35" />
-                <Input type="number" min="0" placeholder="额外点数" value={newAccount.initialPoints} onChange={(event) => setNewAccount({ ...newAccount, initialPoints: event.target.value })} className="border-amber-400/25 bg-black/35" />
                 <Button className="bg-amber-500 text-black hover:bg-amber-400" onClick={() => void createAccount()} disabled={loading || !newAccount.username || !newAccount.password}>
                   创建
                 </Button>
@@ -378,12 +376,6 @@ export default function AdminAccountsPage() {
                           <Input type="number" min="0" value={draft.setPoints} onChange={(event) => updateDraft(account.id, { setPoints: event.target.value })} className="border-amber-400/25 bg-black/35" />
                           <Button variant="outline" className="border-amber-400/30 bg-black/20 text-amber-100 hover:bg-amber-500/10" onClick={() => void postAction({ action: 'setPoints', accountId: account.id, points: Number(draft.setPoints || 0) }, '点数已设置')}>
                             设置点数
-                          </Button>
-                        </div>
-                        <div className="grid grid-cols-2 gap-2">
-                          <Input type="number" min="0" placeholder="赠送点数" value={draft.grantPoints} onChange={(event) => updateDraft(account.id, { grantPoints: event.target.value })} className="border-amber-400/25 bg-black/35" />
-                          <Button variant="outline" className="border-amber-400/30 bg-black/20 text-amber-100 hover:bg-amber-500/10" onClick={() => void postAction({ action: 'grantPoints', accountId: account.id, points: Number(draft.grantPoints || 0) }, '点数已赠送')}>
-                            赠送
                           </Button>
                         </div>
                         <div className="grid grid-cols-2 gap-2">

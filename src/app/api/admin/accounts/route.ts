@@ -7,7 +7,6 @@ import {
 } from '@/lib/account-store';
 import {
   getCreationPointSnapshotForAccount,
-  grantCreationPointsToAccount,
   setAccountAvailableCreationPoints,
 } from '@/lib/creation-points';
 
@@ -54,7 +53,7 @@ export async function POST(request: NextRequest) {
     const action = typeof body.action === 'string' ? body.action : '';
 
     if (action === 'create') {
-      const account = await createManagedAccount({
+      await createManagedAccount({
         username: body.username,
         password: body.password,
         name: body.name,
@@ -62,15 +61,6 @@ export async function POST(request: NextRequest) {
         wechat: body.wechat,
         status: body.status === 'disabled' ? 'disabled' : 'active',
       });
-      const initialPoints = toNumber(body.initialPoints);
-      if (initialPoints && initialPoints > 0) {
-        await grantCreationPointsToAccount({
-          accountId: account.id,
-          points: initialPoints,
-          label: '管理员赠送额度',
-          source: 'bonus',
-        });
-      }
     } else if (action === 'updateProfile') {
       await updateManagedAccount({
         accountId: body.accountId,
@@ -88,14 +78,7 @@ export async function POST(request: NextRequest) {
         points,
       });
     } else if (action === 'grantPoints') {
-      const points = toNumber(body.points);
-      if (!points || points <= 0) throw new Error('请输入要赠送的点数');
-      await grantCreationPointsToAccount({
-        accountId: body.accountId,
-        points,
-        label: typeof body.label === 'string' && body.label.trim() ? body.label.trim() : '管理员赠送额度',
-        source: 'bonus',
-      });
+      throw new Error('默认赠送额度由系统自动发放，每个账号仅一次，后台不能手动重复赠送');
     } else {
       throw new Error('未知后台操作');
     }

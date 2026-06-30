@@ -481,7 +481,10 @@ function releaseStaleTasks(state: CreationPointState): boolean {
 function hasAdminLoginBonusBatch(state: CreationPointState): boolean {
   return state.batches.some((batch) => (
     batch.source === 'bonus' &&
-    batch.label === ADMIN_LOGIN_BONUS_LABEL
+    (
+      batch.label === ADMIN_LOGIN_BONUS_LABEL ||
+      batch.label.includes('管理员赠送')
+    )
   ));
 }
 
@@ -655,12 +658,17 @@ export async function grantCreationPointsToAccount(input: {
   source?: CreationPointSource;
 }): Promise<CreationPointSnapshot> {
   const account = await resolveCreationPointAccountById(input.accountId);
+  const label = input.label?.trim() || '管理员赠送额度';
+  const source = input.source || 'bonus';
+  if (source === 'bonus' && (label === ADMIN_LOGIN_BONUS_LABEL || label.includes('管理员赠送'))) {
+    throw new Error('默认赠送额度由系统自动发放，每个账号仅一次，不能手动重复赠送');
+  }
   await queueMutation(account, (state) => {
     grantPointsInState(
       state,
       input.points,
-      input.label?.trim() || '管理员赠送额度',
-      input.source || 'bonus'
+      label,
+      source
     );
   });
   return getCreationPointSnapshotForAccount(account.id);
