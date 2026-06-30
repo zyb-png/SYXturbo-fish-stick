@@ -8,8 +8,8 @@ services:
     environment:
       PORT: 4177
       APP_STATE_FILE: /var/data/app-state.json
+      DB_FILE: /var/data/manfei.sqlite
     ports:
       - "80:4177"
     volumes:
       - ./data:/var/data
-

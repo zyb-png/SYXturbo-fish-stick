@@ -1,6 +1,7 @@
 const state = {
   assets: [],
   pollingTimer: null,
+  quotaRefreshTimer: null,
   lastJson: {},
   history: JSON.parse(localStorage.getItem('manfei_history') || '[]'),
   taskRecords: readLocalJson('manfei_task_records', []).filter(record => (
@@ -19,6 +20,9 @@ const state = {
   soundEnabled: localStorage.getItem('manfei_completion_sound') !== 'off',
   interfaceTheme: readInterfaceTheme(),
   shownTaskErrors: new Set(),
+  session: null,
+  projects: [],
+  mediaPollingTimers: {},
 };
 
 const $ = (id) => document.getElementById(id);
@@ -153,6 +157,8 @@ const labels = {
 document.addEventListener('DOMContentLoaded', async () => {
   localStorage.setItem('manfei_task_records', JSON.stringify(state.taskRecords));
   bindEvents();
+  await loadSessionAndProjects();
+  startQuotaRefresh();
   setupWebPet();
   renderAssets();
   renderHistory();
@@ -167,6 +173,96 @@ document.addEventListener('DOMContentLoaded', async () => {
   addLog('info', '页面已就绪', '资源库仅保存在当前浏览器');
 });
 
+async function loadSessionAndProjects() {
+  try {
+    state.session = await apiFetch('/api/session');
+    renderSessionInfo();
+    const result = await apiFetch('/api/projects');
+    state.projects = Array.isArray(result.items) ? result.items : [];
+    renderProjectSelect();
+  } catch (error) {
+    if (error.status === 401) {
+      state.session = null;
+      state.projects = [];
+      renderSessionInfo();
+      renderProjectSelect();
+      setStatus('当前未登录，登录后才能上传素材、查询额度和提交生成任务。', 'info');
+      return;
+    }
+    setStatus(error.message, 'error');
+  }
+}
+
+function renderSessionInfo() {
+  const account = state.session?.account;
+  const quota = state.session?.quota;
+  if (!account) {
+    if ($('accountBadge')) $('accountBadge').textContent = '未登录';
+    if ($('quotaBadge')) {
+      $('quotaBadge').textContent = '登录后查看账号额度';
+      $('quotaBadge').title = '登录后实时显示当前账号剩余额度';
+    }
+    if ($('adminEntry')) $('adminEntry').hidden = true;
+    if ($('loginEntry')) $('loginEntry').hidden = false;
+    if ($('logoutEntry')) $('logoutEntry').hidden = true;
+    return;
+  }
+  if ($('accountBadge') && account) {
+    const roleName = { super_admin: '超级管理员', admin: '管理员', user: '用户' }[account.role] || account.role;
+    $('accountBadge').textContent = `${account.display_name || account.username} · ${roleName}`;
+  }
+  if ($('quotaBadge') && quota) {
+    $('quotaBadge').textContent = `账号剩余 ${quota.remaining_rmb} 元`;
+    $('quotaBadge').title = `当前账号剩余额度：${quota.remaining_rmb} 元`;
+  }
+  if ($('adminEntry') && account) {
+    if (account.role === 'super_admin') {
+      $('adminEntry').href = '/super-admin';
+      $('adminEntry').textContent = '超级后台';
+      $('adminEntry').hidden = false;
+    } else if (account.role === 'admin') {
+      $('adminEntry').href = '/admin';
+      $('adminEntry').textContent = '管理员后台';
+      $('adminEntry').hidden = false;
+    } else {
+      $('adminEntry').hidden = true;
+    }
+  }
+  if ($('loginEntry')) $('loginEntry').hidden = true;
+  if ($('logoutEntry')) $('logoutEntry').hidden = false;
+}
+
+function renderProjectSelect() {
+  const select = $('projectId');
+  if (!select) return;
+  const current = select.value;
+  select.innerHTML = '';
+  if (state.projects.length === 0) {
+    const option = document.createElement('option');
+    option.value = '';
+    option.textContent = '暂无可用项目';
+    select.appendChild(option);
+    return;
+  }
+  state.projects.forEach(project => {
+    const option = document.createElement('option');
+    option.value = project.id;
+    const budgetText = project.budget_rmb > 0
+      ? ` · 预算剩余 ${project.remaining_budget_rmb ?? 0}/${project.budget_rmb} 元`
+      : '';
+    const budgetBlocked = project.budget_exceeded === true;
+    option.textContent = `${project.name}${budgetText}${project.status !== 'active' ? ` · ${project.status}` : ''}${budgetBlocked ? ' · 预算已用完' : ''}`;
+    option.disabled = project.status !== 'active' || budgetBlocked;
+    select.appendChild(option);
+  });
+  if (state.projects.some(project => project.id === current && project.status === 'active' && project.budget_exceeded !== true)) {
+    select.value = current;
+  } else {
+    const firstActive = state.projects.find(project => project.status === 'active' && project.budget_exceeded !== true);
+    select.value = firstActive?.id || '';
+  }
+}
+
 function bindEvents() {
   $('model').addEventListener('change', syncResolution);
   $('duration').addEventListener('change', normalizeDuration);
@@ -178,7 +274,6 @@ function bindEvents() {
   $('fillDemoBtn').addEventListener('click', fillDemo);
   $('queryBtn').addEventListener('click', () => queryTask($('taskId').value.trim()));
   $('cancelBtn').addEventListener('click', cancelTask);
-  $('balanceBtn').addEventListener('click', getBalance);
   $('usageBtn').addEventListener('click', getUsage);
   $('soundToggleBtn').addEventListener('click', toggleCompletionSound);
   $('themeSettingsBtn').addEventListener('click', openThemeSettings);
@@ -1027,7 +1122,12 @@ function buildRequestBody() {
   if (!Number.isFinite(duration) || duration < 4 || duration > 15) {
     throw new Error('视频时长必须为 4–15 秒');
   }
+  const projectId = $('projectId')?.value || '';
+  if (!projectId) {
+    throw new Error('请选择项目后再提交生成任务');
+  }
   return {
+    project_id: projectId,
     model: $('model').value,
     content: buildContent(),
     duration,
@@ -1085,6 +1185,7 @@ async function submitTask() {
     } else {
       setStatus('任务已提交，但响应中没有任务 ID', 'error');
     }
+    refreshQuota({ quiet: true });
   } catch (error) {
     setStatus(error.message, 'error');
     showJson(error.data || { error: error.message });
@@ -1133,9 +1234,11 @@ async function queryTask(taskId, options = {}) {
       clearPolling();
       handleVideoResult(result, { notify: !wasCompleted });
       addLog('success', `任务完成：${taskId}`, result.content?.video_url || result.video_url || '');
+      refreshQuota({ quiet: true });
     } else if (['failed', 'cancelled', 'expired'].includes(status)) {
       clearPolling();
       setStatus(`任务结束：${status}`, 'error');
+      refreshQuota({ quiet: true });
       const errorSummary = getVideoErrorSummary(result, { taskId, status });
       addLog('error', `任务结束：${taskId}`, errorSummary);
       if (status !== 'cancelled' && (!options.quiet || !state.shownTaskErrors.has(taskId))) {
@@ -1176,6 +1279,7 @@ async function cancelTask() {
       response: result,
     });
     addLog('info', `取消任务：${taskId}`, JSON.stringify(result, null, 2));
+    refreshQuota({ quiet: true });
   } catch (error) {
     setStatus(error.message, 'error');
     addLog('error', `取消失败：${taskId}`, error.message);
@@ -1254,15 +1358,35 @@ async function queryAsset(assetId) {
   }
 }
 
-async function getBalance() {
+function startQuotaRefresh() {
+  if (state.quotaRefreshTimer) clearInterval(state.quotaRefreshTimer);
+  state.quotaRefreshTimer = setInterval(() => {
+    refreshQuota({ quiet: true });
+  }, 20000);
+}
+
+async function refreshQuota(options = {}) {
   try {
     const result = await apiFetch('/api/me');
-    showJson(result);
-    setStatus(`余额：${result.balance_rmb ?? '-'} 元`, 'success');
-    addLog('info', '余额查询', `${result.balance_rmb ?? '-'} 元`);
+    if (result.quota) {
+      state.session = {
+        ...(state.session || {}),
+        quota: result.quota,
+        account: result.account || state.session?.account,
+        manfei_balance_rmb: result.manfei_balance_rmb ?? state.session?.manfei_balance_rmb,
+      };
+      renderSessionInfo();
+    }
+    if (!options.quiet) {
+      setStatus(`账号剩余额度：${result.quota?.remaining_rmb ?? '-'} 元`, 'success');
+    }
   } catch (error) {
-    setStatus(error.message, 'error');
-    addLog('error', '余额查询失败', error.message);
+    if (error.status === 401) {
+      state.session = null;
+      renderSessionInfo();
+      return;
+    }
+    if (!options.quiet) setStatus(error.message, 'error');
   }
 }
 
@@ -1456,7 +1580,7 @@ function upsertTaskRecord(update, options = {}) {
   const existing = state.taskRecords.find(item => item.id === update.id);
   if (existing) {
     Object.assign(existing, update);
-  } else if (options.allowCreate && update.source === 'submitted') {
+  } else if (options.allowCreate && ['submitted', 'media'].includes(update.source)) {
     state.taskRecords.unshift({
       id: update.id,
       source: 'submitted',
@@ -1495,7 +1619,8 @@ function renderTaskRecords() {
     const row = document.createElement('div');
     const presentation = getTaskPresentation(record.status);
     const elapsed = getTaskElapsed(record);
-    row.className = `record-item task-card task-${presentation.tone}`;
+    const canDerive = record.source === 'submitted' && record.status === 'succeeded' && record.videoUrl;
+    row.className = `record-item task-card task-${presentation.tone} ${getTaskKindClass(record)}${canDerive ? ' task-can-derive' : ''}`;
     row.dataset.taskId = record.id;
     row.innerHTML = `
       <div class="task-card-head">
@@ -1510,6 +1635,8 @@ function renderTaskRecords() {
       <div class="task-time">${escapeHtml(record.createdAt || record.updatedAt || '')}</div>
       <div class="record-actions">
         ${record.videoUrl ? '<button class="task-play" type="button" data-action="video">▷ 查看视频</button>' : '<button type="button" data-action="query">↻ 查询</button>'}
+        ${canDerive ? '<button class="task-derive task-derive-subtitle" type="button" data-action="subtitle" title="擦除字幕" aria-label="擦除字幕">T</button>' : ''}
+        ${canDerive ? '<button class="task-derive task-derive-enhance" type="button" data-action="enhance" title="视频超分" aria-label="视频超分">🪄</button>' : ''}
         <button type="button" data-action="reuse">↻ 复用</button>
         <button type="button" data-action="json">⚙ 调试</button>
         <button class="task-delete" type="button" data-action="delete" title="删除任务记录" aria-label="删除任务记录">⌫</button>
@@ -1519,14 +1646,30 @@ function renderTaskRecords() {
     if (queryBtn) {
       queryBtn.addEventListener('click', () => {
         $('taskId').value = record.id;
-        queryTask(record.id);
+        if (record.source === 'media') {
+          queryMediaTask(record.id);
+        } else {
+          queryTask(record.id);
+        }
       });
+    }
+    const subtitleBtn = row.querySelector('[data-action="subtitle"]');
+    if (subtitleBtn) {
+      subtitleBtn.addEventListener('click', () => startMediaDerivative(record, 'subtitle_erase'));
+    }
+    const enhanceBtn = row.querySelector('[data-action="enhance"]');
+    if (enhanceBtn) {
+      enhanceBtn.addEventListener('click', () => startMediaDerivative(record, 'video_enhance'));
     }
     row.querySelector('[data-action="reuse"]').addEventListener('click', () => reuseTask(record));
     row.querySelector('[data-action="json"]').addEventListener('click', () => {
       openTaskDebug(record);
     });
     row.querySelector('[data-action="delete"]').addEventListener('click', () => {
+      if (state.mediaPollingTimers[record.id]) {
+        clearInterval(state.mediaPollingTimers[record.id]);
+        delete state.mediaPollingTimers[record.id];
+      }
       state.taskRecords = state.taskRecords.filter(item => item.id !== record.id);
       localStorage.setItem('manfei_task_records', JSON.stringify(state.taskRecords));
       renderTaskRecords();
@@ -1542,16 +1685,119 @@ function renderTaskRecords() {
   });
 }
 
+function getTaskKindClass(record) {
+  if (record.taskType === 'subtitle_erase') return 'task-kind-subtitle';
+  if (record.taskType === 'video_enhance') return 'task-kind-enhance';
+  return 'task-kind-generation';
+}
+
 function getTaskPresentation(status = '') {
   const value = String(status).toLowerCase();
   if (value === 'succeeded') return { label: '已完成', tone: 'completed', icon: '✓' };
   if (['running', 'processing', 'in_progress'].includes(value)) return { label: '生成中', tone: 'running', icon: '↻' };
+  if (['submitted', 'executing', 'execute', 'started'].includes(value)) return { label: '处理中', tone: 'running', icon: '↻' };
+  if (['success', 'finished', 'finish', 'completed'].includes(value)) return { label: '已完成', tone: 'completed', icon: '✓' };
   if (['queued', 'pending', 'created'].includes(value)) return { label: '等待生成', tone: 'queued', icon: '…' };
-  if (value === 'failed') return { label: '生成失败', tone: 'failed', icon: '!' };
+  if (['failed', 'fail', 'error'].includes(value)) return { label: '处理失败', tone: 'failed', icon: '!' };
   if (value === 'cancel_requested') return { label: '取消中', tone: 'cancelled', icon: '…' };
   if (value === 'cancelled') return { label: '已取消', tone: 'cancelled', icon: '×' };
   if (value === 'expired') return { label: '已过期', tone: 'cancelled', icon: '×' };
   return { label: status || '未知状态', tone: 'queued', icon: '…' };
+}
+
+function normalizeMediaStatus(status = '') {
+  const value = String(status || '').toLowerCase();
+  if (['success', 'succeeded', 'finished', 'finish', 'completed'].includes(value)) return 'succeeded';
+  if (['failed', 'fail', 'error'].includes(value)) return 'failed';
+  if (['cancelled', 'canceled'].includes(value)) return 'cancelled';
+  if (['submitted', 'running', 'execute', 'executing', 'started', 'pending', ''].includes(value)) return 'running';
+  return status || 'running';
+}
+
+async function startMediaDerivative(sourceRecord, taskType) {
+  if (!sourceRecord.videoUrl) return setStatus('这个任务没有可处理的视频 URL', 'error');
+  const isSubtitle = taskType === 'subtitle_erase';
+  const endpoint = isSubtitle ? '/api/media/subtitle-erase' : '/api/media/enhance';
+  const label = isSubtitle ? '字幕擦除' : '视频超分';
+  try {
+    setStatus(`正在提交${label}任务...`, 'running');
+    addLog('info', `${label}任务提交开始`, sourceRecord.videoUrl);
+    const result = await apiFetch(endpoint, {
+      method: 'POST',
+      body: JSON.stringify({ video_url: sourceRecord.videoUrl }),
+    });
+    const runId = result.run_id || result.id;
+    if (!runId) throw new Error(`${label}接口未返回 RunId`);
+    upsertTaskRecord({
+      id: runId,
+      source: 'media',
+      taskType,
+      parentTaskId: sourceRecord.id,
+      status: 'running',
+      createdAt: new Date().toLocaleString(),
+      createdAtMs: Date.now(),
+      updatedAt: new Date().toLocaleString(),
+      response: result,
+      sourceVideoUrl: sourceRecord.videoUrl,
+    }, { allowCreate: true });
+    setStatus(`${label}任务已提交：${runId}`, 'success');
+    addLog('success', `${label}任务已提交：${runId}`, '');
+    startMediaPolling(runId);
+  } catch (error) {
+    setStatus(error.message, 'error');
+    showJson(error.data || { error: error.message });
+    addLog('error', `${label}任务提交失败`, error.message);
+    showVideoErrorDialog(error.data || error, {
+      title: `${label}任务提交失败`,
+      fallbackMessage: error.message,
+      httpStatus: error.status,
+    });
+  }
+}
+
+function startMediaPolling(runId) {
+  clearInterval(state.mediaPollingTimers[runId]);
+  state.mediaPollingTimers[runId] = setInterval(() => queryMediaTask(runId, { quiet: true }), 6000);
+  queryMediaTask(runId, { quiet: true });
+}
+
+async function queryMediaTask(runId, options = {}) {
+  const record = state.taskRecords.find(item => item.id === runId);
+  if (!runId || !record?.taskType) return;
+  const label = record.taskType === 'subtitle_erase' ? '字幕擦除' : '视频超分';
+  try {
+    if (!options.quiet) setStatus(`正在查询${label}任务：${runId}`, 'running');
+    const result = await apiFetch(`/api/media/executions/${encodeURIComponent(runId)}`);
+    const status = normalizeMediaStatus(result.status);
+    const videoUrl = result.video_url || record.videoUrl || '';
+    upsertTaskRecord({
+      id: runId,
+      status,
+      videoUrl,
+      updatedAt: new Date().toLocaleString(),
+      completedAtMs: status === 'succeeded' ? (record.completedAtMs || Date.now()) : record.completedAtMs,
+      response: result,
+    });
+    showJson(result);
+    if (status === 'succeeded') {
+      clearInterval(state.mediaPollingTimers[runId]);
+      delete state.mediaPollingTimers[runId];
+      setStatus(`${label}任务已完成`, 'success');
+      addLog('success', `${label}任务完成：${runId}`, videoUrl || '结果中未返回可直接预览的视频 URL');
+      showTaskCompletionToast(runId);
+    } else if (['failed', 'cancelled', 'expired'].includes(status)) {
+      clearInterval(state.mediaPollingTimers[runId]);
+      delete state.mediaPollingTimers[runId];
+      setStatus(`${label}任务结束：${status}`, 'error');
+      addLog('error', `${label}任务失败：${runId}`, getVideoErrorSummary(result.raw || result, { status }));
+      showVideoErrorDialog(result.raw || result, { title: `${label}任务失败`, taskId: runId, status });
+    } else if (!options.quiet) {
+      setStatus(`${label}任务状态：${status}`, 'running');
+    }
+  } catch (error) {
+    if (!options.quiet) setStatus(error.message, 'error');
+    addLog('error', `${label}任务查询失败`, error.message);
+  }
 }
 
 function shortTaskId(taskId = '') {
@@ -1574,6 +1820,7 @@ function reuseTask(record) {
   const params = record.params || {};
   restoreTaskReferenceAssets(record);
   if (record.prompt) setPromptText(record.prompt);
+  if (params.project_id && $('projectId')) $('projectId').value = params.project_id;
   if (record.model || params.model) $('model').value = record.model || params.model;
   syncResolution();
   if (params.resolution) $('resolution').value = params.resolution;

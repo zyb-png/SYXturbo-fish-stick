@@ -15,7 +15,7 @@
       }
     } catch {}
   </script>
-  <link rel="stylesheet" href="./styles.css?v=20260612-interface-themes-2">
+  <link rel="stylesheet" href="./styles.css?v=20260701-project-budget">
 </head>
 <body>
   <main class="app">
@@ -70,10 +70,14 @@
           </div>
         </div>
         <div class="top-actions">
+          <span id="accountBadge" class="top-badge">未登录</span>
+          <span id="quotaBadge" class="top-badge">额度 --</span>
+          <a id="adminEntry" class="top-link" href="/admin" hidden>后台</a>
+          <a id="loginEntry" class="top-link" href="/login">登录</a>
+          <a id="logoutEntry" class="top-link" href="/logout" hidden>退出</a>
           <button id="themeSettingsBtn" class="icon-button theme-settings-button" type="button" title="界面设置" aria-label="界面设置" aria-expanded="false">⚙</button>
           <button id="soundToggleBtn" class="icon-button sound-toggle" type="button" title="关闭完成提示音" aria-label="关闭完成提示音" aria-pressed="true">♪</button>
-          <button id="balanceBtn" type="button">查询余额</button>
-          <button id="usageBtn" type="button">用量</button>
+          <button id="usageBtn" class="top-tool-button" type="button">用量</button>
         </div>
       </header>
 
@@ -109,6 +113,12 @@
         </div>
 
         <div class="grid">
+          <label class="field">
+            <span>项目</span>
+            <select id="projectId">
+              <option value="">加载项目中...</option>
+            </select>
+          </label>
           <label class="field">
             <span>模型</span>
             <select id="model">
@@ -340,6 +350,6 @@
     </form>
   </div>
 
-  <script src="./app.js?v=20260612-interface-themes-2"></script>
+  <script src="./app.js?v=20260701-project-budget"></script>
 </body>
 </html>

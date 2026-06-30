@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>漫飞管理后台</title>
+  <script>
+    (() => {
+      try {
+        const savedTheme = localStorage.getItem('manfei_interface_theme');
+        const themes = ['gold', 'orange', 'violet', 'cyan', 'pink', 'blue', 'silver'];
+        if (themes.includes(savedTheme)) {
+          document.documentElement.setAttribute('data-theme', savedTheme);
+        }
+      } catch {}
+    })();
+  </script>
+  <link rel="stylesheet" href="./styles.css?v=20260701-project-budget">
+</head>
+<body>
+  <main class="admin-app">
+    <header class="admin-topbar">
+      <div>
+        <p class="admin-eyebrow">Manfei Seedance</p>
+        <h1 id="adminTitle">管理后台</h1>
+        <p id="adminSubtitle">账号、项目、额度与报表</p>
+      </div>
+      <nav class="admin-nav">
+        <a href="/">生成工作台</a>
+        <a id="superLink" href="/super-admin" hidden>超级后台</a>
+        <a href="/logout">退出</a>
+      </nav>
+    </header>
+
+    <section class="admin-summary">
+      <article>
+        <span>当前账号</span>
+        <strong id="adminAccount">--</strong>
+      </article>
+      <article>
+        <span>API 余额</span>
+        <strong id="adminQuotaTotal">--</strong>
+      </article>
+      <article>
+        <span>已用</span>
+        <strong id="adminQuotaUsed">--</strong>
+      </article>
+      <article>
+        <span>冻结</span>
+        <strong id="adminQuotaFrozen">--</strong>
+      </article>
+    </section>
+
+    <section class="admin-grid">
+      <section class="admin-card admin-card-wide admin-management-card" id="managementCard">
+        <div class="admin-card-head">
+          <div>
+            <h2>管理中心</h2>
+            <p id="managementHint">账号和项目集中管理，通过切换查看不同内容。</p>
+          </div>
+          <div class="admin-card-tools">
+            <div class="admin-segmented" role="tablist" aria-label="管理中心类型">
+              <button id="accountsModeBtn" class="active" type="button" role="tab" aria-selected="true">账号</button>
+              <button id="projectsModeBtn" type="button" role="tab" aria-selected="false">项目</button>
+            </div>
+            <button id="refreshAccountsBtn" type="button">刷新账号</button>
+            <button id="refreshProjectsBtn" type="button" hidden>刷新项目</button>
+          </div>
+        </div>
+        <div id="accountsPane" class="admin-pane">
+          <form id="accountForm" class="admin-form">
+            <input id="accountUsername" placeholder="账号名" autocomplete="off" required>
+            <input id="accountDisplayName" placeholder="显示名称" autocomplete="off">
+            <input id="accountPassword" placeholder="初始密码" autocomplete="new-password" required>
+            <select id="accountRole">
+              <option value="user">普通用户</option>
+              <option value="admin">管理员</option>
+            </select>
+            <select id="accountAdminId" title="所属管理员"></select>
+            <input id="accountQuota" type="number" min="0" step="0.01" placeholder="总额度（元）">
+            <button class="primary" type="submit">创建账号</button>
+          </form>
+          <div id="accountsTable" class="admin-table"></div>
+        </div>
+        <div id="projectsPane" class="admin-pane" hidden>
+          <form id="projectForm" class="admin-form">
+            <input id="projectName" placeholder="项目名称" required>
+            <select id="projectAdminId" title="所属管理员"></select>
+            <input id="projectBudget" type="number" min="0" step="0.01" placeholder="项目预算（元，可空）">
+            <input id="projectNotes" placeholder="备注">
+            <button class="primary" type="submit">创建项目</button>
+          </form>
+          <div id="projectsTable" class="admin-table"></div>
+        </div>
+      </section>
+
+      <section class="admin-card admin-card-wide">
+        <div class="admin-card-head">
+          <div>
+            <h2>用量与导出</h2>
+            <p>按日期、账号、项目筛选，直接导出 XLSX</p>
+          </div>
+          <a id="exportLink" class="admin-button" href="/api/export.xlsx">导出 XLSX</a>
+        </div>
+        <form id="usageFilter" class="admin-form admin-filter">
+          <input id="dateFrom" type="date">
+          <input id="dateTo" type="date">
+          <select id="filterAccount"><option value="">全部账号</option></select>
+          <select id="filterProject"><option value="">全部项目</option></select>
+          <button type="submit">查询</button>
+        </form>
+        <div id="usageTotal" class="admin-total">总金额：--</div>
+        <div id="usageTable" class="admin-table"></div>
+      </section>
+
+      <section class="admin-card admin-card-wide">
+        <div class="admin-card-head">
+          <div>
+            <h2>Manfei 实时扣款记录</h2>
+            <p>实时读取 Manfei API /v1/usage，每一笔扣费、退款和调差都会单独显示</p>
+          </div>
+          <button id="refreshBillingBtn" type="button">刷新扣款记录</button>
+        </div>
+        <div id="billingSummary" class="billing-summary"></div>
+        <div id="billingTable" class="admin-table billing-table"></div>
+      </section>
+
+      <section class="admin-card admin-card-wide" id="pricingCard" hidden>
+        <div class="admin-card-head">
+          <div>
+            <h2>本地估算价格表</h2>
+            <p>按每秒单价预估，提交任务时自动乘以视频时长，最终仍以 Manfei 实际扣款为准</p>
+          </div>
+          <div class="admin-card-tools">
+            <button id="syncPricingBtn" type="button">同步实际价格</button>
+            <button id="savePricingBtn" type="button">保存价格表</button>
+          </div>
+        </div>
+        <div id="pricingTable" class="admin-table pricing-table"></div>
+      </section>
+    </section>
+  </main>
+
+  <div id="adminToast" class="admin-toast" hidden></div>
+  <div id="adminDialog" class="admin-dialog" hidden>
+    <button id="adminDialogBackdrop" class="admin-dialog-backdrop" type="button" aria-label="关闭弹窗"></button>
+    <form id="adminDialogForm" class="admin-dialog-card">
+      <h3 id="adminDialogTitle">设置</h3>
+      <p id="adminDialogHint"></p>
+      <input id="adminDialogInput" autocomplete="off">
+      <div class="admin-dialog-actions">
+        <button id="adminDialogCancel" type="button">取消</button>
+        <button class="primary" type="submit">确定</button>
+      </div>
+    </form>
+  </div>
+  <script src="./admin.js?v=20260701-project-budget"></script>
+</body>
+</html>
