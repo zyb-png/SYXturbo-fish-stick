@@ -12,7 +12,7 @@ import {
 
 export type CreationPointSource = 'paid' | 'bonus' | 'trial' | 'enterprise';
 export type CreationPointTaskStatus = 'frozen' | 'succeeded' | 'failed';
-export type CreationPointTransactionType = 'grant' | 'freeze' | 'consume' | 'refund';
+export type CreationPointTransactionType = 'grant' | 'freeze' | 'consume' | 'refund' | 'adjustment';
 
 export interface CreationPointPricing {
   featureCode: string;
@@ -384,9 +384,24 @@ function getSummary(state: CreationPointState): CreationPointSummary {
       .filter((batch) => isBatchAvailable(batch, now))
       .reduce((sum, batch) => sum + Math.max(0, batch.remainingPoints), 0),
     frozenPoints: state.batches.reduce((sum, batch) => sum + Math.max(0, batch.frozenPoints), 0),
-    consumedPoints: Math.max(0, state.consumedPoints),
+    consumedPoints: getActualConsumedPoints(state),
     totalGrantedPoints: state.batches.reduce((sum, batch) => sum + Math.max(0, batch.initialPoints), 0),
   };
+}
+
+function getActualConsumedPoints(state: CreationPointState): number {
+  const transactionConsumed = state.transactions.reduce((sum, transaction) => {
+    if (transaction.type !== 'consume') return sum;
+    if (!transaction.taskId && !transaction.featureCode) return sum;
+    return sum + Math.max(0, Math.round(transaction.amount || 0));
+  }, 0);
+
+  const taskConsumed = state.tasks.reduce((sum, task) => {
+    if (task.status !== 'succeeded') return sum;
+    return sum + Math.max(0, Math.round(task.finalPoints ?? task.estimatedPoints ?? 0));
+  }, 0);
+
+  return Math.max(transactionConsumed, taskConsumed);
 }
 
 function getSpendableBatches(state: CreationPointState): CreationPointBatch[] {
@@ -414,6 +429,16 @@ function appendTransaction(
     id: randomUUID(),
     createdAt: nowIso(),
   });
+}
+
+function normalizeTransactionForSnapshot(transaction: CreationPointTransaction): CreationPointTransaction {
+  if (transaction.type === 'consume' && !transaction.taskId && !transaction.featureCode) {
+    return {
+      ...transaction,
+      type: 'adjustment',
+    };
+  }
+  return transaction;
 }
 
 function refundTaskInState(state: CreationPointState, task: CreationPointTask, reason: string): void {
@@ -494,7 +519,7 @@ function buildSnapshot(state: CreationPointState): CreationPointSnapshot {
     summary: getSummary(state),
     batches: state.batches.map((batch) => ({ ...batch, available: isBatchAvailable(batch, now) })),
     pricing: CREATION_POINT_PRICING,
-    transactions: [...state.transactions].reverse().slice(0, 100),
+    transactions: [...state.transactions].reverse().slice(0, 100).map(normalizeTransactionForSnapshot),
     tasks: [...state.tasks].reverse().slice(0, 100),
     updatedAt: state.updatedAt,
   };
@@ -560,11 +585,10 @@ function reduceAvailablePointsInState(state: CreationPointState, amount: number,
     remaining -= used;
   }
   if (reduced <= 0) return;
-  state.consumedPoints += reduced;
   appendTransaction(state, {
     taskId: null,
     batchId: null,
-    type: 'consume',
+    type: 'adjustment',
     amount: reduced,
     featureCode: null,
     description,

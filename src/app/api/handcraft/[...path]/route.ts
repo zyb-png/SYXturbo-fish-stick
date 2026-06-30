@@ -148,7 +148,7 @@ function buildSessionPayload(
     id: account.id,
     username: account.username,
     name: account.name || account.username,
-    quota: snapshot.summary.totalGrantedPoints,
+    quota: snapshot.summary.availablePoints + snapshot.summary.frozenPoints + snapshot.summary.consumedPoints,
     used: snapshot.summary.consumedPoints,
     remaining: snapshot.summary.availablePoints,
     frozen: snapshot.summary.frozenPoints,
@@ -188,8 +188,10 @@ async function handleUsage(request: NextRequest): Promise<NextResponse> {
   const snapshot = await getCreationPointSnapshotForAccount(account.id);
   const search = new URL(request.url).searchParams;
   const limit = Math.min(100, Math.max(1, Number(search.get('limit')) || 20));
+  const chargedOnly = search.get('charged_only') === 'true';
   const items = snapshot.transactions
     .filter((item) => item.type !== 'freeze')
+    .filter((item) => !chargedOnly || (item.type === 'consume' && Boolean(item.taskId || item.featureCode)))
     .slice()
     .reverse()
     .slice(0, limit)
@@ -206,7 +208,7 @@ async function handleUsage(request: NextRequest): Promise<NextResponse> {
 
   return json({
     username: account.username,
-    quota: snapshot.summary.totalGrantedPoints,
+    quota: snapshot.summary.availablePoints + snapshot.summary.frozenPoints + snapshot.summary.consumedPoints,
     used: snapshot.summary.consumedPoints,
     remaining: snapshot.summary.availablePoints,
     frozen: snapshot.summary.frozenPoints,

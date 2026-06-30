@@ -54,7 +54,9 @@ interface WalletSnapshot {
   }>;
   transactions: Array<{
     id: string;
-    type: 'grant' | 'freeze' | 'consume' | 'refund';
+    taskId?: string | null;
+    featureCode?: string | null;
+    type: 'grant' | 'freeze' | 'consume' | 'refund' | 'adjustment';
     amount: number;
     description: string;
     createdAt: string;
@@ -66,6 +68,7 @@ const TRANSACTION_LABELS = {
   freeze: '冻结',
   consume: '扣除',
   refund: '退回',
+  adjustment: '调整',
 };
 
 const DEFAULT_ADMIN_GIFT_POINTS = 500;
@@ -415,6 +418,7 @@ export function CreationPointsWallet() {
                   <div className="px-3 py-8 text-center text-sm text-amber-100/55">暂无流水</div>
                 ) : visibleTransactions.map((transaction) => {
                   const positive = transaction.type === 'grant' || transaction.type === 'refund';
+                  const neutral = transaction.type === 'adjustment';
                   const adminGift = isAdminGiftTransaction(transaction);
                   return (
                     <div key={transaction.id} className="flex items-center justify-between gap-4 px-3 py-2.5 text-sm">
@@ -431,8 +435,8 @@ export function CreationPointsWallet() {
                           {formatTime(transaction.createdAt)} · {TRANSACTION_LABELS[transaction.type]}
                         </div>
                       </div>
-                      <div className={`shrink-0 font-medium tabular-nums ${positive ? 'text-emerald-300' : ''}`}>
-                        {positive ? '+' : '-'}{formatPoints(transaction.amount)}
+                      <div className={`shrink-0 font-medium tabular-nums ${positive ? 'text-emerald-300' : neutral ? 'text-amber-100/70' : ''}`}>
+                        {neutral ? '' : positive ? '+' : '-'}{formatPoints(transaction.amount)}
                       </div>
                     </div>
                   );

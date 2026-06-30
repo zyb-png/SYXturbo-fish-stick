@@ -85,6 +85,14 @@ export default function AdminAccountsPage() {
     [accounts]
   );
 
+  const displayAccounts = useMemo(() => (
+    [...accounts].sort((a, b) => {
+      const aName = (a.name || a.username || '').trim();
+      const bName = (b.name || b.username || '').trim();
+      return aName.localeCompare(bName, 'zh-CN') || a.username.localeCompare(b.username, 'zh-CN');
+    })
+  ), [accounts]);
+
   const applyAccounts = useCallback((rows: AdminAccountRow[]) => {
     setAccounts(rows);
     setDrafts((previous) => {
@@ -320,25 +328,28 @@ export default function AdminAccountsPage() {
 
             <section className="overflow-hidden rounded-md border border-amber-400/25 bg-[#11100d]">
               <div className="grid grid-cols-[1.15fr_1fr_1.35fr_1.5fr] border-b border-amber-400/20 px-4 py-3 text-xs text-amber-300/80">
-                <div>账号</div>
+                <div>姓名/账号</div>
                 <div>点数</div>
                 <div>资料</div>
                 <div>操作</div>
               </div>
               <div className="divide-y divide-amber-400/12">
-                {accounts.length === 0 ? (
+                {displayAccounts.length === 0 ? (
                   <div className="px-4 py-10 text-center text-sm text-amber-100/60">暂无账号</div>
-                ) : accounts.map((account) => {
+                ) : displayAccounts.map((account) => {
                   const draft = drafts[account.id] || createDraft(account);
                   return (
                     <div key={account.id} className="grid grid-cols-1 gap-4 px-4 py-4 text-sm lg:grid-cols-[1.15fr_1fr_1.35fr_1.5fr]">
                       <div className="min-w-0">
                         <div className="flex flex-wrap items-center gap-2">
-                          <span className="font-medium text-amber-50">{account.username}</span>
+                          <span className="font-semibold text-amber-50">{account.name || account.username}</span>
                           <Badge className={account.status === 'active' ? 'bg-emerald-500/20 text-emerald-200' : 'bg-red-500/20 text-red-200'}>
                             {account.status === 'active' ? '启用' : '停用'}
                           </Badge>
                         </div>
+                        {account.name && (
+                          <div className="mt-1 text-xs text-amber-100/70">账号：{account.username}</div>
+                        )}
                         <div className="mt-1 text-xs text-amber-100/55">最近登录：{formatTime(account.lastLoginAt)}</div>
                       </div>
 
