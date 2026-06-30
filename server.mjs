@@ -67,6 +67,16 @@ const VOD_CONFIG = {
   subtitleEncodeMode: process.env.VOD_SUBTITLE_ERASE_ENCODE_MODE || 'Size',
 };
 
+const RUNNINGHUB_CONFIG = {
+  apiKey: process.env.RUNNINGHUB_API_KEY || process.env.RH_API_KEY || '',
+  baseUrl: (process.env.RUNNINGHUB_API_BASE || 'https://www.runninghub.cn/openapi/v2').replace(/\/$/, ''),
+  subtitleEraseEndpoint: process.env.RUNNINGHUB_SUBTITLE_ERASE_ENDPOINT || '/volc-subtitle-erase-pro/video',
+  subtitleEraseType: process.env.RUNNINGHUB_SUBTITLE_ERASE_TYPE || 'subtitle',
+  subtitleEncodeMode: process.env.RUNNINGHUB_SUBTITLE_ENCODE_MODE || 'size',
+  videoUpscalerEndpoint: process.env.RUNNINGHUB_VIDEO_UPSCALER_ENDPOINT || '/rhart-video/video-upscaler',
+  videoUpscalerResolution: process.env.RUNNINGHUB_VIDEO_UPSCALER_RESOLUTION || '720p',
+};
+
 fsSync.mkdirSync(path.dirname(DB_FILE), { recursive: true });
 const db = new DatabaseSync(DB_FILE);
 
@@ -857,11 +867,104 @@ function extractExecutionVideoUrl(payload) {
   return candidates.find(value => typeof value === 'string' && /^https?:\/\//.test(value)) || '';
 }
 
+function runningHubUrl(endpoint) {
+  const suffix = String(endpoint || '').startsWith('/') ? endpoint : `/${endpoint}`;
+  return `${RUNNINGHUB_CONFIG.baseUrl}${suffix}`;
+}
+
+function requireRunningHubKey() {
+  if (!RUNNINGHUB_CONFIG.apiKey) {
+    throw Object.assign(new Error('服务端缺少 RUNNINGHUB_API_KEY，无法提交 RunningHub 媒体任务'), { status: 500 });
+  }
+}
+
+async function callRunningHub(endpoint, body) {
+  requireRunningHubKey();
+  const response = await fetch(runningHubUrl(endpoint), {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${RUNNINGHUB_CONFIG.apiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body),
+  });
+  const text = await response.text();
+  let data;
+  try {
+    data = text ? JSON.parse(text) : {};
+  } catch {
+    data = { raw: text };
+  }
+  return { ok: response.ok && !data.errorCode, status: response.status, data, text };
+}
+
+function makeRunningHubSubtitleEraseBody(videoUrl, options = {}) {
+  return {
+    videoUrl,
+    eraseType: options.eraseType || RUNNINGHUB_CONFIG.subtitleEraseType,
+    encodeMode: String(options.encodeMode || RUNNINGHUB_CONFIG.subtitleEncodeMode).toLowerCase(),
+    clientToken: options.clientToken || crypto.randomBytes(16).toString('hex'),
+    ...(Array.isArray(options.eraseRatioLocation) ? { eraseRatioLocation: options.eraseRatioLocation } : {}),
+  };
+}
+
+function makeRunningHubVideoUpscalerBody(videoUrl, options = {}) {
+  return {
+    videoUrl,
+    targetResolution: options.targetResolution || options.resolution || RUNNINGHUB_CONFIG.videoUpscalerResolution,
+  };
+}
+
+function extractRunningHubTaskId(payload) {
+  return payload?.taskId || payload?.task_id || payload?.data?.taskId || payload?.data?.task_id || '';
+}
+
+function extractRunningHubStatus(payload) {
+  return payload?.status || payload?.data?.status || '';
+}
+
+function extractRunningHubVideoUrl(payload) {
+  const results = payload?.results || payload?.data?.results || [];
+  if (!Array.isArray(results)) return '';
+  const item = results.find(result => {
+    const type = String(result?.outputType || '').toLowerCase();
+    return type === 'mp4' || type === 'mov' || type === 'video' || /^https?:\/\//.test(String(result?.url || ''));
+  });
+  return typeof item?.url === 'string' ? item.url : '';
+}
+
 async function handleMediaTaskSubmit(req, res, type) {
   try {
     const body = await readJson(req);
     const videoUrl = String(body.video_url || body.videoUrl || '').trim();
     if (!videoUrl) return sendJson(res, 400, { error: '缺少 video_url' });
+    if (type === 'subtitle_erase' || type === 'video_enhance') {
+      const isSubtitle = type === 'subtitle_erase';
+      const requestBody = isSubtitle
+        ? makeRunningHubSubtitleEraseBody(videoUrl, body.options || {})
+        : makeRunningHubVideoUpscalerBody(videoUrl, body.options || {});
+      const endpoint = isSubtitle ? RUNNINGHUB_CONFIG.subtitleEraseEndpoint : RUNNINGHUB_CONFIG.videoUpscalerEndpoint;
+      const label = isSubtitle ? '去字幕' : '视频超分';
+      const upstream = await callRunningHub(endpoint, requestBody);
+      const runId = extractRunningHubTaskId(upstream.data);
+      if (!upstream.ok || !runId) {
+        return sendJson(res, upstream.status || 500, {
+          error: collectErrorText(upstream.data) || upstream.data?.errorMessage || `RunningHub ${label}任务提交失败`,
+          raw: upstream.data,
+          request: requestBody.clientToken ? { ...requestBody, clientToken: '[hidden]' } : requestBody,
+        });
+      }
+      return sendJson(res, 200, {
+        id: runId,
+        run_id: runId,
+        type,
+        provider: 'runninghub',
+        status: 'submitted',
+        source_video_url: videoUrl,
+        request: requestBody.clientToken ? { ...requestBody, clientToken: '[hidden]' } : requestBody,
+        raw: upstream.data,
+      });
+    }
     const requestBody = type === 'subtitle_erase'
       ? makeSubtitleEraseBody(videoUrl, body.options || {})
       : makeVideoEnhanceBody(videoUrl, body.options || {});
@@ -888,7 +991,27 @@ async function handleMediaTaskSubmit(req, res, type) {
   }
 }
 
-async function handleMediaTaskQuery(req, res, runId) {
+async function handleMediaTaskQuery(req, res, runId, taskType = '') {
+  if (taskType === 'subtitle_erase' || taskType === 'video_enhance') {
+    const upstream = await callRunningHub('/query', { taskId: runId });
+    if (!upstream.ok) {
+      return sendJson(res, upstream.status || 500, {
+        error: collectErrorText(upstream.data) || upstream.data?.errorMessage || 'RunningHub 媒体任务查询失败',
+        raw: upstream.data,
+      });
+    }
+    const status = extractRunningHubStatus(upstream.data);
+    const videoUrl = extractRunningHubVideoUrl(upstream.data);
+    return sendJson(res, 200, {
+      id: runId,
+      run_id: runId,
+      type: taskType,
+      provider: 'runninghub',
+      status,
+      video_url: videoUrl,
+      raw: upstream.data,
+    });
+  }
   const upstream = await callVolcVod('GetExecution', { RunId: runId });
   if (!upstream.ok) {
     return sendJson(res, upstream.status || 500, {
@@ -1990,7 +2113,7 @@ const server = http.createServer(async (req, res) => {
     if (pathname === '/api/media/subtitle-erase' && req.method === 'POST') return handleMediaTaskSubmit(req, res, 'subtitle_erase');
     if (pathname === '/api/media/enhance' && req.method === 'POST') return handleMediaTaskSubmit(req, res, 'video_enhance');
     const mediaTaskMatch = pathname.match(/^\/api\/media\/executions\/([^/]+)$/);
-    if (mediaTaskMatch && req.method === 'GET') return handleMediaTaskQuery(req, res, mediaTaskMatch[1]);
+    if (mediaTaskMatch && req.method === 'GET') return handleMediaTaskQuery(req, res, mediaTaskMatch[1], url.searchParams.get('type') || '');
     if (pathname === '/api/video/tasks' && req.method === 'POST') return handleCreateVideoTask(req, res, session, false);
     if (pathname === '/api/video/tasks/generate' && req.method === 'POST') return handleCreateVideoTask(req, res, session, true);
     const taskMatch = pathname.match(/^\/api\/video\/tasks\/([^/]+)$/);

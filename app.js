@@ -1724,7 +1724,10 @@ async function startMediaDerivative(sourceRecord, taskType) {
     addLog('info', `${label}任务提交开始`, sourceRecord.videoUrl);
     const result = await apiFetch(endpoint, {
       method: 'POST',
-      body: JSON.stringify({ video_url: sourceRecord.videoUrl }),
+      body: JSON.stringify({
+        video_url: sourceRecord.videoUrl,
+        options: isSubtitle ? undefined : { targetResolution: '720p' },
+      }),
     });
     const runId = result.run_id || result.id;
     if (!runId) throw new Error(`${label}接口未返回 RunId`);
@@ -1767,7 +1770,7 @@ async function queryMediaTask(runId, options = {}) {
   const label = record.taskType === 'subtitle_erase' ? '字幕擦除' : '视频超分';
   try {
     if (!options.quiet) setStatus(`正在查询${label}任务：${runId}`, 'running');
-    const result = await apiFetch(`/api/media/executions/${encodeURIComponent(runId)}`);
+    const result = await apiFetch(`/api/media/executions/${encodeURIComponent(runId)}?type=${encodeURIComponent(record.taskType)}`);
     const status = normalizeMediaStatus(result.status);
     const videoUrl = result.video_url || record.videoUrl || '';
     upsertTaskRecord({
