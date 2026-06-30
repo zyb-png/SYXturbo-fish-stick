@@ -58,35 +58,12 @@
     <section class="workspace">
       <header class="topbar">
         <div class="brand">
-          <svg class="brand-mark" viewBox="0 0 100 100" aria-hidden="true">
-            <defs>
-              <filter id="brandLogoColor" color-interpolation-filters="sRGB">
-                <feColorMatrix
-                  in="SourceGraphic"
-                  type="matrix"
-                  values="0 0 0 0 0
-                          0 0 0 0 0
-                          0 0 0 0 0
-                          -0.2126 -0.7152 -0.0722 0 1"
-                  result="logoAlpha"
-                />
-                <feComposite in="logoAlpha" in2="SourceAlpha" operator="in" result="clippedLogoAlpha" />
-                <feFlood flood-color="currentColor" result="logoColor" />
-                <feComposite in="logoColor" in2="clippedLogoAlpha" operator="in" />
-              </filter>
-            </defs>
-            <image
-              href="./assets/song-yuxi-logo.png?v=20260613-logo-3"
-              x="-36"
-              y="-36"
-              width="172"
-              height="172"
-              filter="url(#brandLogoColor)"
-            />
-          </svg>
+          <div class="brand-mark" aria-hidden="true">
+            <span>钰</span>
+          </div>
           <div>
             <h1>宋钰汐视频生成</h1>
-            <p>Seedance2.0和Seedance2.1满血版，支持真人人脸。</p>
+            <p>Seedance2.0和Seedance2.5满血版，支持30秒，支持真人人脸。</p>
           </div>
         </div>
         <div class="top-actions">
