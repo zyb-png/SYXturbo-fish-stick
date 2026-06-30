@@ -3,7 +3,6 @@ import {
   createManagedAccount,
   listAdminAccounts,
   requireAdminSession,
-  updateManagedAccount,
 } from '@/lib/account-store';
 import {
   getCreationPointSnapshotForAccount,
@@ -62,16 +61,6 @@ export async function POST(request: NextRequest) {
         wechat: body.wechat,
         status: body.status === 'disabled' ? 'disabled' : 'active',
       });
-    } else if (action === 'updateProfile') {
-      await updateManagedAccount({
-        accountId: body.accountId,
-        password: body.password,
-        name: body.name,
-        phone: body.phone,
-        idNumber: body.idNumber,
-        wechat: body.wechat,
-        status: body.status === 'disabled' ? 'disabled' : 'active',
-      });
     } else if (action === 'setPoints') {
       const points = toNumber(body.points);
       if (points === null) throw new Error('请输入要设置的点数');
@@ -81,6 +70,8 @@ export async function POST(request: NextRequest) {
       });
     } else if (action === 'grantPoints') {
       throw new Error('默认赠送额度由系统自动发放，每个账号仅一次，后台不能手动重复赠送');
+    } else if (action === 'updateProfile') {
+      throw new Error('账号资料创建后不可修改，只能调整创作点数');
     } else {
       throw new Error('未知后台操作');
     }

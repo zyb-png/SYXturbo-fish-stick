@@ -301,34 +301,6 @@ export async function createManagedAccount(input: {
   });
 }
 
-export async function updateManagedAccount(input: {
-  accountId: string;
-  password?: string;
-  name?: string;
-  phone?: string;
-  idNumber?: string;
-  wechat?: string;
-  status?: 'active' | 'disabled';
-}): Promise<PublicAccount> {
-  return queueStoreMutation((state) => {
-    const account = state.accounts.find((item) => item.id === input.accountId);
-    if (!account) throw new Error('账号不存在');
-    if (typeof input.name === 'string') account.name = normalizeOptional(input.name);
-    if (typeof input.phone === 'string') account.phone = normalizePhone(input.phone);
-    if (typeof input.idNumber === 'string') account.idNumber = normalizeIdNumber(input.idNumber);
-    if (typeof input.wechat === 'string') account.wechat = normalizeOptional(input.wechat);
-    if (input.status === 'active' || input.status === 'disabled') account.status = input.status;
-    if (typeof input.password === 'string' && input.password.trim()) {
-      if (input.password.length < 4) throw new Error('密码至少需要 4 位');
-      const { salt, hash } = makePasswordHash(input.password);
-      account.passwordSalt = salt;
-      account.passwordHash = hash;
-    }
-    account.updatedAt = nowIso();
-    return publicAccount(account);
-  });
-}
-
 export async function authenticateUserAccount(username: string, password: string): Promise<AuthResult> {
   return queueStoreMutation((state) => {
     const account = findAccountByLogin(state, username);

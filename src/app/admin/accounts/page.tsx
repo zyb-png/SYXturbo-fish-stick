@@ -29,13 +29,7 @@ interface AdminAccountRow {
   };
 }
 
-interface AccountDraft {
-  name: string;
-  phone: string;
-  idNumber: string;
-  wechat: string;
-  status: 'active' | 'disabled';
-  password: string;
+interface AccountPointsDraft {
   setPoints: string;
 }
 
@@ -53,16 +47,14 @@ function formatTime(value?: string): string {
   });
 }
 
-function createDraft(account: AdminAccountRow): AccountDraft {
+function createDraft(account: AdminAccountRow): AccountPointsDraft {
   return {
-    name: account.name || '',
-    phone: account.phone || '',
-    idNumber: account.idNumber || '',
-    wechat: account.wechat || '',
-    status: account.status,
-    password: '',
     setPoints: String(account.wallet.availablePoints || 0),
   };
+}
+
+function readonlyValue(value?: string): string {
+  return value?.trim() || '未填写';
 }
 
 export default function AdminAccountsPage() {
@@ -70,7 +62,7 @@ export default function AdminAccountsPage() {
   const [adminPassword, setAdminPassword] = useState('');
   const [loading, setLoading] = useState(false);
   const [accounts, setAccounts] = useState<AdminAccountRow[]>([]);
-  const [drafts, setDrafts] = useState<Record<string, AccountDraft>>({});
+  const [drafts, setDrafts] = useState<Record<string, AccountPointsDraft>>({});
   const [error, setError] = useState('');
   const [newAccount, setNewAccount] = useState({
     username: '',
@@ -97,7 +89,7 @@ export default function AdminAccountsPage() {
   const applyAccounts = useCallback((rows: AdminAccountRow[]) => {
     setAccounts(rows);
     setDrafts((previous) => {
-      const next: Record<string, AccountDraft> = {};
+      const next: Record<string, AccountPointsDraft> = {};
       for (const account of rows) {
         next[account.id] = previous[account.id] || createDraft(account);
         next[account.id].setPoints = previous[account.id]?.setPoints ?? String(account.wallet.availablePoints || 0);
@@ -201,19 +193,11 @@ export default function AdminAccountsPage() {
     });
   };
 
-  const updateDraft = (accountId: string, patch: Partial<AccountDraft>) => {
+  const updateDraft = (accountId: string, patch: Partial<AccountPointsDraft>) => {
     setDrafts((previous) => ({
       ...previous,
       [accountId]: {
-        ...(previous[accountId] || {
-          name: '',
-          phone: '',
-          idNumber: '',
-          wechat: '',
-          status: 'active',
-          password: '',
-          setPoints: '0',
-        }),
+        ...(previous[accountId] || { setPoints: '0' }),
         ...patch,
       },
     }));
@@ -336,11 +320,11 @@ export default function AdminAccountsPage() {
             </section>
 
             <section className="overflow-hidden rounded-md border border-amber-400/25 bg-[#11100d]">
-              <div className="grid grid-cols-[1.15fr_1fr_1.35fr_1.5fr] border-b border-amber-400/20 px-4 py-3 text-xs text-amber-300/80">
+              <div className="grid grid-cols-[1.1fr_1.55fr_1fr_1fr] border-b border-amber-400/20 px-4 py-3 text-xs text-amber-300/80">
                 <div>姓名/账号</div>
+                <div>资料（只读）</div>
                 <div>点数</div>
-                <div>资料</div>
-                <div>操作</div>
+                <div>创作点操作</div>
               </div>
               <div className="divide-y divide-amber-400/12">
                 {displayAccounts.length === 0 ? (
@@ -348,7 +332,7 @@ export default function AdminAccountsPage() {
                 ) : displayAccounts.map((account) => {
                   const draft = drafts[account.id] || createDraft(account);
                   return (
-                    <div key={account.id} className="grid grid-cols-1 gap-4 px-4 py-4 text-sm lg:grid-cols-[1.15fr_1fr_1.35fr_1.5fr]">
+                    <div key={account.id} className="grid grid-cols-1 gap-4 px-4 py-4 text-sm lg:grid-cols-[1.1fr_1.55fr_1fr_1fr]">
                       <div className="min-w-0">
                         <div className="flex flex-wrap items-center gap-2">
                           <span className="font-semibold text-amber-50">{account.name || account.username}</span>
@@ -362,49 +346,24 @@ export default function AdminAccountsPage() {
                         <div className="mt-1 text-xs text-amber-100/55">最近登录：{formatTime(account.lastLoginAt)}</div>
                       </div>
 
+                      <div className="grid grid-cols-1 gap-1.5 rounded-md border border-amber-400/15 bg-black/20 px-3 py-2 text-xs text-amber-100/65 sm:grid-cols-2">
+                        <div>姓名：<span className="text-amber-50">{readonlyValue(account.name)}</span></div>
+                        <div>微信：<span className="text-amber-50">{readonlyValue(account.wechat)}</span></div>
+                        <div>手机：<span className="text-amber-50">{readonlyValue(account.phone)}</span></div>
+                        <div>身份证：<span className="text-amber-50">{readonlyValue(account.idNumber)}</span></div>
+                      </div>
+
                       <div className="space-y-1 tabular-nums">
                         <div className="text-emerald-300">可用 {formatPoints(account.wallet.availablePoints)}</div>
                         <div className="text-amber-100/60">冻结 {formatPoints(account.wallet.frozenPoints)}</div>
                         <div className="text-amber-100/60">累计消耗 {formatPoints(account.wallet.consumedPoints)}</div>
                       </div>
 
-                      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-                        <Input placeholder="姓名/备注" value={draft.name} onChange={(event) => updateDraft(account.id, { name: event.target.value })} className="border-amber-400/25 bg-black/35" />
-                        <Input placeholder="微信" value={draft.wechat} onChange={(event) => updateDraft(account.id, { wechat: event.target.value })} className="border-amber-400/25 bg-black/35" />
-                        <Input placeholder="手机" value={draft.phone} onChange={(event) => updateDraft(account.id, { phone: event.target.value })} className="border-amber-400/25 bg-black/35" />
-                        <Input placeholder="身份证号码" value={draft.idNumber} onChange={(event) => updateDraft(account.id, { idNumber: event.target.value })} className="border-amber-400/25 bg-black/35" />
-                        <select
-                          value={draft.status}
-                          onChange={(event) => updateDraft(account.id, { status: event.target.value === 'disabled' ? 'disabled' : 'active' })}
-                          className="h-9 rounded-md border border-amber-400/25 bg-black/35 px-3 text-sm"
-                        >
-                          <option value="active">启用</option>
-                          <option value="disabled">停用</option>
-                        </select>
-                      </div>
-
-                      <div className="space-y-2">
-                        <div className="grid grid-cols-2 gap-2">
-                          <Input type="number" min="0" value={draft.setPoints} onChange={(event) => updateDraft(account.id, { setPoints: event.target.value })} className="border-amber-400/25 bg-black/35" />
-                          <Button variant="outline" className="border-amber-400/30 bg-black/20 text-amber-100 hover:bg-amber-500/10" onClick={() => void postAction({ action: 'setPoints', accountId: account.id, points: Number(draft.setPoints || 0) }, '点数已设置')}>
-                            设置点数
-                          </Button>
-                        </div>
-                        <div className="grid grid-cols-2 gap-2">
-                          <PasswordInput placeholder="新密码" value={draft.password} onChange={(event) => updateDraft(account.id, { password: event.target.value })} className="border-amber-400/25 bg-black/35" />
-                          <Button className="bg-amber-500 text-black hover:bg-amber-400" onClick={() => void postAction({
-                            action: 'updateProfile',
-                            accountId: account.id,
-                            name: draft.name,
-                            phone: draft.phone,
-                            idNumber: draft.idNumber,
-                            wechat: draft.wechat,
-                            status: draft.status,
-                            password: draft.password,
-                          }, '账号已保存')}>
-                            保存资料
-                          </Button>
-                        </div>
+                      <div className="grid grid-cols-2 gap-2">
+                        <Input type="number" min="0" value={draft.setPoints} onChange={(event) => updateDraft(account.id, { setPoints: event.target.value })} className="border-amber-400/25 bg-black/35" />
+                        <Button variant="outline" className="border-amber-400/30 bg-black/20 text-amber-100 hover:bg-amber-500/10" onClick={() => void postAction({ action: 'setPoints', accountId: account.id, points: Number(draft.setPoints || 0) }, '点数已设置')}>
+                          设置点数
+                        </Button>
                       </div>
                     </div>
                   );
