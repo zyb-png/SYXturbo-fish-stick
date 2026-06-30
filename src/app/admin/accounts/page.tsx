@@ -15,6 +15,7 @@ interface AdminAccountRow {
   username: string;
   name?: string;
   phone?: string;
+  idNumber?: string;
   wechat?: string;
   status: 'active' | 'disabled';
   createdAt: string;
@@ -31,6 +32,7 @@ interface AdminAccountRow {
 interface AccountDraft {
   name: string;
   phone: string;
+  idNumber: string;
   wechat: string;
   status: 'active' | 'disabled';
   password: string;
@@ -55,6 +57,7 @@ function createDraft(account: AdminAccountRow): AccountDraft {
   return {
     name: account.name || '',
     phone: account.phone || '',
+    idNumber: account.idNumber || '',
     wechat: account.wechat || '',
     status: account.status,
     password: '',
@@ -74,6 +77,7 @@ export default function AdminAccountsPage() {
     password: '',
     name: '',
     phone: '',
+    idNumber: '',
     wechat: '',
   });
 
@@ -170,25 +174,29 @@ export default function AdminAccountsPage() {
       applyAccounts(result.accounts || []);
       setError('');
       toast.success(successMessage);
+      return true;
     } catch (actionError) {
       const message = actionError instanceof Error ? actionError.message : '操作失败';
       setError(message);
       toast.error(message);
+      return false;
     } finally {
       setLoading(false);
     }
   };
 
   const createAccount = async () => {
-    await postAction({
+    const created = await postAction({
       action: 'create',
       ...newAccount,
     }, '账号已创建');
+    if (!created) return;
     setNewAccount({
       username: '',
       password: '',
       name: '',
       phone: '',
+      idNumber: '',
       wechat: '',
     });
   };
@@ -200,6 +208,7 @@ export default function AdminAccountsPage() {
         ...(previous[accountId] || {
           name: '',
           phone: '',
+          idNumber: '',
           wechat: '',
           status: 'active',
           password: '',
@@ -313,12 +322,14 @@ export default function AdminAccountsPage() {
                   默认赠送 500 点：用户首次登录自动发放一次，后台不可重复赠送
                 </div>
               </div>
-              <div className="grid grid-cols-1 gap-3 md:grid-cols-5">
+              <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-7">
                 <Input placeholder="账号" value={newAccount.username} onChange={(event) => setNewAccount({ ...newAccount, username: event.target.value })} className="border-amber-400/25 bg-black/35" />
                 <PasswordInput placeholder="密码" value={newAccount.password} onChange={(event) => setNewAccount({ ...newAccount, password: event.target.value })} className="border-amber-400/25 bg-black/35" />
                 <Input placeholder="姓名/备注" value={newAccount.name} onChange={(event) => setNewAccount({ ...newAccount, name: event.target.value })} className="border-amber-400/25 bg-black/35" />
+                <Input placeholder="手机号码（必填）" value={newAccount.phone} onChange={(event) => setNewAccount({ ...newAccount, phone: event.target.value })} className="border-amber-400/25 bg-black/35" />
+                <Input placeholder="身份证号码（必填）" value={newAccount.idNumber} onChange={(event) => setNewAccount({ ...newAccount, idNumber: event.target.value })} className="border-amber-400/25 bg-black/35" />
                 <Input placeholder="微信" value={newAccount.wechat} onChange={(event) => setNewAccount({ ...newAccount, wechat: event.target.value })} className="border-amber-400/25 bg-black/35" />
-                <Button className="bg-amber-500 text-black hover:bg-amber-400" onClick={() => void createAccount()} disabled={loading || !newAccount.username || !newAccount.password}>
+                <Button className="bg-amber-500 text-black hover:bg-amber-400" onClick={() => void createAccount()} disabled={loading || !newAccount.username || !newAccount.password || !newAccount.phone || !newAccount.idNumber}>
                   创建
                 </Button>
               </div>
@@ -361,6 +372,7 @@ export default function AdminAccountsPage() {
                         <Input placeholder="姓名/备注" value={draft.name} onChange={(event) => updateDraft(account.id, { name: event.target.value })} className="border-amber-400/25 bg-black/35" />
                         <Input placeholder="微信" value={draft.wechat} onChange={(event) => updateDraft(account.id, { wechat: event.target.value })} className="border-amber-400/25 bg-black/35" />
                         <Input placeholder="手机" value={draft.phone} onChange={(event) => updateDraft(account.id, { phone: event.target.value })} className="border-amber-400/25 bg-black/35" />
+                        <Input placeholder="身份证号码" value={draft.idNumber} onChange={(event) => updateDraft(account.id, { idNumber: event.target.value })} className="border-amber-400/25 bg-black/35" />
                         <select
                           value={draft.status}
                           onChange={(event) => updateDraft(account.id, { status: event.target.value === 'disabled' ? 'disabled' : 'active' })}
@@ -385,6 +397,7 @@ export default function AdminAccountsPage() {
                             accountId: account.id,
                             name: draft.name,
                             phone: draft.phone,
+                            idNumber: draft.idNumber,
                             wechat: draft.wechat,
                             status: draft.status,
                             password: draft.password,

@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import {
   createManagedAccount,
-  listPublicAccounts,
+  listAdminAccounts,
   requireAdminSession,
   updateManagedAccount,
 } from '@/lib/account-store';
@@ -13,7 +13,7 @@ import {
 export const dynamic = 'force-dynamic';
 
 async function buildAccountsPayload() {
-  const accounts = await listPublicAccounts();
+  const accounts = await listAdminAccounts();
   const rows = await Promise.all(accounts.map(async (account) => {
     const wallet = await getCreationPointSnapshotForAccount(account.id);
     return {
@@ -58,6 +58,7 @@ export async function POST(request: NextRequest) {
         password: body.password,
         name: body.name,
         phone: body.phone,
+        idNumber: body.idNumber,
         wechat: body.wechat,
         status: body.status === 'disabled' ? 'disabled' : 'active',
       });
@@ -67,6 +68,7 @@ export async function POST(request: NextRequest) {
         password: body.password,
         name: body.name,
         phone: body.phone,
+        idNumber: body.idNumber,
         wechat: body.wechat,
         status: body.status === 'disabled' ? 'disabled' : 'active',
       });

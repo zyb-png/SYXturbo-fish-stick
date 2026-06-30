@@ -15,6 +15,7 @@ interface ManagedAccount {
   username: string;
   name?: string;
   phone?: string;
+  idNumber?: string;
   wechat?: string;
   status: 'active' | 'disabled';
   passwordSalt: string;
@@ -57,6 +58,10 @@ export interface PublicAccount {
   updatedAt: string;
   lastLoginAt?: string;
   loginBonusGrantedAt?: string;
+}
+
+export interface AdminAccount extends PublicAccount {
+  idNumber?: string;
 }
 
 export interface AuthResult {
@@ -119,6 +124,13 @@ function publicAccount(account: ManagedAccount): PublicAccount {
   };
 }
 
+function adminAccount(account: ManagedAccount): AdminAccount {
+  return {
+    ...publicAccount(account),
+    idNumber: account.idNumber,
+  };
+}
+
 function normalizeStore(input: unknown): AccountStoreState {
   const raw = input && typeof input === 'object' ? input as Partial<AccountStoreState> : {};
   return {
@@ -130,10 +142,15 @@ function normalizeStore(input: unknown): AccountStoreState {
       typeof account.username === 'string' &&
       typeof account.passwordSalt === 'string' &&
       typeof account.passwordHash === 'string'
-    )).map((account) => ({
-      ...account,
-      status: account.status === 'disabled' ? 'disabled' : 'active',
-    })) as ManagedAccount[] : [],
+    )).map((account) => {
+      const rawAccount = account as ManagedAccount;
+      return {
+        ...rawAccount,
+        phone: normalizeOptional(rawAccount.phone),
+        idNumber: normalizeOptional(rawAccount.idNumber),
+        status: rawAccount.status === 'disabled' ? 'disabled' : 'active',
+      };
+    }) as ManagedAccount[] : [],
     userSessions: Array.isArray(raw.userSessions) ? raw.userSessions : [],
     adminSessions: Array.isArray(raw.adminSessions) ? raw.adminSessions : [],
   };
@@ -196,6 +213,30 @@ function normalizeOptional(value: unknown): string | undefined {
   return trimmed || undefined;
 }
 
+function normalizePhone(value: unknown, required = false): string | undefined {
+  const phone = normalizeOptional(value);
+  if (!phone) {
+    if (required) throw new Error('请输入手机号码');
+    return undefined;
+  }
+  if (!/^1[3-9]\d{9}$/.test(phone)) {
+    throw new Error('请输入有效的 11 位手机号码');
+  }
+  return phone;
+}
+
+function normalizeIdNumber(value: unknown, required = false): string | undefined {
+  const idNumber = normalizeOptional(value)?.replace(/\s+/g, '').toUpperCase();
+  if (!idNumber) {
+    if (required) throw new Error('请输入身份证号码');
+    return undefined;
+  }
+  if (!/^\d{17}[\dX]$/.test(idNumber)) {
+    throw new Error('请输入有效的 18 位身份证号码');
+  }
+  return idNumber;
+}
+
 function makePasswordHash(password: string, salt = randomBytes(16).toString('hex')) {
   const hash = scryptSync(password, salt, 64).toString('hex');
   return { salt, hash };
@@ -229,6 +270,7 @@ export async function createManagedAccount(input: {
   password: string;
   name?: string;
   phone?: string;
+  idNumber?: string;
   wechat?: string;
   status?: 'active' | 'disabled';
 }): Promise<PublicAccount> {
@@ -245,7 +287,8 @@ export async function createManagedAccount(input: {
       id: username,
       username,
       name: normalizeOptional(input.name),
-      phone: normalizeOptional(input.phone),
+      phone: normalizePhone(input.phone, true),
+      idNumber: normalizeIdNumber(input.idNumber, true),
       wechat: normalizeOptional(input.wechat),
       status: input.status === 'disabled' ? 'disabled' : 'active',
       passwordSalt: salt,
@@ -263,6 +306,7 @@ export async function updateManagedAccount(input: {
   password?: string;
   name?: string;
   phone?: string;
+  idNumber?: string;
   wechat?: string;
   status?: 'active' | 'disabled';
 }): Promise<PublicAccount> {
@@ -270,7 +314,8 @@ export async function updateManagedAccount(input: {
     const account = state.accounts.find((item) => item.id === input.accountId);
     if (!account) throw new Error('账号不存在');
     if (typeof input.name === 'string') account.name = normalizeOptional(input.name);
-    if (typeof input.phone === 'string') account.phone = normalizeOptional(input.phone);
+    if (typeof input.phone === 'string') account.phone = normalizePhone(input.phone);
+    if (typeof input.idNumber === 'string') account.idNumber = normalizeIdNumber(input.idNumber);
     if (typeof input.wechat === 'string') account.wechat = normalizeOptional(input.wechat);
     if (input.status === 'active' || input.status === 'disabled') account.status = input.status;
     if (typeof input.password === 'string' && input.password.trim()) {
@@ -363,6 +408,12 @@ export async function listPublicAccounts(): Promise<PublicAccount[]> {
   await accountStoreQueue;
   const state = await readStore();
   return state.accounts.map(publicAccount);
+}
+
+export async function listAdminAccounts(): Promise<AdminAccount[]> {
+  await accountStoreQueue;
+  const state = await readStore();
+  return state.accounts.map(adminAccount);
 }
 
 export async function getUserAccountByToken(token: string | undefined): Promise<PublicAccount | null> {
