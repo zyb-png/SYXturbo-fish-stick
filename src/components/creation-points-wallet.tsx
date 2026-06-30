@@ -167,6 +167,8 @@ export function CreationPointsWallet() {
   const displayedConsumedPoints = hasAccount ? (summary?.consumedPoints || 0) : 0;
   const adminGiftBatches = snapshot?.batches.filter(isAdminGiftBatch) || [];
   const adminGiftTotalPoints = adminGiftBatches.reduce((sum, batch) => sum + Math.max(0, batch.initialPoints || 0), 0);
+  const adminGiftRemainingPoints = adminGiftBatches.reduce((sum, batch) => sum + Math.max(0, batch.remainingPoints || 0), 0);
+  const adminGiftUsedOrAdjustedPoints = Math.max(0, adminGiftTotalPoints - adminGiftRemainingPoints);
   const visibleTransactions = snapshot?.transactions
     .filter((transaction) => transaction.type !== 'freeze')
     .slice(0, 20) || [];
@@ -261,9 +263,16 @@ export function CreationPointsWallet() {
                       {account?.phone && <span>手机：{account.phone}</span>}
                     </div>
                     {adminGiftTotalPoints > 0 && (
-                      <div className="mt-3 inline-flex items-center gap-2 rounded-md border border-amber-400/45 bg-black/35 px-3 py-2 text-sm font-semibold text-amber-100 shadow-[0_0_18px_rgba(245,158,11,0.18)]">
-                        <Gift className="h-4 w-4 text-amber-300" />
-                        管理员赠送额度：{formatPoints(adminGiftTotalPoints)} 点
+                      <div className="mt-3 inline-flex max-w-full items-start gap-2 rounded-md border border-amber-400/45 bg-black/35 px-3 py-2 text-sm font-semibold text-amber-100 shadow-[0_0_18px_rgba(245,158,11,0.18)]">
+                        <Gift className="mt-0.5 h-4 w-4 shrink-0 text-amber-300" />
+                        <div>
+                          <div>当前赠送余额：{formatPoints(adminGiftRemainingPoints)} 点</div>
+                          {adminGiftUsedOrAdjustedPoints > 0 && (
+                            <div className="mt-1 text-xs font-normal text-amber-100/62">
+                              历史获赠总额 {formatPoints(adminGiftTotalPoints)} 点，已使用或调整 {formatPoints(adminGiftUsedOrAdjustedPoints)} 点
+                            </div>
+                          )}
+                        </div>
                       </div>
                     )}
                   </div>
