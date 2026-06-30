@@ -17,7 +17,7 @@ interface AdminAccountRow {
   phone?: string;
   idNumber?: string;
   wechat?: string;
-  status: 'active' | 'disabled';
+  status: 'active' | 'disabled' | 'frozen';
   createdAt: string;
   updatedAt: string;
   lastLoginAt?: string;
@@ -31,6 +31,7 @@ interface AdminAccountRow {
 
 interface AccountPointsDraft {
   addPoints: string;
+  deductPoints: string;
 }
 
 function formatPoints(value: number): string {
@@ -50,11 +51,24 @@ function formatTime(value?: string): string {
 function createDraft(): AccountPointsDraft {
   return {
     addPoints: '',
+    deductPoints: '',
   };
 }
 
 function readonlyValue(value?: string): string {
   return value?.trim() || '未填写';
+}
+
+function getStatusBadgeClass(status: AdminAccountRow['status']): string {
+  if (status === 'active') return 'bg-emerald-500/20 text-emerald-200';
+  if (status === 'frozen') return 'bg-amber-500/20 text-amber-100';
+  return 'bg-red-500/20 text-red-200';
+}
+
+function getStatusLabel(status: AdminAccountRow['status']): string {
+  if (status === 'active') return '启用';
+  if (status === 'frozen') return '冻结';
+  return '停用';
 }
 
 export default function AdminAccountsPage() {
@@ -93,6 +107,7 @@ export default function AdminAccountsPage() {
       for (const account of rows) {
         next[account.id] = previous[account.id] || createDraft();
         next[account.id].addPoints = previous[account.id]?.addPoints ?? '';
+        next[account.id].deductPoints = previous[account.id]?.deductPoints ?? '';
       }
       return next;
     });
@@ -197,7 +212,7 @@ export default function AdminAccountsPage() {
     setDrafts((previous) => ({
       ...previous,
       [accountId]: {
-        ...(previous[accountId] || { addPoints: '' }),
+        ...(previous[accountId] || { addPoints: '', deductPoints: '' }),
         ...patch,
       },
     }));
@@ -211,6 +226,16 @@ export default function AdminAccountsPage() {
     }, '点数已增加');
     if (!added) return;
     updateDraft(accountId, { addPoints: '' });
+  };
+
+  const deductPointsFromAccount = async (accountId: string, points: string) => {
+    const deducted = await postAction({
+      action: 'deductPoints',
+      accountId,
+      points: Number(points || 0),
+    }, '点数已扣除');
+    if (!deducted) return;
+    updateDraft(accountId, { deductPoints: '' });
   };
 
   return (
@@ -330,7 +355,7 @@ export default function AdminAccountsPage() {
             </section>
 
             <section className="overflow-hidden rounded-md border border-amber-400/25 bg-[#11100d]">
-              <div className="grid grid-cols-[1.1fr_1.55fr_1fr_1fr] border-b border-amber-400/20 px-4 py-3 text-xs text-amber-300/80">
+              <div className="grid grid-cols-[1.05fr_1.45fr_1fr_1.25fr] border-b border-amber-400/20 px-4 py-3 text-xs text-amber-300/80">
                 <div>姓名/账号</div>
                 <div>资料（只读）</div>
                 <div>点数</div>
@@ -342,12 +367,12 @@ export default function AdminAccountsPage() {
                 ) : displayAccounts.map((account) => {
                   const draft = drafts[account.id] || createDraft();
                   return (
-                    <div key={account.id} className="grid grid-cols-1 gap-4 px-4 py-4 text-sm lg:grid-cols-[1.1fr_1.55fr_1fr_1fr]">
+                    <div key={account.id} className="grid grid-cols-1 gap-4 px-4 py-4 text-sm lg:grid-cols-[1.05fr_1.45fr_1fr_1.25fr]">
                       <div className="min-w-0">
                         <div className="flex flex-wrap items-center gap-2">
                           <span className="font-semibold text-amber-50">{account.name || account.username}</span>
-                          <Badge className={account.status === 'active' ? 'bg-emerald-500/20 text-emerald-200' : 'bg-red-500/20 text-red-200'}>
-                            {account.status === 'active' ? '启用' : '停用'}
+                          <Badge className={getStatusBadgeClass(account.status)}>
+                            {getStatusLabel(account.status)}
                           </Badge>
                         </div>
                         {account.name && (
@@ -369,11 +394,19 @@ export default function AdminAccountsPage() {
                         <div className="text-amber-100/60">累计消耗 {formatPoints(account.wallet.consumedPoints)}</div>
                       </div>
 
-                      <div className="grid grid-cols-2 gap-2">
-                        <Input type="number" min="1" placeholder="增加点数" value={draft.addPoints} onChange={(event) => updateDraft(account.id, { addPoints: event.target.value })} className="border-amber-400/25 bg-black/35" />
-                        <Button variant="outline" className="border-amber-400/30 bg-black/20 text-amber-100 hover:bg-amber-500/10" onClick={() => void addPointsToAccount(account.id, draft.addPoints)} disabled={loading || !Number(draft.addPoints || 0)}>
-                          增加点数
-                        </Button>
+                      <div className="space-y-2">
+                        <div className="grid grid-cols-2 gap-2">
+                          <Input type="number" min="1" placeholder="增加点数" value={draft.addPoints} onChange={(event) => updateDraft(account.id, { addPoints: event.target.value })} className="border-amber-400/25 bg-black/35" />
+                          <Button variant="outline" className="border-amber-400/30 bg-black/20 text-amber-100 hover:bg-amber-500/10" onClick={() => void addPointsToAccount(account.id, draft.addPoints)} disabled={loading || !Number(draft.addPoints || 0)}>
+                            增加点数
+                          </Button>
+                        </div>
+                        <div className="grid grid-cols-2 gap-2">
+                          <Input type="number" min="1" placeholder="扣除点数" value={draft.deductPoints} onChange={(event) => updateDraft(account.id, { deductPoints: event.target.value })} className="border-amber-400/25 bg-black/35" />
+                          <Button variant="outline" className="border-red-400/30 bg-black/20 text-red-100 hover:bg-red-500/10 hover:text-red-50" onClick={() => void deductPointsFromAccount(account.id, draft.deductPoints)} disabled={loading || !Number(draft.deductPoints || 0)}>
+                            扣除点数
+                          </Button>
+                        </div>
                       </div>
                     </div>
                   );

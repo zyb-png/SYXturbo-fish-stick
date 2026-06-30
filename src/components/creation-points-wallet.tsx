@@ -23,7 +23,7 @@ interface WalletSnapshot {
     name?: string;
     phone?: string;
     wechat?: string;
-    status?: 'active' | 'pending' | 'disabled';
+    status?: 'active' | 'pending' | 'disabled' | 'frozen';
     createdAt?: string;
   } | null;
   summary: {

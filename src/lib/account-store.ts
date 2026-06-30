@@ -17,7 +17,7 @@ interface ManagedAccount {
   phone?: string;
   idNumber?: string;
   wechat?: string;
-  status: 'active' | 'disabled';
+  status: 'active' | 'disabled' | 'frozen';
   passwordSalt: string;
   passwordHash: string;
   createdAt: string;
@@ -53,7 +53,7 @@ export interface PublicAccount {
   name?: string;
   phone?: string;
   wechat?: string;
-  status: 'active' | 'disabled';
+  status: 'active' | 'disabled' | 'frozen';
   createdAt: string;
   updatedAt: string;
   lastLoginAt?: string;
@@ -148,7 +148,7 @@ function normalizeStore(input: unknown): AccountStoreState {
         ...rawAccount,
         phone: normalizeOptional(rawAccount.phone),
         idNumber: normalizeOptional(rawAccount.idNumber),
-        status: rawAccount.status === 'disabled' ? 'disabled' : 'active',
+        status: rawAccount.status === 'disabled' || rawAccount.status === 'frozen' ? rawAccount.status : 'active',
       };
     }) as ManagedAccount[] : [],
     userSessions: Array.isArray(raw.userSessions) ? raw.userSessions : [],
@@ -310,6 +310,9 @@ export async function authenticateUserAccount(username: string, password: string
     if (account.status === 'disabled') {
       throw new Error('账号已停用，请联系管理员');
     }
+    if (account.status === 'frozen') {
+      throw new Error('创作点已用光，账号已冻结，请联系管理员增加点数');
+    }
 
     const token = randomBytes(32).toString('hex');
     const createdAt = nowIso();
@@ -376,6 +379,31 @@ export async function markLoginBonusGranted(accountId: string): Promise<void> {
   });
 }
 
+export async function syncManagedAccountPointStatus(input: {
+  accountId: string;
+  availablePoints: number;
+  hasPointHistory: boolean;
+}): Promise<PublicAccount | null> {
+  return queueStoreMutation((state) => {
+    const account = state.accounts.find((item) => item.id === input.accountId);
+    if (!account) return null;
+    if (!input.hasPointHistory || account.status === 'disabled') return publicAccount(account);
+
+    const availablePoints = Math.max(0, Math.round(Number(input.availablePoints) || 0));
+    const nextStatus = availablePoints <= 0
+      ? 'frozen'
+      : account.status === 'frozen'
+        ? 'active'
+        : account.status;
+
+    if (nextStatus !== account.status) {
+      account.status = nextStatus;
+      account.updatedAt = nowIso();
+    }
+    return publicAccount(account);
+  });
+}
+
 export async function listPublicAccounts(): Promise<PublicAccount[]> {
   await accountStoreQueue;
   const state = await readStore();
@@ -395,7 +423,7 @@ export async function getUserAccountByToken(token: string | undefined): Promise<
   pruneExpiredSessions(state);
   const session = state.userSessions.find((item) => item.token === token);
   if (!session) return null;
-  const account = state.accounts.find((item) => item.id === session.accountId && item.status === 'active');
+  const account = state.accounts.find((item) => item.id === session.accountId && item.status !== 'disabled');
   return account ? publicAccount(account) : null;
 }
 

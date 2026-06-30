@@ -5,6 +5,7 @@ import {
   requireAdminSession,
 } from '@/lib/account-store';
 import {
+  deductCreationPointsFromAccount,
   getCreationPointSnapshotForAccount,
   grantCreationPointsToAccount,
 } from '@/lib/creation-points';
@@ -69,6 +70,14 @@ export async function POST(request: NextRequest) {
         points,
         label: '后台增加点数',
         source: 'bonus',
+      });
+    } else if (action === 'deductPoints') {
+      const points = toNumber(body.points);
+      if (points === null || points <= 0) throw new Error('请输入要扣除的点数');
+      await deductCreationPointsFromAccount({
+        accountId: body.accountId,
+        points,
+        description: `后台扣除点数 ${points.toLocaleString('zh-CN')} 点`,
       });
     } else if (action === 'setPoints') {
       throw new Error('设置点数已停用，请使用增加点数');
