@@ -1635,7 +1635,7 @@ function renderTaskRecords() {
       <div class="task-time">${escapeHtml(record.createdAt || record.updatedAt || '')}</div>
       <div class="record-actions">
         ${record.videoUrl ? '<button class="task-play" type="button" data-action="video">▷ 查看视频</button>' : '<button type="button" data-action="query">↻ 查询</button>'}
-        ${canDerive ? '<button class="task-derive task-derive-subtitle" type="button" data-action="subtitle" title="擦除字幕" aria-label="擦除字幕">T</button>' : ''}
+        ${canDerive ? '<button class="task-derive task-derive-subtitle" type="button" data-action="subtitle" title="去字幕" aria-label="去字幕">T</button>' : ''}
         ${canDerive ? '<button class="task-derive task-derive-enhance" type="button" data-action="enhance" title="视频超分" aria-label="视频超分">🪄</button>' : ''}
         <button type="button" data-action="reuse">↻ 复用</button>
         <button type="button" data-action="json">⚙ 调试</button>
