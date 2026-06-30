@@ -735,9 +735,14 @@ export default function StoryboardGenerator() {
     const originalFetch = window.fetch.bind(window);
     window.fetch = async (input, init) => {
       const response = await originalFetch(input, init);
+      const requestHeaders = input instanceof Request ? input.headers : undefined;
+      const initHeaders = init?.headers ? new Headers(init.headers) : undefined;
+      const skipLoginPrompt =
+        requestHeaders?.get('X-Skip-Login-Prompt') === '1' ||
+        initHeaders?.get('X-Skip-Login-Prompt') === '1';
       if (response.status === 401) {
         void response.clone().json().then((result) => {
-          if (result?.code === 'LOGIN_REQUIRED') {
+          if (result?.code === 'LOGIN_REQUIRED' && !skipLoginPrompt) {
             showLoginRequired(result.error || LOGIN_REQUIRED_PROMPT);
           }
         }).catch(() => undefined);

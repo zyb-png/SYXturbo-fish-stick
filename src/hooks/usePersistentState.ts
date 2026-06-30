@@ -195,7 +195,10 @@ function backupStateToServer(key: string, serializedValue: string, options?: { k
 
     void fetch(PROJECT_STATE_API, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Skip-Login-Prompt': '1',
+      },
       body,
       keepalive: canKeepAlive,
     }).then((response) => {
@@ -235,7 +238,10 @@ function deleteStateBackup(key?: string): void {
     ? `${PROJECT_STATE_API}?key=${encodeURIComponent(key)}`
     : PROJECT_STATE_API;
 
-  void fetch(url, { method: 'DELETE' }).then((response) => {
+  void fetch(url, {
+    method: 'DELETE',
+    headers: { 'X-Skip-Login-Prompt': '1' },
+  }).then((response) => {
     if (!response.ok) {
       console.warn(`[持久化] 清除本地文件备份失败: HTTP ${response.status}`);
     }
