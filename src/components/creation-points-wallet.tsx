@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
-import { Coins, Gift, KeyRound, Loader2, LogOut, QrCode, RefreshCw, ShieldCheck, Snowflake, TrendingDown, WalletCards } from 'lucide-react';
+import { Coins, Gift, KeyRound, Loader2, LogOut, QrCode, RefreshCw, Snowflake, TrendingDown, WalletCards } from 'lucide-react';
 import { toast } from 'sonner';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -505,16 +505,6 @@ export function CreationPointsWallet() {
           登录账号
         </Button>
       )}
-
-      <Button
-        variant="outline"
-        size="sm"
-        className={blackGoldButtonClass}
-        onClick={() => window.open('/admin/accounts', '_blank')}
-      >
-        <ShieldCheck className="h-4 w-4" />
-        账号后台
-      </Button>
 
       <Dialog open={loginOpen} onOpenChange={setLoginOpen}>
         <DialogContent className="max-w-sm border-amber-400/45 bg-[#070706] text-amber-100 shadow-[0_0_42px_rgba(245,158,11,0.18)]">
