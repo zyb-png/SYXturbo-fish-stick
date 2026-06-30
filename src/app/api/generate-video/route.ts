@@ -4,6 +4,7 @@ import {
   getManfeiVideoStatus,
   prepareManfeiImageAssets,
 } from '@/lib/manfei';
+import { settleManfeiVideoCreationPointsByTaskId } from '@/lib/manfei-billing';
 import { requireUserLoginResponse } from '@/lib/auth-guard';
 import {
   bindCreationPointTask,
@@ -50,8 +51,11 @@ async function monitorVideoSettlement(taskId: string): Promise<void> {
       }
       const result = await getManfeiVideoStatus(taskId);
       if (['succeeded', 'success'].includes(result.status) && result.videoUrl) {
-        await settleCreationPointTaskByExternalId(taskId, 'success');
-        return;
+        const settlement = await settleManfeiVideoCreationPointsByTaskId(taskId, {
+          attempts: 3,
+          intervalMs: 2_000,
+        });
+        if (settlement.settled) return;
       }
       if (['failed', 'cancelled', 'expired', 'error'].includes(result.status)) {
         await settleCreationPointTaskByExternalId(
@@ -158,10 +162,20 @@ export async function GET(request: NextRequest) {
     const failed = ['failed', 'cancelled', 'expired', 'error'].includes(result.status);
 
     if (succeeded && result.videoUrl) {
-      await settleCreationPointTaskByExternalId(taskId, 'success');
+      const settlement = await settleManfeiVideoCreationPointsByTaskId(taskId, {
+        attempts: 3,
+        intervalMs: 1_500,
+      });
       return NextResponse.json({
         success: true,
         pending: false,
+        billingPending: !settlement.settled,
+        billing: settlement.settled
+          ? {
+              actualCostRmb: settlement.actualCostRmb,
+              finalPoints: settlement.finalPoints,
+            }
+          : undefined,
         video: {
           url: result.videoUrl,
           taskId,

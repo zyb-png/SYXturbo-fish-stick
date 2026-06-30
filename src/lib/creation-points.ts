@@ -69,6 +69,12 @@ interface CreationPointTransaction {
   createdAt: string;
 }
 
+interface CreationPointCompletionDetails {
+  description?: string;
+  metadata?: Record<string, unknown>;
+  ignoreMinimum?: boolean;
+}
+
 export interface CreationPointAccount {
   id: string;
   username?: string;
@@ -150,8 +156,15 @@ export const CREATION_POINT_PRICING: CreationPointPricing[] = [
     pricingDescription: '当前规格 4K + medium，售价为模型成本的 1.5 倍',
     billingEnabled: true,
   },
-  { featureCode: 'generate_video', name: '视频生成', unit: '秒', unitPoints: 240, minimumPoints: 1200, billingEnabled: true },
-  { featureCode: 'video_edit', name: '视频编辑', unit: '秒', unitPoints: 400, minimumPoints: 1200, billingEnabled: true },
+  {
+    featureCode: 'generate_video',
+    name: '视频生成',
+    unit: '秒',
+    unitPoints: 130,
+    pricingDescription: '视频生成先按 130 点/秒预冻结，成功后按 Manfei 实际账单 amount_rmb 的 1.3 倍结算',
+    minimumPoints: 520,
+    billingEnabled: true,
+  },
 ];
 
 const STATE_FILE_NAME = 'creation-points.json';
@@ -829,86 +842,94 @@ export async function bindCreationPointTask(taskId: string, externalTaskId: stri
   });
 }
 
+function completeTaskInState(
+  state: CreationPointState,
+  task: CreationPointTask | undefined,
+  finalPoints?: number,
+  details?: CreationPointCompletionDetails
+): boolean {
+  if (!task || task.status !== 'frozen') return false;
+
+  const pricing = getPricing(task.featureCode);
+  const rawFinalPoints = Math.max(0, Math.round(finalPoints ?? task.estimatedPoints));
+  const minimumPoints = details?.ignoreMinimum ? 0 : pricing.minimumPoints || 0;
+  const desiredPoints = Math.min(
+    pricing.maximumPoints || Number.MAX_SAFE_INTEGER,
+    Math.max(minimumPoints, rawFinalPoints)
+  );
+
+  if (desiredPoints > task.estimatedPoints) {
+    let extraNeeded = desiredPoints - task.estimatedPoints;
+    let extraFrozen = 0;
+    for (const batch of getSpendableBatches(state)) {
+      if (extraNeeded <= 0) break;
+      const amount = Math.min(batch.remainingPoints, extraNeeded);
+      batch.remainingPoints -= amount;
+      batch.frozenPoints += amount;
+      task.allocations.push({ batchId: batch.id, amount });
+      extraNeeded -= amount;
+      extraFrozen += amount;
+    }
+    if (extraFrozen > 0) {
+      task.estimatedPoints += extraFrozen;
+      appendTransaction(state, {
+        taskId: task.id,
+        batchId: null,
+        type: 'freeze',
+        amount: extraFrozen,
+        featureCode: task.featureCode,
+        description: `${task.featureName}按实际用量补充冻结`,
+      });
+    }
+    if (extraNeeded > 0) {
+      task.metadata = {
+        ...task.metadata,
+        billingShortfallPoints: extraNeeded,
+      };
+    }
+  }
+
+  const settledPoints = Math.min(task.estimatedPoints, desiredPoints);
+  let pointsToConsume = settledPoints;
+  for (const allocation of task.allocations) {
+    const batch = state.batches.find((item) => item.id === allocation.batchId);
+    if (!batch) continue;
+    const consumed = Math.min(allocation.amount, pointsToConsume);
+    const refunded = allocation.amount - consumed;
+    batch.frozenPoints = Math.max(0, batch.frozenPoints - allocation.amount);
+    batch.remainingPoints += refunded;
+    pointsToConsume -= consumed;
+  }
+
+  task.status = 'succeeded';
+  task.finalPoints = settledPoints;
+  task.metadata = {
+    ...task.metadata,
+    ...(details?.metadata || {}),
+  };
+  task.updatedAt = nowIso();
+  state.consumedPoints += settledPoints;
+  appendTransaction(state, {
+    taskId: task.id,
+    batchId: null,
+    type: 'consume',
+    amount: settledPoints,
+    featureCode: task.featureCode,
+    description: details?.description || `${task.featureName}完成扣除`,
+  });
+  return true;
+}
+
 export async function completeCreationPointTask(
   taskId: string,
   finalPoints?: number,
-  details?: {
-    description?: string;
-    metadata?: Record<string, unknown>;
-  }
+  details?: CreationPointCompletionDetails
 ): Promise<void> {
   const account = await requireCurrentCreationPointAccountForSettlement();
   let nextState: CreationPointState | null = null;
   await queueMutation(account, (state) => {
     const task = state.tasks.find((item) => item.id === taskId);
-    if (!task || task.status !== 'frozen') return;
-
-    const pricing = getPricing(task.featureCode);
-    const rawFinalPoints = Math.max(0, Math.round(finalPoints ?? task.estimatedPoints));
-    const desiredPoints = Math.min(
-      pricing.maximumPoints || Number.MAX_SAFE_INTEGER,
-      Math.max(pricing.minimumPoints || 0, rawFinalPoints)
-    );
-
-    if (desiredPoints > task.estimatedPoints) {
-      let extraNeeded = desiredPoints - task.estimatedPoints;
-      let extraFrozen = 0;
-      for (const batch of getSpendableBatches(state)) {
-        if (extraNeeded <= 0) break;
-        const amount = Math.min(batch.remainingPoints, extraNeeded);
-        batch.remainingPoints -= amount;
-        batch.frozenPoints += amount;
-        task.allocations.push({ batchId: batch.id, amount });
-        extraNeeded -= amount;
-        extraFrozen += amount;
-      }
-      if (extraFrozen > 0) {
-        task.estimatedPoints += extraFrozen;
-        appendTransaction(state, {
-          taskId: task.id,
-          batchId: null,
-          type: 'freeze',
-          amount: extraFrozen,
-          featureCode: task.featureCode,
-          description: `${task.featureName}按实际用量补充冻结`,
-        });
-      }
-      if (extraNeeded > 0) {
-        task.metadata = {
-          ...task.metadata,
-          billingShortfallPoints: extraNeeded,
-        };
-      }
-    }
-
-    const settledPoints = Math.min(task.estimatedPoints, desiredPoints);
-    let pointsToConsume = settledPoints;
-    for (const allocation of task.allocations) {
-      const batch = state.batches.find((item) => item.id === allocation.batchId);
-      if (!batch) continue;
-      const consumed = Math.min(allocation.amount, pointsToConsume);
-      const refunded = allocation.amount - consumed;
-      batch.frozenPoints = Math.max(0, batch.frozenPoints - allocation.amount);
-      batch.remainingPoints += refunded;
-      pointsToConsume -= consumed;
-    }
-
-    task.status = 'succeeded';
-    task.finalPoints = settledPoints;
-    task.metadata = {
-      ...task.metadata,
-      ...(details?.metadata || {}),
-    };
-    task.updatedAt = nowIso();
-    state.consumedPoints += settledPoints;
-    appendTransaction(state, {
-      taskId: task.id,
-      batchId: null,
-      type: 'consume',
-      amount: settledPoints,
-      featureCode: task.featureCode,
-      description: details?.description || `${task.featureName}完成扣除`,
-    });
+    if (!completeTaskInState(state, task, finalPoints, details)) return;
     nextState = state;
   });
   if (nextState) await syncAccountStatusFromState(account, nextState);
@@ -929,7 +950,9 @@ export async function failCreationPointTask(taskId: string, reason = '任务失�
 export async function settleCreationPointTaskByExternalId(
   externalTaskId: string,
   outcome: 'success' | 'failure',
-  reason?: string
+  reason?: string,
+  finalPoints?: number,
+  details?: CreationPointCompletionDetails
 ): Promise<void> {
   const account = await requireCurrentCreationPointAccountForSettlement();
   let nextState: CreationPointState | null = null;
@@ -942,25 +965,7 @@ export async function settleCreationPointTaskByExternalId(
       return;
     }
 
-    let consumed = 0;
-    for (const allocation of task.allocations) {
-      const batch = state.batches.find((item) => item.id === allocation.batchId);
-      if (!batch) continue;
-      batch.frozenPoints = Math.max(0, batch.frozenPoints - allocation.amount);
-      consumed += allocation.amount;
-    }
-    task.status = 'succeeded';
-    task.finalPoints = consumed;
-    task.updatedAt = nowIso();
-    state.consumedPoints += consumed;
-    appendTransaction(state, {
-      taskId: task.id,
-      batchId: null,
-      type: 'consume',
-      amount: consumed,
-      featureCode: task.featureCode,
-      description: `${task.featureName}完成扣除`,
-    });
+    completeTaskInState(state, task, finalPoints, details);
     nextState = state;
   });
   if (nextState) await syncAccountStatusFromState(account, nextState);

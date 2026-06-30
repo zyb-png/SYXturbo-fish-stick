@@ -8,6 +8,7 @@ import {
   getAssetStorageConfigSync,
   getManfeiConfigSync,
 } from '@/lib/app-settings';
+import { settleManfeiVideoCreationPointsByTaskId } from '@/lib/manfei-billing';
 import { getCurrentUserAccount } from '@/lib/account-store';
 import {
   bindCreationPointTask,
@@ -426,7 +427,10 @@ async function settleTaskFromPayload(payload: JsonRecord): Promise<void> {
   const status = extractStatus(payload);
   if (!taskId || !status) return;
   if (isSuccessStatus(status)) {
-    await settleCreationPointTaskByExternalId(taskId, 'success');
+    await settleManfeiVideoCreationPointsByTaskId(taskId, {
+      attempts: 3,
+      intervalMs: 1_500,
+    });
   } else if (isFailureStatus(status)) {
     const errorMessage = String(payload.error || payload.message || '视频任务失败');
     await settleCreationPointTaskByExternalId(taskId, 'failure', errorMessage);
@@ -488,7 +492,10 @@ async function handleManfeiProxy(request: NextRequest): Promise<NextResponse> {
       } else if (taskId) {
         await bindCreationPointTask(creationPointTaskId, taskId);
         if (isSuccessStatus(status)) {
-          await completeCreationPointTask(creationPointTaskId);
+          await settleManfeiVideoCreationPointsByTaskId(taskId, {
+            attempts: 3,
+            intervalMs: 1_500,
+          });
         } else if (isFailureStatus(status)) {
           await failCreationPointTask(creationPointTaskId, String(upstream.payload.error || '视频生成失败'));
         }

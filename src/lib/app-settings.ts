@@ -27,7 +27,6 @@ export interface AssetStorageSettings {
 export interface AppSettings {
   llm: LlmConnectionSettings;
   runninghub: ProviderConnectionSettings;
-  seedance: ProviderConnectionSettings;
   manfei: ManfeiConnectionSettings;
   assetStorage: AssetStorageSettings;
 }
@@ -41,10 +40,6 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   runninghub: {
     apiKey: '',
     baseUrl: 'https://www.runninghub.cn/openapi/v2',
-  },
-  seedance: {
-    apiKey: '',
-    baseUrl: 'https://www.xszy.top',
   },
   manfei: {
     apiKey: '',
@@ -107,10 +102,6 @@ function normalizeSettings(input: unknown): AppSettings {
       apiKey: cleanString(raw.runninghub?.apiKey),
       baseUrl: cleanBaseUrl(raw.runninghub?.baseUrl),
     },
-    seedance: {
-      apiKey: cleanString(raw.seedance?.apiKey),
-      baseUrl: cleanBaseUrl(raw.seedance?.baseUrl),
-    },
     manfei: {
       apiKey: cleanString(raw.manfei?.apiKey),
       baseUrl: cleanBaseUrl(raw.manfei?.baseUrl),
@@ -138,10 +129,6 @@ function mergeWithDefaults(settings: AppSettings): AppSettings {
     runninghub: {
       apiKey: settings.runninghub.apiKey,
       baseUrl: settings.runninghub.baseUrl || DEFAULT_APP_SETTINGS.runninghub.baseUrl,
-    },
-    seedance: {
-      apiKey: settings.seedance.apiKey,
-      baseUrl: settings.seedance.baseUrl || DEFAULT_APP_SETTINGS.seedance.baseUrl,
     },
     manfei: {
       apiKey: settings.manfei.apiKey,
@@ -191,10 +178,6 @@ export function getRuntimeAppSettingsSync(): AppSettings {
       apiKey: saved.runninghub.apiKey || process.env.RUNNINGHUB_API_KEY || '',
       baseUrl: saved.runninghub.baseUrl || cleanBaseUrl(process.env.RUNNINGHUB_BASE_URL) || DEFAULT_APP_SETTINGS.runninghub.baseUrl,
     },
-    seedance: {
-      apiKey: saved.seedance.apiKey || process.env.XSZY_API_KEY || '',
-      baseUrl: saved.seedance.baseUrl || cleanBaseUrl(process.env.SEEDANCE_BASE_URL) || cleanBaseUrl(process.env.XSZY_BASE_URL) || DEFAULT_APP_SETTINGS.seedance.baseUrl,
-    },
     manfei: {
       apiKey: saved.manfei.apiKey || process.env.MANFEI_API_KEY || '',
       baseUrl: saved.manfei.baseUrl || cleanBaseUrl(process.env.MANFEI_BASE_URL) || DEFAULT_APP_SETTINGS.manfei.baseUrl,
@@ -226,10 +209,6 @@ export function getLlmConfigSync(): LlmConnectionSettings {
 
 export function getRunningHubConfigSync(): ProviderConnectionSettings {
   return getRuntimeAppSettingsSync().runninghub;
-}
-
-export function getSeedanceConnectionConfigSync(): ProviderConnectionSettings {
-  return getRuntimeAppSettingsSync().seedance;
 }
 
 export function getManfeiConfigSync(): ManfeiConnectionSettings {

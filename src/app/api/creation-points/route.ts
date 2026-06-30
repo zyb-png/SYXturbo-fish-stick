@@ -4,6 +4,7 @@ import {
   getPendingExternalCreationPointTasks,
   settleCreationPointTaskByExternalId,
 } from '@/lib/creation-points';
+import { settleManfeiVideoCreationPointsByTaskId } from '@/lib/manfei-billing';
 import { getManfeiVideoStatus } from '@/lib/manfei';
 
 export const dynamic = 'force-dynamic';
@@ -15,7 +16,10 @@ async function reconcilePendingVideoTasks() {
     const succeeded = ['succeeded', 'success'].includes(result.status);
     const failed = ['failed', 'cancelled', 'expired', 'error'].includes(result.status);
     if (succeeded && result.videoUrl) {
-      await settleCreationPointTaskByExternalId(task.externalTaskId, 'success');
+      await settleManfeiVideoCreationPointsByTaskId(task.externalTaskId, {
+        attempts: 2,
+        intervalMs: 1_000,
+      });
     } else if (failed) {
       await settleCreationPointTaskByExternalId(
         task.externalTaskId,

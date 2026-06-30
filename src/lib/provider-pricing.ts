@@ -12,6 +12,7 @@ export interface DeepSeekBillableUsage {
 export const POINTS_PER_RMB = 100;
 export const DEEPSEEK_PRICE_MULTIPLIER = 2;
 export const IMAGE_PRICE_MULTIPLIER = 1.5;
+export const MANFEI_VIDEO_PRICE_MULTIPLIER = 1.3;
 
 const TOKENS_PER_PRICE_UNIT = 1_000_000;
 
@@ -63,6 +64,12 @@ export function calculateImageCreationPoints(input: {
 }): number {
   const costRmb = IMAGE_COST_RMB[input.mode][input.quality][input.resolution];
   return Math.ceil(costRmb * (IMAGE_PRICE_MULTIPLIER * POINTS_PER_RMB));
+}
+
+export function calculateManfeiVideoCreationPoints(actualCostRmb: number): number {
+  const costRmb = Number(actualCostRmb);
+  if (!Number.isFinite(costRmb) || costRmb <= 0) return 0;
+  return Math.ceil(costRmb * MANFEI_VIDEO_PRICE_MULTIPLIER * POINTS_PER_RMB);
 }
 
 export const DEEPSEEK_PRICING_DESCRIPTION =

@@ -544,7 +544,6 @@ interface AssetStorageConnectionSettings {
 interface AppConnectionSettings {
   llm: LlmConnectionSettings;
   runninghub: ProviderConnectionSettings;
-  seedance: ProviderConnectionSettings;
   manfei: ManfeiConnectionSettings;
   assetStorage: AssetStorageConnectionSettings;
 }
@@ -558,10 +557,6 @@ const DEFAULT_APP_CONNECTION_SETTINGS: AppConnectionSettings = {
   runninghub: {
     apiKey: '',
     baseUrl: 'https://www.runninghub.cn/openapi/v2',
-  },
-  seedance: {
-    apiKey: '',
-    baseUrl: 'https://www.xszy.top',
   },
   manfei: {
     apiKey: '',
@@ -666,10 +661,6 @@ export default function StoryboardGenerator() {
           ...DEFAULT_APP_CONNECTION_SETTINGS.runninghub,
           ...(result.settings?.runninghub || {}),
         },
-        seedance: {
-          ...DEFAULT_APP_CONNECTION_SETTINGS.seedance,
-          ...(result.settings?.seedance || {}),
-        },
         manfei: {
           ...DEFAULT_APP_CONNECTION_SETTINGS.manfei,
           ...(result.settings?.manfei || {}),
@@ -711,10 +702,6 @@ export default function StoryboardGenerator() {
         runninghub: {
           ...DEFAULT_APP_CONNECTION_SETTINGS.runninghub,
           ...(result.settings?.runninghub || {}),
-        },
-        seedance: {
-          ...DEFAULT_APP_CONNECTION_SETTINGS.seedance,
-          ...(result.settings?.seedance || {}),
         },
         manfei: {
           ...DEFAULT_APP_CONNECTION_SETTINGS.manfei,
@@ -6121,28 +6108,6 @@ export default function StoryboardGenerator() {
                     </div>
 
                     <div className="rounded-md border p-4 space-y-3">
-                      <div className="font-medium">视频编辑 Seedance（保留）</div>
-                      <div className="grid gap-2">
-                        <Label htmlFor="seedance-api-key">API Key</Label>
-                        <PasswordInput
-                          id="seedance-api-key"
-                          autoComplete="off"
-                          value={appConnectionSettings.seedance.apiKey}
-                          onChange={(event) => updateAppConnectionSetting('seedance', 'apiKey', event.target.value)}
-                          placeholder="填写 Seedance Key"
-                        />
-                      </div>
-                      <div className="grid gap-2">
-                        <Label htmlFor="seedance-base-url">接口地址</Label>
-                        <Input
-                          id="seedance-base-url"
-                          value={appConnectionSettings.seedance.baseUrl}
-                          onChange={(event) => updateAppConnectionSetting('seedance', 'baseUrl', event.target.value)}
-                        />
-                      </div>
-                    </div>
-
-                    <div className="rounded-md border p-4 space-y-3">
                       <div className="font-medium">视频生成 manfei</div>
                       <div className="grid gap-2">
                         <Label htmlFor="manfei-api-key">Token</Label>
@@ -6245,10 +6210,6 @@ export default function StoryboardGenerator() {
                         runninghub: {
                           ...prev.runninghub,
                           baseUrl: DEFAULT_APP_CONNECTION_SETTINGS.runninghub.baseUrl,
-                        },
-                        seedance: {
-                          ...prev.seedance,
-                          baseUrl: DEFAULT_APP_CONNECTION_SETTINGS.seedance.baseUrl,
                         },
                         manfei: {
                           ...prev.manfei,

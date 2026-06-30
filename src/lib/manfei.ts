@@ -28,6 +28,13 @@ export type ManfeiVideoStatus = {
   usage?: unknown;
 };
 
+export type ManfeiTaskBilling = {
+  taskId: string;
+  amountRmb: number;
+  itemCount: number;
+  endpoints: string[];
+};
+
 const ASSET_STATUS_TIMEOUT_MS = 180_000;
 const ASSET_STATUS_POLL_MS = 2_000;
 const inFlightAssets = new Map<string, Promise<string>>();
@@ -400,4 +407,75 @@ export async function getManfeiVideoStatus(taskId: string): Promise<ManfeiVideoS
     error: body.error || body.message || body.detail?.message,
     usage: body.usage,
   };
+}
+
+function normalizeAmountRmb(value: unknown): number {
+  const amount = Number(value);
+  return Number.isFinite(amount) ? amount : 0;
+}
+
+export async function getManfeiTaskBilling(
+  taskId: string,
+  options: { limit?: number; pages?: number } = {},
+): Promise<ManfeiTaskBilling | null> {
+  const limit = Math.min(200, Math.max(1, Math.round(Number(options.limit) || 200)));
+  const pages = Math.min(10, Math.max(1, Math.round(Number(options.pages) || 5)));
+  let amountRmb = 0;
+  let itemCount = 0;
+  const endpoints = new Set<string>();
+
+  for (let page = 0; page < pages; page++) {
+    const offset = page * limit;
+    const response = await manfeiFetch(`/v1/usage?limit=${limit}&offset=${offset}&charged_only=true`);
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(`查询 Manfei 账单失败：HTTP ${response.status} ${JSON.stringify(body).slice(0, 300)}`);
+    }
+
+    const items = Array.isArray(body.items) ? body.items : [];
+    for (const item of items) {
+      if (!item || typeof item !== 'object') continue;
+      const record = item as Record<string, unknown>;
+      if (record.task_id !== taskId) continue;
+      amountRmb += normalizeAmountRmb(record.amount_rmb);
+      itemCount += 1;
+      if (typeof record.endpoint === 'string' && record.endpoint) endpoints.add(record.endpoint);
+    }
+
+    if (items.length < limit) break;
+  }
+
+  if (itemCount === 0) return null;
+  return {
+    taskId,
+    amountRmb: Number(amountRmb.toFixed(6)),
+    itemCount,
+    endpoints: Array.from(endpoints),
+  };
+}
+
+export async function waitForManfeiTaskBilling(
+  taskId: string,
+  options: {
+    attempts?: number;
+    intervalMs?: number;
+    limit?: number;
+    pages?: number;
+  } = {},
+): Promise<ManfeiTaskBilling | null> {
+  const attempts = Math.min(20, Math.max(1, Math.round(Number(options.attempts) || 1)));
+  const intervalMs = Math.min(30_000, Math.max(0, Math.round(Number(options.intervalMs) || 0)));
+
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    if (attempt > 0 && intervalMs > 0) {
+      await new Promise(resolve => setTimeout(resolve, intervalMs));
+    }
+    const billing = await getManfeiTaskBilling(taskId, {
+      limit: options.limit,
+      pages: options.pages,
+    });
+    if (billing) return billing;
+  }
+
+  return null;
 }
