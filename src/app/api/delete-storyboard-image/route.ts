@@ -1,7 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { S3Storage, HeaderUtils } from 'coze-coding-dev-sdk';
+import { requireUserLoginResponse } from '@/lib/auth-guard';
 
 export async function POST(request: NextRequest) {
+  const auth = await requireUserLoginResponse();
+  if (auth.response) return auth.response;
+
   try {
     const { imageKey } = await request.json();
 

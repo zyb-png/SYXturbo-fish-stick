@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import fs from 'fs';
 import path from 'path';
+import { requireUserLoginResponse } from '@/lib/auth-guard';
 
 // 资产类型映射 - 键名改为复数形式以匹配前端
 const ASSET_FOLDERS: Record<string, string> = {
@@ -22,6 +23,9 @@ const SINGULAR_TO_PLURAL: Record<string, string> = {
 
 // 保存资产到本地
 export async function POST(request: NextRequest) {
+  const auth = await requireUserLoginResponse();
+  if (auth.response) return auth.response;
+
   try {
     const { type, name, url, data } = await request.json();
     
@@ -170,6 +174,9 @@ export async function GET(request: NextRequest) {
 
 // 删除资产
 export async function DELETE(request: NextRequest) {
+  const auth = await requireUserLoginResponse();
+  if (auth.response) return auth.response;
+
   try {
     const { filePath } = await request.json();
     

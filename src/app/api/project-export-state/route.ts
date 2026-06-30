@@ -3,6 +3,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import archiver from 'archiver';
+import { requireUserLoginResponse } from '@/lib/auth-guard';
 
 // 项目版本号
 const PROJECT_VERSION = '1.0.0';
@@ -69,6 +70,9 @@ function addProjectEntries(
 }
 
 export async function POST(request: NextRequest) {
+  const auth = await requireUserLoginResponse();
+  if (auth.response) return auth.response;
+
   try {
     const { state, projectName, saveToDownloads } = await request.json();
 

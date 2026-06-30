@@ -575,6 +575,7 @@ const DEFAULT_APP_CONNECTION_SETTINGS: AppConnectionSettings = {
 };
 
 const SHOW_DEVELOPER_SETTINGS = process.env.NEXT_PUBLIC_SHOW_DEVELOPER_SETTINGS === 'true';
+const LOGIN_REQUIRED_PROMPT = '请先登录账号再继续使用。新账号首次登录赠送 500 创作点。';
 
 // 提取状态接口
 interface ExtractionStatus {
@@ -601,9 +602,9 @@ export default function StoryboardGenerator() {
   const [settingsLoading, setSettingsLoading] = useState(false);
   const [settingsSaving, setSettingsSaving] = useState(false);
   const [loginRequiredOpen, setLoginRequiredOpen] = useState(false);
-  const [loginRequiredMessage, setLoginRequiredMessage] = useState('请先登录账号，再使用会消耗创作点的 AI 功能。');
+  const [loginRequiredMessage, setLoginRequiredMessage] = useState(LOGIN_REQUIRED_PROMPT);
 
-  const showLoginRequired = useCallback((message = '请先登录账号，再使用会消耗创作点的 AI 功能。') => {
+  const showLoginRequired = useCallback((message = LOGIN_REQUIRED_PROMPT) => {
     setLoginRequiredMessage(message);
     setLoginRequiredOpen(true);
   }, []);
@@ -618,12 +619,12 @@ export default function StoryboardGenerator() {
       const response = await fetch('/api/creation-points', { cache: 'no-store' });
       const result = await response.json();
       if (!response.ok || !result?.account?.id) {
-        showLoginRequired('该功能会调用 AI 接口并消耗创作点，请先登录账号。');
+        showLoginRequired(LOGIN_REQUIRED_PROMPT);
         return false;
       }
       return true;
     } catch {
-      showLoginRequired('暂时无法确认登录状态，请先登录账号后再重试。');
+      showLoginRequired('暂时无法确认登录状态，请先登录账号后再重试。新账号首次登录赠送 500 创作点。');
       return false;
     }
   }, [showLoginRequired]);
@@ -737,7 +738,7 @@ export default function StoryboardGenerator() {
       if (response.status === 401) {
         void response.clone().json().then((result) => {
           if (result?.code === 'LOGIN_REQUIRED') {
-            showLoginRequired(result.error || '请先登录账号，再使用会消耗创作点的 AI 功能。');
+            showLoginRequired(result.error || LOGIN_REQUIRED_PROMPT);
           }
         }).catch(() => undefined);
       }
@@ -1401,6 +1402,8 @@ export default function StoryboardGenerator() {
 
   // 清除所有数据（包括本地状态和S3资产）
   const handleClearAllData = useCallback(async () => {
+    if (!(await requireLoginBeforePaidAction())) return;
+
     try {
       // 先清除本地和云端资产文件
       const response = await fetch('/api/clear-assets', {
@@ -1458,7 +1461,8 @@ export default function StoryboardGenerator() {
   }, [clearAll, setCurrentStep, setUploadedFileName, setFileContent, setScenesData, 
       setCharactersData, setPropsData, setOutline, setSelectedChapter, setStoryboard,
       setImageStoryboards, setConnectingPrompts, setVideoResults, setVideoTotalDuration,
-      setProgress, setVideoRatio, setAssetImagesObj, setStepConfirmed, setExtractionStatus]);
+      setProgress, setVideoRatio, setAssetImagesObj, setStepConfirmed, setExtractionStatus,
+      requireLoginBeforePaidAction]);
 
   const steps = [
     { title: '上传文件', icon: Upload },
@@ -1533,6 +1537,8 @@ export default function StoryboardGenerator() {
   });
 
   const handleExportChapterPrompts = async (cs: ChapterStoryboard) => {
+    if (!(await requireLoginBeforePaidAction())) return;
+
     if (!cs.videoPrompts?.length && !cs.promptGroups?.length) {
       toast.error('这一集还没有可导出的提示词');
       return;
@@ -1593,6 +1599,8 @@ export default function StoryboardGenerator() {
   };
 
   const handleExportProject = async (projectName: string): Promise<boolean> => {
+    if (!(await requireLoginBeforePaidAction())) return false;
+
     setIsExporting(true);
     const toastId = toast.loading('正在打包完整项目，请稍等...');
     try {
@@ -1645,6 +1653,8 @@ export default function StoryboardGenerator() {
   };
 
   const handleImportProject = async (file: File): Promise<boolean> => {
+    if (!(await requireLoginBeforePaidAction())) return false;
+
     setIsImporting(true);
     const toastId = toast.loading('正在导入项目，请稍等...');
     try {
@@ -3513,7 +3523,7 @@ export default function StoryboardGenerator() {
 
   // 确认当前步骤并进入下一步
   const confirmStep = async (step: 'upload' | 'extraction' | 'storyboard' | 'assets' | 'prompts' | 'videos') => {
-    if (step === 'upload' && fileContent && uploadedFile) {
+    if (step === 'upload' && fileContent) {
       if (!(await requireLoginBeforePaidAction())) return;
     }
 
@@ -3560,8 +3570,8 @@ export default function StoryboardGenerator() {
       case 'upload':
         setCurrentStep(1);
         setProgress(15);
-        if (fileContent && uploadedFile) {
-          void extractAllParallel(fileContent, uploadedFile.name);
+        if (fileContent) {
+          void extractAllParallel(fileContent, uploadedFile?.name || uploadedFileName || '剧本');
         }
         break;
       case 'extraction':
@@ -3765,6 +3775,8 @@ export default function StoryboardGenerator() {
 
   // 上传文件
   const handleFileUpload = async (file: File) => {
+    if (!(await requireLoginBeforePaidAction())) return;
+
     setIsProcessing(true);
     setProgress(10);
     
@@ -5860,6 +5872,8 @@ export default function StoryboardGenerator() {
 
   // 上传自定义图片
   const uploadCustomImage = async (type: 'scene' | 'character' | 'prop', data: any, file: File) => {
+    if (!(await requireLoginBeforePaidAction())) return;
+
     // 使用素材的名称作为 key，确保唯一性（名称是唯一的，id 可能在分批时重复）
     const assetId = `${type}-${data.name}`;
     const currentAsset = assetImages.get(assetId);

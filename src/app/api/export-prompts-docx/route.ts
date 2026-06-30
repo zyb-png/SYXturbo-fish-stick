@@ -3,6 +3,7 @@ import AdmZip from 'adm-zip';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { requireUserLoginResponse } from '@/lib/auth-guard';
 
 export const runtime = 'nodejs';
 
@@ -265,6 +266,9 @@ function getUniqueFilePath(directory: string, filename: string): { filePath: str
 }
 
 export async function POST(request: NextRequest) {
+  const auth = await requireUserLoginResponse();
+  if (auth.response) return auth.response;
+
   try {
     const payload = await request.json() as ExportPayload;
     const chapterNumber = payload.chapterNumber ?? 1;

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { S3Storage, FetchClient, Config, HeaderUtils } from 'coze-coding-dev-sdk';
 import mammoth from 'mammoth';
+import { requireUserLoginResponse } from '@/lib/auth-guard';
 
 // 支持的文件类型
 const SUPPORTED_TYPES: Record<string, string[]> = {
@@ -34,6 +35,9 @@ function getSupportedFileType(mimeType: string, fileName: string): string | null
 }
 
 export async function POST(request: NextRequest) {
+  const auth = await requireUserLoginResponse();
+  if (auth.response) return auth.response;
+
   try {
     const formData = await request.formData();
     const file = formData.get('file') as File;

@@ -1,8 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { S3Storage } from 'coze-coding-dev-sdk';
+import { requireUserLoginResponse } from '@/lib/auth-guard';
 
 // 保存视频到 S3
 export async function POST(request: NextRequest) {
+  const auth = await requireUserLoginResponse();
+  if (auth.response) return auth.response;
+
   try {
     const body = await request.json();
     const { videoUrl, chapterNumber, shotNumber, videoIndex } = body;

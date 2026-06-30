@@ -234,7 +234,7 @@ export function CreationPointsWallet() {
             创作点钱包
           </DialogTitle>
           <DialogDescription className="text-amber-100/62">
-            先登录账号，再使用创作点；任务开始时预冻结，成功后扣除，失败自动退回。
+            先登录账号，再使用创作点；新账号首次登录赠送 500 点，任务开始时预冻结，成功后扣除，失败自动退回。
           </DialogDescription>
         </DialogHeader>
 
@@ -514,7 +514,7 @@ export function CreationPointsWallet() {
               登录账号
             </DialogTitle>
             <DialogDescription className="text-amber-100/62">
-              输入后台录入的账号和密码，登录后创作点会实时同步。
+              输入后台录入的账号和密码，登录后创作点会实时同步。新账号首次登录赠送 500 创作点。
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-3">

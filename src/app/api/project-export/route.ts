@@ -2,11 +2,15 @@ import { NextRequest, NextResponse } from 'next/server';
 import fs from 'fs';
 import path from 'path';
 import archiver from 'archiver';
+import { requireUserLoginResponse } from '@/lib/auth-guard';
 
 // 项目版本号
 const PROJECT_VERSION = '1.0.0';
 
 export async function GET(request: NextRequest) {
+  const auth = await requireUserLoginResponse();
+  if (auth.response) return auth.response;
+
   try {
     const { searchParams } = new URL(request.url);
     const projectName = searchParams.get('name') || 'storyboard-project';

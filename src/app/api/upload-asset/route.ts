@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { S3Storage } from 'coze-coding-dev-sdk';
 import fs from 'fs';
 import path from 'path';
+import { requireUserLoginResponse } from '@/lib/auth-guard';
 
 // 图片数量限制
 const MAX_IMAGES_PER_ASSET = 10;
@@ -9,6 +10,9 @@ const MAX_IMAGES_PER_ASSET = 10;
 const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50MB
 
 export async function POST(request: NextRequest) {
+  const auth = await requireUserLoginResponse();
+  if (auth.response) return auth.response;
+
   try {
     const formData = await request.formData();
     const file = formData.get('file') as File;

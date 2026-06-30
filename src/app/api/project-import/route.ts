@@ -2,11 +2,15 @@ import { NextRequest, NextResponse } from 'next/server';
 import fs from 'fs';
 import path from 'path';
 import AdmZip from 'adm-zip';
+import { requireUserLoginResponse } from '@/lib/auth-guard';
 
 // 项目版本号
 const PROJECT_VERSION = '1.0.0';
 
 export async function POST(request: NextRequest) {
+  const auth = await requireUserLoginResponse();
+  if (auth.response) return auth.response;
+
   try {
     const formData = await request.formData();
     const file = formData.get('file') as File;

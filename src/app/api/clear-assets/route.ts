@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import fs from 'fs';
 import path from 'path';
 import { S3Storage } from 'coze-coding-dev-sdk';
+import { requireUserLoginResponse } from '@/lib/auth-guard';
 
 /**
  * 清除 S3 和本地资产目录中的所有资产文件
@@ -98,6 +99,9 @@ function clearLocalAssetFolders() {
 }
 
 export async function POST(request: NextRequest) {
+  const auth = await requireUserLoginResponse();
+  if (auth.response) return auth.response;
+
   let localDeleted = {
     assetsPath: '',
     deletedByFolder: {} as Record<string, number>,

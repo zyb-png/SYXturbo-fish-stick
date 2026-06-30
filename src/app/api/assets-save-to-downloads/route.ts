@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { requireUserLoginResponse } from '@/lib/auth-guard';
 
 export const runtime = 'nodejs';
 
@@ -77,6 +78,9 @@ function resolveLocalAssetPath(imageUrl: string) {
 }
 
 export async function POST(request: NextRequest) {
+  const auth = await requireUserLoginResponse();
+  if (auth.response) return auth.response;
+
   try {
     const { imageUrl, fileName } = await request.json();
     if (typeof imageUrl !== 'string' || !imageUrl.trim()) {
