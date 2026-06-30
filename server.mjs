@@ -550,7 +550,8 @@ function serveLoginPage(res, error = '') {
     button{width:100%;height:44px;margin-top:10px;border:0;border-radius:8px;background:linear-gradient(135deg,#f8d58a,#a66b16);color:#1b1104;font-weight:800;font-size:15px;cursor:pointer}
     .password-wrap{position:relative;display:block}
     .password-wrap input{box-sizing:border-box;width:100%;padding-right:46px}
-    .password-toggle{position:absolute;right:8px;top:50%;display:grid;place-items:center;width:30px;height:30px;margin:0;border:1px solid rgba(245,189,91,.28);border-radius:999px;background:rgba(35,25,10,.72);color:#f5d58d;font-size:14px;line-height:1}
+    .password-toggle{position:absolute;right:8px;top:50%;transform:translateY(-50%);display:grid;place-items:center;width:30px;height:30px;margin:0;border:1px solid rgba(245,189,91,.28);border-radius:999px;background:rgba(35,25,10,.72);color:#f5d58d;line-height:1}
+    .password-toggle svg{display:block;width:16px;height:16px;stroke:currentColor;stroke-width:1.8;fill:none}
     .password-toggle:hover{border-color:rgba(245,189,91,.7);color:#ffe8ad}
     .back{display:inline-flex;align-items:center;gap:6px;width:max-content;margin:0 0 18px;padding:7px 10px;border:1px solid rgba(245,189,91,.34);border-radius:999px;color:#e8cf9a;background:rgba(35,25,10,.42);font-size:13px;text-decoration:none}
     .back:hover{border-color:rgba(245,189,91,.72);color:#ffe5aa}
@@ -564,7 +565,7 @@ function serveLoginPage(res, error = '') {
     <p>登录后进入工作台或管理后台</p>
     ${error ? `<div class="error">${escapeHtml(error)}</div>` : ''}
     <label>账号<input name="username" autocomplete="username" autofocus></label>
-    <label>密码<span class="password-wrap"><input id="passwordInput" name="password" type="password" autocomplete="current-password"><button class="password-toggle" type="button" aria-label="显示密码" title="显示密码">👁</button></span></label>
+    <label>密码<span class="password-wrap"><input id="passwordInput" name="password" type="password" autocomplete="current-password"><button class="password-toggle" type="button" aria-label="显示密码" title="显示密码"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"></path><circle cx="12" cy="12" r="3"></circle></svg></button></span></label>
     <button type="submit">登录</button>
   </form>
   <script>
@@ -575,7 +576,6 @@ function serveLoginPage(res, error = '') {
       input.type = visible ? 'password' : 'text';
       toggle.setAttribute('aria-label', visible ? '显示密码' : '隐藏密码');
       toggle.title = visible ? '显示密码' : '隐藏密码';
-      toggle.textContent = visible ? '👁' : '●';
     });
   </script>
 </body>

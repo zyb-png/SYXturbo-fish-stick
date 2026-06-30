@@ -321,7 +321,8 @@ textarea {
   border-radius: 6px;
   background: rgba(8, 11, 9, 0.92);
   color: var(--text);
-  padding: 10px 12px;
+  padding: 8px 10px;
+  font-size: 13px;
   outline: none;
 }
 
@@ -332,6 +333,10 @@ textarea::placeholder {
 
 select {
   color-scheme: dark;
+}
+
+#projectId {
+  font-size: 12px;
 }
 
 textarea {
@@ -3350,6 +3355,29 @@ html[data-theme]:not([data-theme="gold"]) .topbar {
   background:
     linear-gradient(165deg, transparent 0 60%, rgba(var(--light-accent), 0.045) 60.4%, transparent 61%),
     rgba(255, 255, 255, 0.92);
+}
+
+html[data-theme]:not([data-theme="gold"]) .top-badge {
+  border-color: rgba(var(--light-accent), 0.3);
+  background: rgba(var(--light-accent), 0.075);
+  color: var(--light-accent-deep);
+}
+
+html[data-theme]:not([data-theme="gold"]) .top-link,
+html[data-theme]:not([data-theme="gold"]) .top-tool-button,
+html[data-theme]:not([data-theme="gold"]) .top-actions .icon-button {
+  border-color: rgba(var(--light-accent), 0.36);
+  background: rgba(var(--light-accent), 0.07);
+  box-shadow: none;
+  color: var(--light-accent-deep);
+}
+
+html[data-theme]:not([data-theme="gold"]) .top-link:hover,
+html[data-theme]:not([data-theme="gold"]) .top-tool-button:hover,
+html[data-theme]:not([data-theme="gold"]) .top-actions .icon-button:hover {
+  border-color: rgba(var(--light-accent), 0.58);
+  background: var(--light-tint);
+  color: var(--gold-deep);
 }
 
 html[data-theme]:not([data-theme="gold"]) .brand-mark {

@@ -51,6 +51,11 @@ async function loadAdminData() {
   }
 }
 
+async function refreshSession() {
+  adminState.session = await api('/api/session');
+  renderSession();
+}
+
 function switchManagementMode(mode) {
   adminState.managementMode = mode;
   const isAccounts = mode === 'accounts';
