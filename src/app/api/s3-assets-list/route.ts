@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { S3Storage } from 'coze-coding-dev-sdk';
+import { requireUserLoginResponse } from '@/lib/auth-guard';
 
 // 文件夹映射
 const FOLDER_MAP: Record<string, { prefix: string; name: string }> = {
@@ -12,6 +13,9 @@ const FOLDER_MAP: Record<string, { prefix: string; name: string }> = {
 
 // 从 S3 对象存储获取图片列表
 export async function GET(request: NextRequest) {
+  const auth = await requireUserLoginResponse();
+  if (auth.response) return auth.response;
+
   try {
     const { searchParams } = new URL(request.url);
     const folder = searchParams.get('folder') || '';

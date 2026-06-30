@@ -1,8 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { S3Storage } from 'coze-coding-dev-sdk';
+import { requireUserLoginResponse } from '@/lib/auth-guard';
 
 // 获取 S3 对象的签名 URL
 export async function GET(request: NextRequest) {
+  const auth = await requireUserLoginResponse();
+  if (auth.response) return auth.response;
+
   try {
     const { searchParams } = new URL(request.url);
     const key = searchParams.get('key');

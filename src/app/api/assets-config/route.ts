@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import fs from 'fs';
 import path from 'path';
 import { S3Storage } from 'coze-coding-dev-sdk';
+import { requireUserLoginResponse } from '@/lib/auth-guard';
 
 // 默认资产文件夹路径（沙箱环境）
 // 注意：资产保存在服务器端，用户可通过导出功能下载到本地
@@ -129,6 +130,9 @@ export async function GET(request: NextRequest) {
 
 // 设置资产文件夹路径
 export async function POST(request: NextRequest) {
+  const auth = await requireUserLoginResponse();
+  if (auth.response) return auth.response;
+
   try {
     const { assetsPath } = await request.json();
     
