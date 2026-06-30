@@ -73,6 +73,7 @@ function getStatusLabel(status: AdminAccountRow['status']): string {
 
 export default function AdminAccountsPage() {
   const [authorized, setAuthorized] = useState(false);
+  const [adminUsername, setAdminUsername] = useState('manfei');
   const [adminPassword, setAdminPassword] = useState('');
   const [loading, setLoading] = useState(false);
   const [accounts, setAccounts] = useState<AdminAccountRow[]>([]);
@@ -149,11 +150,11 @@ export default function AdminAccountsPage() {
       const response = await fetch('/api/admin/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ password: adminPassword }),
+        body: JSON.stringify({ username: adminUsername, password: adminPassword }),
       });
       const result = await response.json();
       if (!response.ok || !result.success) {
-        throw new Error(result.error || '后台口令错误');
+        throw new Error(result.error || '后台账号或密码错误');
       }
       setAuthorized(true);
       setAdminPassword('');
@@ -287,7 +288,19 @@ export default function AdminAccountsPage() {
             </div>
             <div className="space-y-3">
               <div className="space-y-2">
-                <Label htmlFor="admin-password">后台口令</Label>
+                <Label htmlFor="admin-username">管理员账号</Label>
+                <Input
+                  id="admin-username"
+                  value={adminUsername}
+                  onChange={(event) => setAdminUsername(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter') void loginAdmin();
+                  }}
+                  className="border-amber-400/30 bg-black/40 text-amber-50"
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="admin-password">管理员密码</Label>
                 <PasswordInput
                   id="admin-password"
                   value={adminPassword}
@@ -302,7 +315,7 @@ export default function AdminAccountsPage() {
               <Button
                 className="w-full bg-amber-500 text-black hover:bg-amber-400"
                 onClick={() => void loginAdmin()}
-                disabled={loading || !adminPassword}
+                disabled={loading || !adminUsername || !adminPassword}
               >
                 登录后台
               </Button>

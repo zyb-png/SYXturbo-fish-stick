@@ -71,6 +71,7 @@ export interface AuthResult {
 }
 
 const ACCOUNT_STORE_FILE_NAME = 'accounts.json';
+const DEFAULT_ADMIN_USERNAME = 'manfei';
 const DEFAULT_ADMIN_PASSWORD = 'admin123456';
 
 let accountStoreQueue = Promise.resolve();
@@ -253,6 +254,10 @@ function getAdminPassword(): string {
   return process.env.MANFEI_ADMIN_PASSWORD || process.env.ADMIN_PASSWORD || DEFAULT_ADMIN_PASSWORD;
 }
 
+function getAdminUsername(): string {
+  return process.env.MANFEI_ADMIN_USERNAME || process.env.ADMIN_USERNAME || DEFAULT_ADMIN_USERNAME;
+}
+
 function createSessionExpiry(maxAgeSeconds: number): string {
   return new Date(Date.now() + maxAgeSeconds * 1000).toISOString();
 }
@@ -333,10 +338,13 @@ export async function authenticateUserAccount(username: string, password: string
   });
 }
 
-export async function authenticateAdmin(password: string): Promise<{ token: string; maxAge: number }> {
+export async function authenticateAdmin(username: string, password: string): Promise<{ token: string; maxAge: number }> {
   return queueStoreMutation((state) => {
+    if (normalizeComparable(username) !== normalizeComparable(getAdminUsername())) {
+      throw new Error('后台账号或密码错误');
+    }
     if (password !== getAdminPassword()) {
-      throw new Error('后台口令错误');
+      throw new Error('后台账号或密码错误');
     }
     const token = randomBytes(32).toString('hex');
     state.adminSessions.push({
@@ -443,5 +451,7 @@ export async function requireAdminSession(request: NextRequest): Promise<void> {
 }
 
 export function getDefaultAdminPasswordHint(): string {
-  return process.env.MANFEI_ADMIN_PASSWORD || process.env.ADMIN_PASSWORD ? '已使用环境变量后台口令' : DEFAULT_ADMIN_PASSWORD;
+  return process.env.MANFEI_ADMIN_USERNAME || process.env.ADMIN_USERNAME || process.env.MANFEI_ADMIN_PASSWORD || process.env.ADMIN_PASSWORD
+    ? '已使用环境变量后台账号'
+    : DEFAULT_ADMIN_USERNAME;
 }

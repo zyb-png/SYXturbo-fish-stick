@@ -10,8 +10,9 @@ export const dynamic = 'force-dynamic';
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
+    const username = typeof body.username === 'string' ? body.username : '';
     const password = typeof body.password === 'string' ? body.password : '';
-    const result = await authenticateAdmin(password);
+    const result = await authenticateAdmin(username, password);
     const response = NextResponse.json({ success: true });
     response.cookies.set(ADMIN_SESSION_COOKIE, result.token, {
       httpOnly: true,
