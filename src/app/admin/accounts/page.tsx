@@ -30,7 +30,7 @@ interface AdminAccountRow {
 }
 
 interface AccountPointsDraft {
-  setPoints: string;
+  addPoints: string;
 }
 
 function formatPoints(value: number): string {
@@ -47,9 +47,9 @@ function formatTime(value?: string): string {
   });
 }
 
-function createDraft(account: AdminAccountRow): AccountPointsDraft {
+function createDraft(): AccountPointsDraft {
   return {
-    setPoints: String(account.wallet.availablePoints || 0),
+    addPoints: '',
   };
 }
 
@@ -91,8 +91,8 @@ export default function AdminAccountsPage() {
     setDrafts((previous) => {
       const next: Record<string, AccountPointsDraft> = {};
       for (const account of rows) {
-        next[account.id] = previous[account.id] || createDraft(account);
-        next[account.id].setPoints = previous[account.id]?.setPoints ?? String(account.wallet.availablePoints || 0);
+        next[account.id] = previous[account.id] || createDraft();
+        next[account.id].addPoints = previous[account.id]?.addPoints ?? '';
       }
       return next;
     });
@@ -197,10 +197,20 @@ export default function AdminAccountsPage() {
     setDrafts((previous) => ({
       ...previous,
       [accountId]: {
-        ...(previous[accountId] || { setPoints: '0' }),
+        ...(previous[accountId] || { addPoints: '' }),
         ...patch,
       },
     }));
+  };
+
+  const addPointsToAccount = async (accountId: string, points: string) => {
+    const added = await postAction({
+      action: 'addPoints',
+      accountId,
+      points: Number(points || 0),
+    }, '点数已增加');
+    if (!added) return;
+    updateDraft(accountId, { addPoints: '' });
   };
 
   return (
@@ -330,7 +340,7 @@ export default function AdminAccountsPage() {
                 {displayAccounts.length === 0 ? (
                   <div className="px-4 py-10 text-center text-sm text-amber-100/60">暂无账号</div>
                 ) : displayAccounts.map((account) => {
-                  const draft = drafts[account.id] || createDraft(account);
+                  const draft = drafts[account.id] || createDraft();
                   return (
                     <div key={account.id} className="grid grid-cols-1 gap-4 px-4 py-4 text-sm lg:grid-cols-[1.1fr_1.55fr_1fr_1fr]">
                       <div className="min-w-0">
@@ -360,9 +370,9 @@ export default function AdminAccountsPage() {
                       </div>
 
                       <div className="grid grid-cols-2 gap-2">
-                        <Input type="number" min="0" value={draft.setPoints} onChange={(event) => updateDraft(account.id, { setPoints: event.target.value })} className="border-amber-400/25 bg-black/35" />
-                        <Button variant="outline" className="border-amber-400/30 bg-black/20 text-amber-100 hover:bg-amber-500/10" onClick={() => void postAction({ action: 'setPoints', accountId: account.id, points: Number(draft.setPoints || 0) }, '点数已设置')}>
-                          设置点数
+                        <Input type="number" min="1" placeholder="增加点数" value={draft.addPoints} onChange={(event) => updateDraft(account.id, { addPoints: event.target.value })} className="border-amber-400/25 bg-black/35" />
+                        <Button variant="outline" className="border-amber-400/30 bg-black/20 text-amber-100 hover:bg-amber-500/10" onClick={() => void addPointsToAccount(account.id, draft.addPoints)} disabled={loading || !Number(draft.addPoints || 0)}>
+                          增加点数
                         </Button>
                       </div>
                     </div>

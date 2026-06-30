@@ -6,7 +6,7 @@ import {
 } from '@/lib/account-store';
 import {
   getCreationPointSnapshotForAccount,
-  setAccountAvailableCreationPoints,
+  grantCreationPointsToAccount,
 } from '@/lib/creation-points';
 
 export const dynamic = 'force-dynamic';
@@ -61,13 +61,17 @@ export async function POST(request: NextRequest) {
         wechat: body.wechat,
         status: body.status === 'disabled' ? 'disabled' : 'active',
       });
-    } else if (action === 'setPoints') {
+    } else if (action === 'addPoints') {
       const points = toNumber(body.points);
-      if (points === null) throw new Error('请输入要设置的点数');
-      await setAccountAvailableCreationPoints({
+      if (points === null || points <= 0) throw new Error('请输入要增加的点数');
+      await grantCreationPointsToAccount({
         accountId: body.accountId,
         points,
+        label: '后台增加点数',
+        source: 'bonus',
       });
+    } else if (action === 'setPoints') {
+      throw new Error('设置点数已停用，请使用增加点数');
     } else if (action === 'grantPoints') {
       throw new Error('默认赠送额度由系统自动发放，每个账号仅一次，后台不能手动重复赠送');
     } else if (action === 'updateProfile') {
