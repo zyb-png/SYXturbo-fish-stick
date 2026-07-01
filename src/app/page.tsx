@@ -6852,7 +6852,7 @@ export default function StoryboardGenerator() {
                           </div>
                         )}
                         
-                        <div className={`grid grid-cols-2 gap-2 ${expandedSections.scenes ? '' : 'max-h-[400px]'} overflow-y-auto transition-all duration-300`}>
+                        <div className={`grid grid-cols-1 2xl:grid-cols-2 gap-3 ${expandedSections.scenes ? '' : 'max-h-[400px]'} overflow-y-auto transition-all duration-300`}>
                           {(() => {
                             const scenesToDisplay = (sceneBatchInfo?.allScenes?.length ?? 0) > 0 ? sceneBatchInfo?.allScenes : scenesData.scenes;
                             
@@ -6874,14 +6874,14 @@ export default function StoryboardGenerator() {
                             const isAssetsConfirmed = stepConfirmed.assets; // 素材是否已确认
                             
                             return (
-                              <div key={`scene-${scene.name}-${index}`} className={`p-2 border rounded space-y-2 ${isAssetsConfirmed ? 'opacity-75' : ''}`}>
+                              <div key={`scene-${scene.name}-${index}`} className={`p-3 border rounded space-y-2 ${isAssetsConfirmed ? 'opacity-75' : ''}`}>
                                 {/* 图片展示区域 - 支持多张图片 */}
-                                <div className="grid grid-cols-3 gap-1">
+                                <div className="grid grid-cols-3 gap-1.5 min-h-14">
                                   {images.map((img, imgIdx) => (
-                                    <div key={img.imageId || `scene-${scene.id}-img-${imgIdx}`} className="relative group cursor-pointer">
+                                    <div key={img.imageId || `scene-${scene.id}-img-${imgIdx}`} className="relative group cursor-pointer overflow-hidden rounded border border-amber-400/10 bg-black/20">
                                       {img.isGenerating ? (
-                                        <div className="w-full h-12 bg-gray-100 dark:bg-gray-800 rounded flex flex-col items-center justify-center gap-0.5">
-                                          <Loader2 className="w-3 h-3 animate-spin text-gray-400" />
+                                        <div className="w-full h-14 bg-gray-100 dark:bg-gray-800 rounded flex flex-col items-center justify-center gap-0.5">
+                                          <Loader2 className="size-3 animate-spin text-gray-400" />
                                           <span className="text-[10px] leading-none text-gray-400">{img.generatingStatus || '生成中'}</span>
                                         </div>
                                       ) : img.imageUrl ? (
@@ -6889,26 +6889,26 @@ export default function StoryboardGenerator() {
                                           <img
                                             src={img.imageUrl}
                                             alt={scene.name}
-                                            className="w-full h-12 object-cover rounded hover:opacity-80 transition-opacity"
+                                            className="w-full h-14 object-cover rounded hover:opacity-80 transition-opacity"
                                             onClick={() => openImagePreview(img.imageUrl, scene.name, 'scene')}
                                           />
-                                          <div className={`absolute top-0 right-0 flex gap-0.5 transition-opacity ${isAssetsConfirmed ? 'hidden' : 'opacity-0 group-hover:opacity-100'}`}>
+                                          <div className={`absolute top-1 right-1 grid grid-cols-2 gap-0.5 transition-opacity ${isAssetsConfirmed ? 'hidden' : 'opacity-0 group-hover:opacity-100'}`}>
                                             <Button
                                               size="icon"
                                               variant="secondary"
-                                              className="h-3 w-3"
+                                              className="h-5 w-5 min-w-0 p-0"
                                               title="预览"
                                               onClick={(e) => {
                                                 e.stopPropagation();
                                                 openImagePreview(img.imageUrl, scene.name, 'scene');
                                               }}
                                             >
-                                              <Eye className="w-1 h-1" />
+                                              <Eye className="size-2.5" />
                                             </Button>
                                             <Button
                                               size="icon"
                                               variant="secondary"
-                                              className="h-3 w-3"
+                                              className="h-5 w-5 min-w-0 p-0"
                                               title="以此图为参考生成新图"
                                               disabled={isAssetsConfirmed}
                                               onClick={(e) => {
@@ -6916,23 +6916,23 @@ export default function StoryboardGenerator() {
                                                 if (!isAssetsConfirmed) generateImageFromImage('scene', scene, img.imageUrl);
                                               }}
                                             >
-                                              <Copy className="w-1 h-1" />
+                                              <Copy className="size-2.5" />
                                             </Button>
                                             <Button
                                               size="icon"
                                               variant="secondary"
-                                              className="h-3 w-3"
+                                              className="h-5 w-5 min-w-0 p-0"
                                               onClick={(e) => {
                                                 e.stopPropagation();
                                                 downloadImage(img.imageUrl, scene.name);
                                               }}
                                             >
-                                              <Download className="w-1 h-1" />
+                                              <Download className="size-2.5" />
                                             </Button>
                                             <Button
                                               size="icon"
                                               variant="destructive"
-                                              className="h-3 w-3"
+                                              className="h-5 w-5 min-w-0 p-0"
                                               disabled={isAssetsConfirmed}
                                               onClick={(e) => {
                                                 e.stopPropagation();
@@ -6940,7 +6940,7 @@ export default function StoryboardGenerator() {
                                               }}
                                               title={isAssetsConfirmed ? "素材已确认，无法删除" : "取消选中（图片仍在图片库中）"}
                                             >
-                                              <Trash2 className="w-1 h-1" />
+                                              <Trash2 className="size-2.5" />
                                             </Button>
                                           </div>
                                           {img.isCustom && (
@@ -6950,7 +6950,7 @@ export default function StoryboardGenerator() {
                                           )}
                                         </>
                                       ) : (
-                                        <div className="w-full h-12 bg-gray-100 dark:bg-gray-800 rounded flex items-center justify-center">
+                                        <div className="w-full h-14 bg-gray-100 dark:bg-gray-800 rounded flex items-center justify-center">
                                           <span className="text-xs text-gray-400">图片加载中</span>
                                         </div>
                                       )}
@@ -6958,20 +6958,20 @@ export default function StoryboardGenerator() {
                                   ))}
                                   {/* 添加图片按钮 */}
                                   {canAddMore && !isGenerating && !isAssetsConfirmed && (
-                                    <div className="flex gap-0.5">
+                                    <div className="col-span-full grid grid-cols-3 gap-1.5">
                                       <Button
                                         size="sm"
                                         variant="ghost"
-                                        className="flex-1 h-12 px-0"
+                                        className="h-10 min-w-0 px-0"
                                         onClick={() => generateAssetImage('scene', scene)}
                                         title="AI生成图片"
                                       >
-                                        <ImageIcon className="w-3 h-3" />
+                                        <ImageIcon className="size-4" />
                                       </Button>
                                       <Button
                                         size="sm"
                                         variant="ghost"
-                                        className="flex-1 h-12 px-0"
+                                        className="h-10 min-w-0 px-0"
                                         onClick={() => {
                                           const input = document.createElement('input');
                                           input.type = 'file';
@@ -6984,16 +6984,16 @@ export default function StoryboardGenerator() {
                                         }}
                                         title="上传本地图片"
                                       >
-                                        <ImagePlus className="w-3 h-3" />
+                                        <ImagePlus className="size-4" />
                                       </Button>
                                       <Button
                                         size="sm"
                                         variant="ghost"
-                                        className="flex-1 h-12 px-0"
+                                        className="h-10 min-w-0 px-0"
                                         onClick={() => openImageLibrary('scene', scene.id, scene.name)}
                                         title="从图片库选择"
                                       >
-                                        <FolderOpen className="w-3 h-3" />
+                                        <FolderOpen className="size-4" />
                                       </Button>
                                     </div>
                                   )}
@@ -7002,8 +7002,8 @@ export default function StoryboardGenerator() {
                                 {images.length > 0 && (
                                   <p className="text-xs text-gray-500">{images.length}/{MAX_IMAGES_PER_ASSET} 张</p>
                                 )}
-                                <div className="flex items-center gap-2">
-                                  <span className="font-medium text-sm">{scene.name}</span>
+                                <div className="flex min-w-0 flex-wrap items-center gap-2">
+                                  <span className="min-w-0 break-words font-medium text-sm">{scene.name}</span>
                                   <Badge variant="outline" className="text-xs">{scene.type}</Badge>
                                   <Badge className="text-xs">{scene.importance}</Badge>
                                 </div>
@@ -7235,7 +7235,7 @@ export default function StoryboardGenerator() {
                                   <div className="shrink-0">
                                     <div className="grid grid-cols-2 gap-1 w-[104px]">
                                       {images.map((img, imgIdx) => (
-                                        <div key={img.imageId || `char-${char.id}-img-${imgIdx}`} className="relative group cursor-pointer">
+                                        <div key={img.imageId || `char-${char.id}-img-${imgIdx}`} className="relative group cursor-pointer overflow-hidden rounded">
                                           {img.isGenerating ? (
                                             <div className="w-12 h-12 bg-gray-100 dark:bg-gray-800 rounded flex flex-col items-center justify-center gap-0.5">
                                               <Loader2 className="w-3 h-3 animate-spin text-gray-400" />
@@ -7249,23 +7249,23 @@ export default function StoryboardGenerator() {
                                                 className="w-12 h-12 object-cover rounded hover:opacity-80 transition-opacity"
                                                 onClick={() => openImagePreview(img.imageUrl, char.name, 'character')}
                                               />
-                                              <div className={`absolute top-0 right-0 flex gap-0.5 transition-opacity ${isAssetsConfirmed ? 'hidden' : 'opacity-0 group-hover:opacity-100'}`}>
+                                              <div className={`absolute top-1 right-1 grid grid-cols-2 gap-0.5 transition-opacity ${isAssetsConfirmed ? 'hidden' : 'opacity-0 group-hover:opacity-100'}`}>
                                                 <Button
                                                   size="icon"
                                                   variant="secondary"
-                                                  className="h-3 w-3"
+                                                  className="h-5 w-5 min-w-0 p-0"
                                                   title="预览"
                                                   onClick={(e) => {
                                                     e.stopPropagation();
                                                     openImagePreview(img.imageUrl, char.name, 'character');
                                                   }}
                                                 >
-                                                  <Eye className="w-1 h-1" />
+                                                  <Eye className="size-2.5" />
                                                 </Button>
                                                 <Button
                                                   size="icon"
                                                   variant="secondary"
-                                                  className="h-3 w-3"
+                                                  className="h-5 w-5 min-w-0 p-0"
                                                   title="以此图为参考生成新图"
                                                   disabled={isAssetsConfirmed}
                                                   onClick={(e) => {
@@ -7273,23 +7273,23 @@ export default function StoryboardGenerator() {
                                                     if (!isAssetsConfirmed) generateImageFromImage('character', char, img.imageUrl);
                                                   }}
                                                 >
-                                                  <Copy className="w-1 h-1" />
+                                                  <Copy className="size-2.5" />
                                                 </Button>
                                                 <Button
                                                   size="icon"
                                                   variant="secondary"
-                                                  className="h-3 w-3"
+                                                  className="h-5 w-5 min-w-0 p-0"
                                                   onClick={(e) => {
                                                     e.stopPropagation();
                                                     downloadImage(img.imageUrl, char.name);
                                                   }}
                                                 >
-                                                  <Download className="w-1 h-1" />
+                                                  <Download className="size-2.5" />
                                                 </Button>
                                                 <Button
                                                   size="icon"
                                                   variant="destructive"
-                                                  className="h-3 w-3"
+                                                  className="h-5 w-5 min-w-0 p-0"
                                                   disabled={isAssetsConfirmed}
                                                   onClick={(e) => {
                                                     e.stopPropagation();
@@ -7297,7 +7297,7 @@ export default function StoryboardGenerator() {
                                                   }}
                                                   title={isAssetsConfirmed ? "素材已确认，无法删除" : "取消选中（图片仍在图片库中）"}
                                                 >
-                                                  <Trash2 className="w-1 h-1" />
+                                                  <Trash2 className="size-2.5" />
                                                 </Button>
                                               </div>
                                               {img.isCustom && (
@@ -7323,7 +7323,7 @@ export default function StoryboardGenerator() {
                                             onClick={() => generateAssetImage('character', char)}
                                             title="AI生成图片"
                                           >
-                                            <ImageIcon className="w-3 h-3" />
+                                            <ImageIcon className="size-4" />
                                           </Button>
                                           <Button
                                             size="sm"
@@ -7341,7 +7341,7 @@ export default function StoryboardGenerator() {
                                             }}
                                             title="上传本地图片"
                                           >
-                                            <ImagePlus className="w-3 h-3" />
+                                            <ImagePlus className="size-4" />
                                           </Button>
                                           <Button
                                             size="sm"
@@ -7350,7 +7350,7 @@ export default function StoryboardGenerator() {
                                             onClick={() => openImageLibrary('character', char.id, char.name)}
                                             title="从图片库选择"
                                           >
-                                            <FolderOpen className="w-3 h-3" />
+                                            <FolderOpen className="size-4" />
                                           </Button>
                                         </div>
                                       )}
@@ -7973,7 +7973,7 @@ export default function StoryboardGenerator() {
                           </div>
                         )}
                         
-                        <div className={`grid grid-cols-2 gap-2 ${expandedSections.props ? '' : 'max-h-[400px]'} overflow-y-auto transition-all duration-300`}>
+                        <div className={`grid grid-cols-1 2xl:grid-cols-2 gap-3 ${expandedSections.props ? '' : 'max-h-[400px]'} overflow-y-auto transition-all duration-300`}>
                           {(() => {
                             const propsToDisplay = (propBatchInfo?.allProps?.length ?? 0) > 0 ? propBatchInfo?.allProps : propsData.props;
                             
@@ -7995,14 +7995,14 @@ export default function StoryboardGenerator() {
                             const isAssetsConfirmed = stepConfirmed.assets; // 素材是否已确认
                             
                             return (
-                              <div key={`prop-${prop.name}-${index}`} className={`p-2 border rounded space-y-2 ${isAssetsConfirmed ? 'opacity-75' : ''}`}>
+                              <div key={`prop-${prop.name}-${index}`} className={`p-3 border rounded space-y-2 ${isAssetsConfirmed ? 'opacity-75' : ''}`}>
                                 {/* 道具图片区域 - 支持多张 */}
-                                <div className="grid grid-cols-3 gap-1">
+                                <div className="grid grid-cols-3 gap-1.5 min-h-14">
                                   {images.map((img, imgIdx) => (
-                                    <div key={img.imageId || `prop-${prop.id}-img-${imgIdx}`} className="relative group cursor-pointer">
+                                    <div key={img.imageId || `prop-${prop.id}-img-${imgIdx}`} className="relative group cursor-pointer overflow-hidden rounded border border-amber-400/10 bg-black/20">
                                       {img.isGenerating ? (
-                                        <div className="w-full h-12 bg-gray-100 dark:bg-gray-800 rounded flex flex-col items-center justify-center gap-0.5">
-                                          <Loader2 className="w-3 h-3 animate-spin text-gray-400" />
+                                        <div className="w-full h-14 bg-gray-100 dark:bg-gray-800 rounded flex flex-col items-center justify-center gap-0.5">
+                                          <Loader2 className="size-3 animate-spin text-gray-400" />
                                           <span className="text-[10px] leading-none text-gray-400">{img.generatingStatus || '生成中'}</span>
                                         </div>
                                       ) : img.imageUrl ? (
@@ -8010,26 +8010,26 @@ export default function StoryboardGenerator() {
                                           <img
                                             src={img.imageUrl}
                                             alt={prop.name}
-                                            className="w-full h-12 object-cover rounded hover:opacity-80 transition-opacity"
+                                            className="w-full h-14 object-cover rounded hover:opacity-80 transition-opacity"
                                             onClick={() => openImagePreview(img.imageUrl, prop.name, 'prop')}
                                           />
-                                          <div className={`absolute top-0 right-0 flex gap-0.5 transition-opacity ${isAssetsConfirmed ? 'hidden' : 'opacity-0 group-hover:opacity-100'}`}>
+                                          <div className={`absolute top-1 right-1 grid grid-cols-2 gap-0.5 transition-opacity ${isAssetsConfirmed ? 'hidden' : 'opacity-0 group-hover:opacity-100'}`}>
                                             <Button
                                               size="icon"
                                               variant="secondary"
-                                              className="h-3 w-3"
+                                              className="h-5 w-5 min-w-0 p-0"
                                               title="预览"
                                               onClick={(e) => {
                                                 e.stopPropagation();
                                                 openImagePreview(img.imageUrl, prop.name, 'prop');
                                               }}
                                             >
-                                              <Eye className="w-1 h-1" />
+                                              <Eye className="size-2.5" />
                                             </Button>
                                             <Button
                                               size="icon"
                                               variant="secondary"
-                                              className="h-3 w-3"
+                                              className="h-5 w-5 min-w-0 p-0"
                                               title="以此图为参考生成新图"
                                               disabled={isAssetsConfirmed}
                                               onClick={(e) => {
@@ -8037,23 +8037,23 @@ export default function StoryboardGenerator() {
                                                 if (!isAssetsConfirmed) generateImageFromImage('prop', prop, img.imageUrl);
                                               }}
                                             >
-                                              <Copy className="w-1 h-1" />
+                                              <Copy className="size-2.5" />
                                             </Button>
                                             <Button
                                               size="icon"
                                               variant="secondary"
-                                              className="h-3 w-3"
+                                              className="h-5 w-5 min-w-0 p-0"
                                               onClick={(e) => {
                                                 e.stopPropagation();
                                                 downloadImage(img.imageUrl, prop.name);
                                               }}
                                             >
-                                              <Download className="w-1 h-1" />
+                                              <Download className="size-2.5" />
                                             </Button>
                                             <Button
                                               size="icon"
                                               variant="destructive"
-                                              className="h-3 w-3"
+                                              className="h-5 w-5 min-w-0 p-0"
                                               disabled={isAssetsConfirmed}
                                               onClick={(e) => {
                                                 e.stopPropagation();
@@ -8061,7 +8061,7 @@ export default function StoryboardGenerator() {
                                               }}
                                               title={isAssetsConfirmed ? "素材已确认，无法删除" : "取消选中（图片仍在图片库中）"}
                                             >
-                                              <Trash2 className="w-1 h-1" />
+                                              <Trash2 className="size-2.5" />
                                             </Button>
                                           </div>
                                           {img.isCustom && (
@@ -8071,7 +8071,7 @@ export default function StoryboardGenerator() {
                                           )}
                                         </>
                                       ) : (
-                                        <div className="w-full h-12 bg-gray-100 dark:bg-gray-800 rounded flex items-center justify-center">
+                                        <div className="w-full h-14 bg-gray-100 dark:bg-gray-800 rounded flex items-center justify-center">
                                           <span className="text-xs text-gray-400">图片加载中</span>
                                         </div>
                                       )}
@@ -8079,20 +8079,20 @@ export default function StoryboardGenerator() {
                                   ))}
                                   {/* 添加按钮 */}
                                   {canAddMore && !isGenerating && !isAssetsConfirmed && (
-                                    <div className="flex gap-0.5">
+                                    <div className="col-span-full grid grid-cols-3 gap-1.5">
                                       <Button
                                         size="sm"
                                         variant="ghost"
-                                        className="flex-1 h-12 px-0"
+                                        className="h-10 min-w-0 px-0"
                                         onClick={() => generateAssetImage('prop', prop)}
                                         title="AI生成图片"
                                       >
-                                        <ImageIcon className="w-3 h-3" />
+                                        <ImageIcon className="size-4" />
                                       </Button>
                                       <Button
                                         size="sm"
                                         variant="ghost"
-                                        className="flex-1 h-12 px-0"
+                                        className="h-10 min-w-0 px-0"
                                         onClick={() => {
                                           const input = document.createElement('input');
                                           input.type = 'file';
@@ -8105,16 +8105,16 @@ export default function StoryboardGenerator() {
                                         }}
                                         title="上传本地图片"
                                       >
-                                        <ImagePlus className="w-3 h-3" />
+                                        <ImagePlus className="size-4" />
                                       </Button>
                                       <Button
                                         size="sm"
                                         variant="ghost"
-                                        className="flex-1 h-12 px-0"
+                                        className="h-10 min-w-0 px-0"
                                         onClick={() => openImageLibrary('prop', prop.id, prop.name)}
                                         title="从图片库选择"
                                       >
-                                        <FolderOpen className="w-3 h-3" />
+                                        <FolderOpen className="size-4" />
                                       </Button>
                                     </div>
                                   )}
@@ -8122,8 +8122,8 @@ export default function StoryboardGenerator() {
                                 {images.length > 0 && (
                                   <p className="text-xs text-gray-500">{images.length}/{MAX_IMAGES_PER_ASSET} 张</p>
                                 )}
-                                <div className="flex items-center gap-2">
-                                  <span className="font-medium text-sm">{prop.name}</span>
+                                <div className="flex min-w-0 flex-wrap items-center gap-2">
+                                  <span className="min-w-0 break-words font-medium text-sm">{prop.name}</span>
                                   <Badge variant="outline" className="text-xs">{prop.type}</Badge>
                                   {prop.importance && (
                                     <Badge className="text-xs">{prop.importance}</Badge>
