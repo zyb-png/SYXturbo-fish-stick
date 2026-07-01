@@ -1090,12 +1090,6 @@ function ensureBudget(actor, project, estimateCents) {
   if (accountQuota.remaining_cents < estimateCents) {
     throw Object.assign(new Error(`当前账号额度不足，预计需要 ${yuanFromCents(estimateCents)} 元，剩余 ${accountQuota.remaining_rmb} 元`), { status: 402 });
   }
-  if (actor.role === 'user') {
-    const adminQuota = quotaSummary(actor.admin_id);
-    if (adminQuota.remaining_cents < estimateCents) {
-      throw Object.assign(new Error('所属管理员团队额度不足，暂时不能继续生成'), { status: 402 });
-    }
-  }
   if (project.budget_cents > 0) {
     const used = projectCommittedCents(project.id);
     const remaining = project.budget_cents - used;
@@ -1131,10 +1125,6 @@ function addQuotaTransaction({ accountId, adminId = null, projectId = null, task
 function freezeQuota(actor, project, taskId, amountCents) {
   applyQuotaDelta(actor.id, { frozen_delta: amountCents });
   addQuotaTransaction({ accountId: actor.id, adminId: project.admin_id, projectId: project.id, taskId, type: 'freeze', amountCents, note: '任务预冻结', createdBy: actor.id });
-  if (actor.role === 'user') {
-    applyQuotaDelta(actor.admin_id, { frozen_delta: amountCents });
-    addQuotaTransaction({ accountId: actor.admin_id, adminId: actor.admin_id, projectId: project.id, taskId, type: 'team_freeze', amountCents, note: `用户 ${actor.username} 任务预冻结`, createdBy: actor.id });
-  }
 }
 
 function settleQuota(actor, task, actualCents, billingStatus = 'settled') {
@@ -1142,10 +1132,6 @@ function settleQuota(actor, task, actualCents, billingStatus = 'settled') {
   if (task.billing_status === 'settled' || task.billing_status === 'refunded') return;
   applyQuotaDelta(actor.id, { frozen_delta: -frozen, used_delta: actualCents });
   addQuotaTransaction({ accountId: actor.id, adminId: task.admin_id, projectId: task.project_id, taskId: task.id, type: 'settle', amountCents: actualCents, note: `冻结 ${yuanFromCents(frozen)} 元，实际 ${yuanFromCents(actualCents)} 元`, createdBy: actor.id });
-  if (actor.role === 'user') {
-    applyQuotaDelta(task.admin_id, { frozen_delta: -frozen, used_delta: actualCents });
-    addQuotaTransaction({ accountId: task.admin_id, adminId: task.admin_id, projectId: task.project_id, taskId: task.id, type: 'team_settle', amountCents: actualCents, note: `用户 ${actor.username} 任务结算`, createdBy: actor.id });
-  }
   db.prepare('UPDATE tasks SET actual_cents = ?, billing_status = ?, updated_at = ? WHERE id = ?')
     .run(actualCents, billingStatus, nowIso(), task.id);
 }
@@ -1155,10 +1141,6 @@ function releaseQuota(actor, task, note = '任务未产生扣费，释放冻结�
   if (task.billing_status === 'settled' || task.billing_status === 'refunded') return;
   applyQuotaDelta(actor.id, { frozen_delta: -frozen });
   addQuotaTransaction({ accountId: actor.id, adminId: task.admin_id, projectId: task.project_id, taskId: task.id, type: 'release', amountCents: frozen, note, createdBy: actor.id });
-  if (actor.role === 'user') {
-    applyQuotaDelta(task.admin_id, { frozen_delta: -frozen });
-    addQuotaTransaction({ accountId: task.admin_id, adminId: task.admin_id, projectId: task.project_id, taskId: task.id, type: 'team_release', amountCents: frozen, note, createdBy: actor.id });
-  }
   db.prepare('UPDATE tasks SET actual_cents = 0, billing_status = ?, updated_at = ? WHERE id = ?')
     .run('refunded', nowIso(), task.id);
 }
