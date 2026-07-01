@@ -1586,6 +1586,11 @@ export default function StoryboardGenerator() {
     }, 30_000);
   };
 
+  const shouldSaveToServerDownloads = () => {
+    if (typeof window === 'undefined') return true;
+    return ['localhost', '127.0.0.1', '::1'].includes(window.location.hostname);
+  };
+
   const buildEditableProjectState = () => ({
     storyboard_active_tab: activeTab,
     storyboard_collapsed_prompt_chapters: collapsedPromptChapters,
@@ -1641,7 +1646,7 @@ export default function StoryboardGenerator() {
           imageSettings: globalImageSettings,
           videoPrompts: cs.videoPrompts || [],
           promptGroups: cs.promptGroups || [],
-          saveToDownloads: true,
+          saveToDownloads: shouldSaveToServerDownloads(),
         }),
       });
 
@@ -1693,7 +1698,7 @@ export default function StoryboardGenerator() {
       const response = await fetch('/api/project-export-state', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ state, projectName, saveToDownloads: true }),
+      body: JSON.stringify({ state, projectName, saveToDownloads: shouldSaveToServerDownloads() }),
       });
 
       if (!response.ok) {
@@ -5879,14 +5884,27 @@ export default function StoryboardGenerator() {
     if (!(await requireLoginBeforePaidAction())) return;
 
     try {
+      const saveToDownloads = shouldSaveToServerDownloads();
       const saveResponse = await fetch('/api/assets-save-to-downloads', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           imageUrl: mediaUrl,
           fileName,
+          saveToDownloads,
         }),
       });
+
+      if (!saveToDownloads && saveResponse.ok) {
+        const blob = await saveResponse.blob();
+        if (blob.size === 0) throw new Error(`${mediaLabel}文件为空，请重新尝试`);
+        const fallbackName = `${fileName}.${mediaLabel === '视频' ? 'mp4' : 'png'}`;
+        const filename = getDownloadFilename(saveResponse.headers.get('Content-Disposition'), fallbackName);
+        downloadBlob(blob, filename);
+        toast.success(`${mediaLabel}已开始下载：${filename}`);
+        return;
+      }
+
       const saveData = await saveResponse.json().catch(() => null);
       if (saveResponse.ok && saveData?.success) {
         toast.success(`${mediaLabel}已保存到下载目录：${saveData.filename || fileName}`, {

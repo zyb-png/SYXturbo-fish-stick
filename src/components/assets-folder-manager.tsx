@@ -79,7 +79,34 @@ const FOLDER_MAP: Record<string, { name: string; icon: React.ReactNode; color: s
   videos: { name: '视频文件', icon: <FileVideo className="w-4 h-4" />, color: 'text-red-500' },
 };
 
-const BATCH_DOWNLOAD_TOOLTIP = '为避免 Codex 内置浏览器批量写入文件时闪退，批量下载会稳定保存到系统下载目录中的独立文件夹。';
+const BATCH_DOWNLOAD_TOOLTIP = '本机访问会稳定保存到系统下载目录；公网访问会打包为 ZIP 下载到当前浏览器。';
+
+function shouldSaveToServerDownloads() {
+  if (typeof window === 'undefined') return true;
+  return ['localhost', '127.0.0.1', '::1'].includes(window.location.hostname);
+}
+
+function getDownloadFilename(contentDisposition: string | null, fallback: string) {
+  if (!contentDisposition) return fallback;
+  const encodedMatch = contentDisposition.match(/filename\*=UTF-8''([^;]+)/i);
+  if (encodedMatch?.[1]) return decodeURIComponent(encodedMatch[1]);
+  const plainMatch = contentDisposition.match(/filename="?([^"]+)"?/i);
+  return plainMatch?.[1] ? decodeURIComponent(plainMatch[1]) : fallback;
+}
+
+function downloadBlob(blob: Blob, filename: string) {
+  const url = window.URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.style.display = 'none';
+  document.body.appendChild(a);
+  a.click();
+  window.setTimeout(() => {
+    window.URL.revokeObjectURL(url);
+    document.body.removeChild(a);
+  }, 30_000);
+}
 
 interface AssetsFolderManagerProps {
   refreshTrigger?: number; // 当此值变化时刷新数据
@@ -197,14 +224,28 @@ export function AssetsFolderManager({ refreshTrigger }: AssetsFolderManagerProps
       const sourceUrl = file.key && file.url
         ? file.url
         : `/api/assets-view?folder=${encodeURIComponent(folderName)}&filename=${encodeURIComponent(filename)}`;
+      const saveToDownloads = shouldSaveToServerDownloads();
       const response = await fetch('/api/assets-save-to-downloads', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           imageUrl: sourceUrl,
           fileName: filename.replace(/\.[^.]+$/, ''),
+          saveToDownloads,
         }),
       });
+
+      if (!saveToDownloads && response.ok) {
+        const blob = await response.blob();
+        const downloadName = getDownloadFilename(response.headers.get('Content-Disposition'), filename);
+        downloadBlob(blob, downloadName);
+        toast.success('已开始下载', {
+          description: downloadName,
+          duration: 6000,
+        });
+        return;
+      }
+
       const data = await response.json();
 
       if (!response.ok || !data.success) {
@@ -228,11 +269,27 @@ export function AssetsFolderManager({ refreshTrigger }: AssetsFolderManagerProps
     setDownloadingFolder(folderKey);
     try {
       toast.info('正在保存到下载目录，请稍等...', { duration: 3000 });
+      const saveToDownloads = shouldSaveToServerDownloads();
       const response = await fetch('/api/assets-batch-download', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ folderKey }),
+        body: JSON.stringify({ folderKey, saveToDownloads }),
       });
+
+      if (!saveToDownloads && response.ok) {
+        const blob = await response.blob();
+        const downloadName = getDownloadFilename(
+          response.headers.get('Content-Disposition'),
+          `${FOLDER_MAP[folderKey]?.name || folderKey}.zip`
+        );
+        downloadBlob(blob, downloadName);
+        toast.success(`${FOLDER_MAP[folderKey]?.name || folderKey} 已开始下载`, {
+          description: downloadName,
+          duration: 8000,
+        });
+        return;
+      }
+
       const data = await response.json();
 
       if (!response.ok || !data.success) {

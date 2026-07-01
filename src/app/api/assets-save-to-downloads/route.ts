@@ -57,6 +57,27 @@ function getContentExtension(contentType: string) {
   return '.png';
 }
 
+function getContentTypeFromExtension(ext: string) {
+  if (ext === '.jpg' || ext === '.jpeg') return 'image/jpeg';
+  if (ext === '.webp') return 'image/webp';
+  if (ext === '.gif') return 'image/gif';
+  if (ext === '.mp4') return 'video/mp4';
+  if (ext === '.webm') return 'video/webm';
+  if (ext === '.mov') return 'video/quicktime';
+  return 'image/png';
+}
+
+function attachmentResponse(buffer: Buffer, fileName: string, contentType: string) {
+  return new NextResponse(new Uint8Array(buffer), {
+    headers: {
+      'Content-Type': contentType,
+      'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(fileName)}`,
+      'Content-Length': buffer.length.toString(),
+      'Cache-Control': 'private, no-store',
+    },
+  });
+}
+
 function resolveLocalAssetPath(imageUrl: string) {
   const parsed = new URL(imageUrl, 'http://localhost');
   if (parsed.pathname !== '/api/assets-view') return null;
@@ -82,7 +103,7 @@ export async function POST(request: NextRequest) {
   if (auth.response) return auth.response;
 
   try {
-    const { imageUrl, fileName } = await request.json();
+    const { imageUrl, fileName, saveToDownloads = true } = await request.json();
     if (typeof imageUrl !== 'string' || !imageUrl.trim()) {
       return NextResponse.json({ success: false, error: '缺少图片地址' }, { status: 400 });
     }
@@ -97,6 +118,11 @@ export async function POST(request: NextRequest) {
       }
 
       const targetName = `${safeName(fileName, path.basename(localAsset.fileName, path.extname(localAsset.fileName)))}${path.extname(localAsset.fileName) || '.png'}`;
+      const buffer = fs.readFileSync(localAsset.sourcePath);
+      if (!saveToDownloads) {
+        return attachmentResponse(buffer, targetName, getContentTypeFromExtension(path.extname(localAsset.fileName).toLowerCase()));
+      }
+
       const targetPath = getUniqueFilePath(downloadsDir, targetName);
       fs.copyFileSync(localAsset.sourcePath, targetPath);
       return NextResponse.json({ success: true, targetPath, filename: path.basename(targetPath) });
@@ -111,6 +137,10 @@ export async function POST(request: NextRequest) {
     const ext = getContentExtension(contentType);
     const buffer = Buffer.from(await response.arrayBuffer());
     const targetName = `${safeName(fileName, 'download')}${ext}`;
+    if (!saveToDownloads) {
+      return attachmentResponse(buffer, targetName, contentType);
+    }
+
     const targetPath = getUniqueFilePath(downloadsDir, targetName);
     fs.writeFileSync(targetPath, buffer);
 

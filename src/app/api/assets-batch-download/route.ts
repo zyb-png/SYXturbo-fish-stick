@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from 'next/server';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import archiver from 'archiver';
+import { PassThrough, Readable } from 'stream';
 import { requireUserLoginResponse } from '@/lib/auth-guard';
 
 export const runtime = 'nodejs';
@@ -68,7 +70,7 @@ export async function POST(request: NextRequest) {
   if (auth.response) return auth.response;
 
   try {
-    const { folderKey } = await request.json();
+    const { folderKey, saveToDownloads = true } = await request.json();
     const folderName = FOLDER_MAP[folderKey as string];
 
     if (!folderName) {
@@ -97,6 +99,32 @@ export async function POST(request: NextRequest) {
         success: false,
         error: '该类别暂无可保存的文件',
       }, { status: 404 });
+    }
+
+    if (!saveToDownloads) {
+      const zipName = `${folderName}_${formatTimestamp()}.zip`;
+      const archive = archiver('zip', { zlib: { level: 6 } });
+      const stream = new PassThrough();
+
+      archive.on('error', (error) => {
+        stream.destroy(error);
+      });
+      archive.pipe(stream);
+
+      for (const fileName of files) {
+        const sourcePath = path.join(sourceFolder, fileName);
+        archive.file(sourcePath, { name: `${folderName}/${fileName}` });
+      }
+
+      void archive.finalize();
+
+      return new NextResponse(Readable.toWeb(stream) as ReadableStream, {
+        headers: {
+          'Content-Type': 'application/zip',
+          'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(zipName)}`,
+          'Cache-Control': 'private, no-store',
+        },
+      });
     }
 
     const downloadsRoot = path.join(os.homedir(), 'Downloads', 'AI故事分镜视频生成器');
