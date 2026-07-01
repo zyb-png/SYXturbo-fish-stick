@@ -138,6 +138,7 @@ function renderAccountsTable() {
           : `<button data-account-action="toggle" data-id="${account.id}" type="button">${account.status === 'active' ? '禁用' : '启用'}</button>`}
         <button data-account-action="quota" data-id="${account.id}" type="button">额度</button>
         <button data-account-action="password" data-id="${account.id}" type="button">改密</button>
+        <button data-account-action="rename" data-id="${account.id}" type="button">改名</button>
         ${account.role === 'super_admin' ? '' : `<button data-account-action="delete" data-id="${account.id}" type="button">删除</button>`}
       </td>
     </tr>
@@ -198,6 +199,26 @@ async function handleAccountAction(action, accountId) {
         body: { password: value },
       });
       toast('密码已更新');
+    } else if (action === 'rename') {
+      const value = await openAdminDialog({
+        title: '修改账号名称',
+        hint: `账号：${account.username}。请输入新的显示名称。`,
+        value: account.display_name || account.username,
+        type: 'text',
+        placeholder: '显示名称',
+      });
+      if (value === null) return;
+      const displayName = String(value).trim();
+      if (!displayName) {
+        toast('显示名称不能为空', 'error');
+        return;
+      }
+      toast('正在更新名称...');
+      await api(`/api/accounts/${accountId}`, {
+        method: 'PATCH',
+        body: { display_name: displayName },
+      });
+      toast('名称已更新');
     } else if (action === 'delete') {
       if (!confirm(`软删除账号「${account.username}」？历史记录会保留。`)) return;
       toast('正在软删除账号...');
