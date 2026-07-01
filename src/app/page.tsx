@@ -169,6 +169,42 @@ function isUsefulList(value: unknown): value is string[] {
   return Array.isArray(value) && value.some(item => isUsefulText(item));
 }
 
+function normalizeDisplayText(value: unknown): string {
+  if (value === null || value === undefined) return '';
+  return String(value).replace(/\s+/g, ' ').trim();
+}
+
+function compactDisplayText(value: unknown, maxChars = 36): string {
+  const text = normalizeDisplayText(value);
+  if (text.length <= maxChars) return text;
+  return `${text.slice(0, maxChars)}...`;
+}
+
+function CompactBadge({
+  text,
+  maxChars = 18,
+  className = '',
+  variant = 'outline',
+}: {
+  text: unknown;
+  maxChars?: number;
+  className?: string;
+  variant?: 'default' | 'secondary' | 'destructive' | 'outline';
+}) {
+  const fullText = normalizeDisplayText(text);
+  if (!fullText) return null;
+
+  return (
+    <Badge
+      variant={variant}
+      className={`max-w-full shrink overflow-hidden text-xs ${className}`}
+      title={fullText}
+    >
+      <span className="min-w-0 truncate">{compactDisplayText(fullText, maxChars)}</span>
+    </Badge>
+  );
+}
+
 function inferCharacterGender(name: string, current?: string): string {
   if (isUsefulText(current)) return current;
   if (/春梅|桂芳|张敏|晓晓|助理|负责人2/.test(name)) return '女';
@@ -6852,7 +6888,7 @@ export default function StoryboardGenerator() {
                           </div>
                         )}
                         
-                        <div className={`grid grid-cols-1 2xl:grid-cols-2 gap-3 ${expandedSections.scenes ? '' : 'max-h-[400px]'} overflow-y-auto transition-all duration-300`}>
+                        <div className={`grid grid-cols-1 2xl:grid-cols-2 gap-3 ${expandedSections.scenes ? '' : 'max-h-[400px]'} overflow-x-hidden overflow-y-auto transition-all duration-300`}>
                           {(() => {
                             const scenesToDisplay = (sceneBatchInfo?.allScenes?.length ?? 0) > 0 ? sceneBatchInfo?.allScenes : scenesData.scenes;
                             
@@ -6874,7 +6910,7 @@ export default function StoryboardGenerator() {
                             const isAssetsConfirmed = stepConfirmed.assets; // 素材是否已确认
                             
                             return (
-                              <div key={`scene-${scene.name}-${index}`} className={`p-3 border rounded space-y-2 ${isAssetsConfirmed ? 'opacity-75' : ''}`}>
+                              <div key={`scene-${scene.name}-${index}`} className={`min-w-0 overflow-hidden p-3 border rounded space-y-2 ${isAssetsConfirmed ? 'opacity-75' : ''}`}>
                                 {/* 图片展示区域 - 支持多张图片 */}
                                 <div className="grid grid-cols-3 gap-1.5 min-h-14">
                                   {images.map((img, imgIdx) => (
@@ -7002,10 +7038,15 @@ export default function StoryboardGenerator() {
                                 {images.length > 0 && (
                                   <p className="text-xs text-gray-500">{images.length}/{MAX_IMAGES_PER_ASSET} 张</p>
                                 )}
-                                <div className="flex min-w-0 flex-wrap items-center gap-2">
-                                  <span className="min-w-0 break-words font-medium text-sm">{scene.name}</span>
-                                  <Badge variant="outline" className="text-xs">{scene.type}</Badge>
-                                  <Badge className="text-xs">{scene.importance}</Badge>
+                                <div className="flex min-w-0 max-w-full flex-wrap items-center gap-2 overflow-hidden">
+                                  <span
+                                    className="min-w-0 max-w-full break-words text-sm font-medium leading-5 [overflow-wrap:anywhere]"
+                                    title={normalizeDisplayText(scene.name)}
+                                  >
+                                    {compactDisplayText(scene.name, 28)}
+                                  </span>
+                                  <CompactBadge text={scene.type} maxChars={8} />
+                                  <CompactBadge text={scene.importance} maxChars={8} variant="default" />
                                 </div>
                                 {/* 场景描述 - 可编辑 */}
                                 {editingSceneId === scene.id ? (
@@ -7068,27 +7109,32 @@ export default function StoryboardGenerator() {
                                   </div>
                                 ) : (
                                   <div 
-                                    className="group cursor-pointer"
+                                    className="group min-w-0 cursor-pointer"
                                     onClick={() => {
                                       setEditingSceneId(scene.id);
                                       setEditingSceneDescription(scene.description || '');
                                     }}
                                   >
-                                    <p className="text-xs text-gray-600 dark:text-gray-400 line-clamp-2 group-hover:text-blue-600 dark:group-hover:text-blue-400">
-                                      {scene.description || '点击添加场景描述...'}
+                                    <p
+                                      className="line-clamp-2 break-words text-xs leading-5 text-gray-600 [overflow-wrap:anywhere] group-hover:text-blue-600 dark:text-gray-400 dark:group-hover:text-blue-400"
+                                      title={normalizeDisplayText(scene.description)}
+                                    >
+                                      {compactDisplayText(scene.description || '点击添加场景描述...', 92)}
                                     </p>
                                     <p className="text-xs text-gray-400 dark:text-gray-500 opacity-0 group-hover:opacity-100 transition-opacity">
                                       点击编辑描述
                                     </p>
                                   </div>
                                 )}
-                                <p className="text-xs text-gray-500">{scene.timeOfDay} | {scene.atmosphere}</p>
+                                <p className="truncate text-xs text-gray-500" title={normalizeDisplayText(`${scene.timeOfDay || ''} | ${scene.atmosphere || ''}`)}>
+                                  {compactDisplayText(`${scene.timeOfDay || ''} | ${scene.atmosphere || ''}`, 42)}
+                                </p>
                                 {scene.keyEvents && scene.keyEvents.length > 0 && (
                                   <div className="mt-1">
                                     <p className="text-xs text-gray-500 mb-1">关键事件：</p>
-                                    <div className="flex flex-wrap gap-1">
+                                    <div className="flex min-w-0 flex-wrap gap-1">
                                       {scene.keyEvents.slice(0, 2).map((event: string, i: number) => (
-                                        <Badge key={`scene-${scene.id}-event-${i}`} variant="secondary" className="text-xs">{event}</Badge>
+                                        <CompactBadge key={`scene-${scene.id}-event-${i}`} text={event} maxChars={24} variant="secondary" />
                                       ))}
                                       {scene.keyEvents.length > 2 && (
                                         <span className="text-xs text-gray-400">+{scene.keyEvents.length - 2}</span>
@@ -7099,9 +7145,9 @@ export default function StoryboardGenerator() {
                                 {scene.visualElements && scene.visualElements.length > 0 && (
                                   <div className="mt-1">
                                     <p className="text-xs text-gray-500 mb-1">视觉元素：</p>
-                                    <div className="flex flex-wrap gap-1">
+                                    <div className="flex min-w-0 flex-wrap gap-1">
                                       {scene.visualElements.slice(0, 3).map((elem: string, i: number) => (
-                                        <Badge key={`scene-${scene.id}-elem-${i}`} variant="outline" className="text-xs">{elem}</Badge>
+                                        <CompactBadge key={`scene-${scene.id}-elem-${i}`} text={elem} maxChars={14} />
                                       ))}
                                       {scene.visualElements.length > 3 && (
                                         <span className="text-xs text-gray-400">+{scene.visualElements.length - 3}</span>
@@ -7200,7 +7246,7 @@ export default function StoryboardGenerator() {
                           </div>
                         )}
                         
-                        <div className={`space-y-2 ${expandedSections.characters ? '' : 'max-h-[400px]'} overflow-y-auto transition-all duration-300`}>
+                        <div className={`space-y-2 ${expandedSections.characters ? '' : 'max-h-[400px]'} overflow-x-hidden overflow-y-auto transition-all duration-300`}>
                           {(() => {
                             const displayCharacters = (charactersData?.characters && charactersData.characters.length > 0)
                               ? charactersData.characters
@@ -7229,8 +7275,8 @@ export default function StoryboardGenerator() {
                             const displayGender = isUsefulText(char.gender) ? char.gender : '性别待定';
                             
                             return (
-                              <div key={`char-${char.name}-${index}`} className={`p-3 border rounded-lg ${isAssetsConfirmed ? 'opacity-75' : ''}`}>
-                                <div className="flex gap-3">
+                              <div key={`char-${char.name}-${index}`} className={`min-w-0 overflow-hidden p-3 border rounded-lg ${isAssetsConfirmed ? 'opacity-75' : ''}`}>
+                                <div className="flex min-w-0 gap-3">
                                   {/* 人物图片区域 - 支持多张 */}
                                   <div className="shrink-0">
                                     <div className="grid grid-cols-2 gap-1 w-[104px]">
@@ -7360,15 +7406,15 @@ export default function StoryboardGenerator() {
                                     )}
                                   </div>
                                   {/* 人物信息 */}
-                                  <div className="flex-1 min-w-0">
-                                    <div className="flex items-center justify-between mb-1">
-                                      <div className="flex items-center gap-2">
-                                        <span className="font-medium">{char.name}</span>
-                                        <Badge variant={char.role === '主角' ? 'default' : 'outline'} className="text-xs">
-                                          {char.role}
-                                        </Badge>
+                                  <div className="min-w-0 flex-1 overflow-hidden">
+                                    <div className="mb-1 flex min-w-0 flex-wrap items-start justify-between gap-2">
+                                      <div className="flex min-w-0 flex-wrap items-center gap-2 overflow-hidden">
+                                        <span className="min-w-0 max-w-full truncate font-medium" title={normalizeDisplayText(char.name)}>
+                                          {compactDisplayText(char.name, 18)}
+                                        </span>
+                                        <CompactBadge text={char.role} maxChars={8} variant={char.role === '主角' ? 'default' : 'outline'} />
                                       </div>
-                                      <span className="text-xs text-gray-500">{displayAge} | {displayGender}</span>
+                                      <span className="shrink-0 text-xs text-gray-500">{displayAge} | {displayGender}</span>
                                     </div>
                                     {/* 外貌描述 - 可编辑 */}
                                     {editingCharacterId === char.id ? (
@@ -7421,7 +7467,7 @@ export default function StoryboardGenerator() {
                                       </div>
                                     ) : (
                                       <div
-                                        className="group cursor-pointer"
+                                        className="group min-w-0 cursor-pointer"
                                         onClick={() => {
                                           setEditingCharacterId(char.id);
                                           setEditingCharacterAppearance(char.appearance || '');
@@ -7429,9 +7475,12 @@ export default function StoryboardGenerator() {
                                       >
                                         {/* 人物描述标签 */}
                                         <div className="text-xs text-gray-500 mb-1 font-medium">人物描述：</div>
-                                        <p className="text-xs text-gray-600 dark:text-gray-400 group-hover:text-blue-600 dark:group-hover:text-blue-400">
+                                        <p
+                                          className="line-clamp-3 break-words text-xs leading-5 text-gray-600 [overflow-wrap:anywhere] group-hover:text-blue-600 dark:text-gray-400 dark:group-hover:text-blue-400"
+                                          title={normalizeDisplayText(char.appearance)}
+                                        >
                                           {char.appearance && char.appearance.trim() ? (
-                                            char.appearance
+                                            compactDisplayText(char.appearance, 120)
                                           ) : (
                                             <span className="text-gray-400 italic">暂无描述，点击添加</span>
                                           )}
@@ -7445,30 +7494,32 @@ export default function StoryboardGenerator() {
                                     {char.arc && char.arc.trim() && (
                                       <div className="mt-1">
                                         <span className="text-xs text-gray-500 shrink-0 font-medium">人物弧光：</span>
-                                        <p className="text-xs text-gray-600 dark:text-gray-400">{char.arc}</p>
+                                        <p className="line-clamp-2 break-words text-xs text-gray-600 [overflow-wrap:anywhere] dark:text-gray-400" title={normalizeDisplayText(char.arc)}>
+                                          {compactDisplayText(char.arc, 80)}
+                                        </p>
                                       </div>
                                     )}
                                     {/* 相关道具 */}
                                     {char.props && char.props.length > 0 && (
                                       <div className="mt-1">
-                                        <div className="flex flex-wrap gap-1 items-center">
+                                        <div className="flex min-w-0 flex-wrap items-center gap-1">
                                           <span className="text-xs text-gray-500 shrink-0 font-medium">相关道具：</span>
                                           {char.props.map((prop: string, i: number) => (
-                                            <Badge key={`char-${char.id}-prop-${i}`} variant="outline" className="text-xs bg-blue-50 dark:bg-blue-900/20">{prop}</Badge>
+                                            <CompactBadge key={`char-${char.id}-prop-${i}`} text={prop} maxChars={14} className="bg-blue-50 dark:bg-blue-900/20" />
                                           ))}
                                         </div>
                                       </div>
                                     )}
                                     {/* 脸型特征 */}
                                     {char.faceFeatures && (
-                                      <div className="mt-2 p-2 bg-gray-50 dark:bg-gray-800 rounded">
+                                      <div className="mt-2 min-w-0 overflow-hidden rounded bg-gray-50 p-2 dark:bg-gray-800">
                                         <span className="text-xs text-gray-500 font-medium">脸型特征（固定）：</span>
                                         <div className="grid grid-cols-2 gap-1 mt-1 text-xs text-gray-600 dark:text-gray-400">
-                                          <div>脸型：{char.faceFeatures.faceShape || '待补充'}</div>
-                                          <div>眼睛：{char.faceFeatures.eyes || '待补充'}</div>
-                                          <div>鼻子：{char.faceFeatures.nose || '待补充'}</div>
-                                          <div>嘴巴：{char.faceFeatures.mouth || '待补充'}</div>
-                                          <div className="col-span-2">肤色：{char.faceFeatures.skinTone || '待补充'}</div>
+                                          <div className="truncate" title={normalizeDisplayText(char.faceFeatures.faceShape)}>脸型：{compactDisplayText(char.faceFeatures.faceShape || '待补充', 18)}</div>
+                                          <div className="truncate" title={normalizeDisplayText(char.faceFeatures.eyes)}>眼睛：{compactDisplayText(char.faceFeatures.eyes || '待补充', 18)}</div>
+                                          <div className="truncate" title={normalizeDisplayText(char.faceFeatures.nose)}>鼻子：{compactDisplayText(char.faceFeatures.nose || '待补充', 18)}</div>
+                                          <div className="truncate" title={normalizeDisplayText(char.faceFeatures.mouth)}>嘴巴：{compactDisplayText(char.faceFeatures.mouth || '待补充', 18)}</div>
+                                          <div className="col-span-2 truncate" title={normalizeDisplayText(char.faceFeatures.skinTone)}>肤色：{compactDisplayText(char.faceFeatures.skinTone || '待补充', 28)}</div>
                                         </div>
                                       </div>
                                     )}
@@ -7478,18 +7529,14 @@ export default function StoryboardGenerator() {
                                         <span className="text-xs text-gray-500 font-medium">造型变化：</span>
                                         <div className="mt-1 space-y-1 max-h-[200px] overflow-y-auto">
                                           {char.looks.map((look: any, lookIndex: number) => (
-                                            <div key={look.id || lookIndex} className="p-2 border rounded bg-purple-50 dark:bg-purple-900/20">
-                                              <div className="flex items-center justify-between mb-1">
-                                                <div className="flex items-center gap-2">
-                                                  <Badge variant="secondary" className="text-xs">
-                                                    {look.scene || '造型'}
-                                                  </Badge>
+                                            <div key={look.id || lookIndex} className="min-w-0 overflow-hidden rounded border bg-purple-50 p-2 dark:bg-purple-900/20">
+                                              <div className="mb-1 flex min-w-0 flex-wrap items-center justify-between gap-1">
+                                                <div className="flex min-w-0 flex-wrap items-center gap-2 overflow-hidden">
+                                                  <CompactBadge text={look.scene || '造型'} maxChars={16} variant="secondary" />
                                                   {look.stage && (
-                                                    <Badge variant="outline" className="text-xs">
-                                                      {look.stage}
-                                                    </Badge>
+                                                    <CompactBadge text={look.stage} maxChars={12} />
                                                   )}
-                                                  <span className="text-xs text-gray-500">{look.mood || '自然'}</span>
+                                                  <span className="max-w-[80px] truncate text-xs text-gray-500" title={normalizeDisplayText(look.mood || '自然')}>{compactDisplayText(look.mood || '自然', 10)}</span>
                                                 </div>
                                                 {look.isGenerating ? (
                                                   <Button
@@ -7596,14 +7643,16 @@ export default function StoryboardGenerator() {
                                                 </div>
                                               ) : (
                                                 <div
-                                                  className="group/desc cursor-pointer mb-1"
+                                                  className="group/desc mb-1 min-w-0 cursor-pointer"
                                                   onClick={() => {
                                                     setEditingLookKey(`${char.id}-${look.id}`);
                                                     setEditingLookDescription(look.description || '');
                                                   }}
                                                 >
                                                   {look.description ? (
-                                                    <p className="text-xs text-gray-600 dark:text-gray-400">{look.description}</p>
+                                                    <p className="line-clamp-2 break-words text-xs leading-5 text-gray-600 [overflow-wrap:anywhere] dark:text-gray-400" title={normalizeDisplayText(look.description)}>
+                                                      {compactDisplayText(look.description, 90)}
+                                                    </p>
                                                   ) : (
                                                     <p className="text-xs text-gray-400 italic">暂无提示词，点击添加</p>
                                                   )}
@@ -7612,13 +7661,13 @@ export default function StoryboardGenerator() {
                                                   </p>
                                                 </div>
                                               )}
-                                              <div className="space-y-0.5 text-xs text-gray-500">
-                                                <div>服装：{look.costume || '待补充'}</div>
-                                                <div>发型：{look.hairstyle || '待补充'}</div>
+                                              <div className="min-w-0 space-y-0.5 text-xs text-gray-500">
+                                                <div className="truncate" title={normalizeDisplayText(look.costume)}>服装：{compactDisplayText(look.costume || '待补充', 36)}</div>
+                                                <div className="truncate" title={normalizeDisplayText(look.hairstyle)}>发型：{compactDisplayText(look.hairstyle || '待补充', 36)}</div>
                                                 {look.accessories && look.accessories.length > 0 && (
-                                                  <div>配饰：{look.accessories.join('、')}</div>
+                                                  <div className="truncate" title={normalizeDisplayText(look.accessories.join('、'))}>配饰：{compactDisplayText(look.accessories.join('、'), 36)}</div>
                                                 )}
-                                                <div>化妆：{look.makeup || '淡妆'}</div>
+                                                <div className="truncate" title={normalizeDisplayText(look.makeup)}>化妆：{compactDisplayText(look.makeup || '淡妆', 36)}</div>
                                               </div>
                                               {/* 显示该造型的图片 */}
                                               {look.isGenerating ? (
@@ -7775,76 +7824,61 @@ export default function StoryboardGenerator() {
                                     {/* 服装信息（保留向后兼容） */}
                                     {char.costume && char.costume.length > 0 && char.looks === undefined && (
                                       <div className="mt-1">
-                                        <div className="flex flex-wrap gap-1 items-center">
+                                        <div className="flex min-w-0 flex-wrap items-center gap-1">
                                           <span className="text-xs text-gray-500 shrink-0">服装：</span>
                                           {char.costume.map((c: string, i: number) => (
-                                            <Badge key={`char-${char.id}-costume-${i}`} variant="outline" className="text-xs bg-purple-50 dark:bg-purple-900/20">{c}</Badge>
+                                            <CompactBadge key={`char-${char.id}-costume-${i}`} text={c} maxChars={16} className="bg-purple-50 dark:bg-purple-900/20" />
                                           ))}
                                         </div>
                                       </div>
                                     )}
                                     {/* 性格特点 */}
                                     {char.personality && char.personality.length > 0 && (
-                                      <div className="flex flex-wrap gap-1 mt-2">
+                                      <div className="mt-2 flex min-w-0 flex-wrap gap-1">
                                         {char.personality.slice(0, 3).map((p, i) => (
-                                          <Badge key={`char-${char.id}-personality-${i}`} variant="secondary" className="text-xs">{p}</Badge>
+                                          <CompactBadge key={`char-${char.id}-personality-${i}`} text={p} maxChars={12} variant="secondary" />
                                         ))}
                                       </div>
                                     )}
                                     {/* 背景故事 */}
                                     {char.background && (
-                                      <p className="text-xs text-gray-500 mt-2">
+                                      <p className="mt-2 line-clamp-2 break-words text-xs text-gray-500 [overflow-wrap:anywhere]" title={normalizeDisplayText(char.background)}>
                                         <span className="font-medium text-gray-600 dark:text-gray-400">背景：</span>
-                                        {char.background}
+                                        {compactDisplayText(char.background, 90)}
                                       </p>
                                     )}
                                     {/* 人物弧光 */}
                                     {char.arc && (
-                                      <p className="text-xs text-gray-500 mt-2">
+                                      <p className="mt-2 line-clamp-2 break-words text-xs text-gray-500 [overflow-wrap:anywhere]" title={normalizeDisplayText(char.arc)}>
                                         <span className="font-medium text-gray-600 dark:text-gray-400">成长线：</span>
-                                        {char.arc}
+                                        {compactDisplayText(char.arc, 90)}
                                       </p>
                                     )}
                                     {/* 服装细节 */}
                                     {char.costumeDetails && (
-                                      <div className="mt-2 p-2 bg-purple-50 dark:bg-purple-900/20 rounded text-xs text-gray-600 dark:text-gray-400 space-y-1">
+                                      <div className="mt-2 min-w-0 space-y-1 overflow-hidden rounded bg-purple-50 p-2 text-xs text-gray-600 dark:bg-purple-900/20 dark:text-gray-400">
                                         <div className="font-medium text-gray-500 dark:text-gray-400">服装细节：</div>
                                         {char.costumeDetails.mainOutfit && (
-                                          <div>主服装：{char.costumeDetails.mainOutfit}</div>
+                                          <div className="truncate" title={normalizeDisplayText(char.costumeDetails.mainOutfit)}>主服装：{compactDisplayText(char.costumeDetails.mainOutfit, 34)}</div>
                                         )}
                                         {char.costumeDetails.colorScheme && (
-                                          <div>配色：{char.costumeDetails.colorScheme}</div>
+                                          <div className="truncate" title={normalizeDisplayText(char.costumeDetails.colorScheme)}>配色：{compactDisplayText(char.costumeDetails.colorScheme, 34)}</div>
                                         )}
                                         {char.costumeDetails.accessories && char.costumeDetails.accessories.length > 0 && (
-                                          <div>配饰：{char.costumeDetails.accessories.join('、')}</div>
+                                          <div className="truncate" title={normalizeDisplayText(char.costumeDetails.accessories.join('、'))}>配饰：{compactDisplayText(char.costumeDetails.accessories.join('、'), 34)}</div>
                                         )}
                                         {char.costumeDetails.styleNotes && (
-                                          <div>风格：{char.costumeDetails.styleNotes}</div>
+                                          <div className="truncate" title={normalizeDisplayText(char.costumeDetails.styleNotes)}>风格：{compactDisplayText(char.costumeDetails.styleNotes, 34)}</div>
                                         )}
-                                      </div>
-                                    )}
-                                    {/* 关键场景 */}
-                                    {char.keyScenes && char.keyScenes.length > 0 && (
-                                      <div className="mt-2">
-                                        <p className="text-xs text-gray-500 mb-1">关键场景：</p>
-                                        <div className="flex flex-wrap gap-1">
-                                          {char.keyScenes.slice(0, 5).map((scene, i) => (
-                                            <Badge key={`char-${char.id}-scene-${i}`} variant="outline" className="text-xs">
-                                              {scene}
-                                            </Badge>
-                                          ))}
-                                        </div>
                                       </div>
                                     )}
                                     {/* 关键关系 */}
                                     {char.keyRelationships && char.keyRelationships.length > 0 && (
                                       <div className="mt-2">
                                         <p className="text-xs text-gray-500 mb-1">关键关系：</p>
-                                        <div className="flex flex-wrap gap-1">
+                                        <div className="flex min-w-0 flex-wrap gap-1">
                                           {char.keyRelationships.slice(0, 3).map((rel, i) => (
-                                            <Badge key={`char-${char.id}-rel-${i}`} variant="outline" className="text-xs">
-                                              {rel.target} ({rel.relationship})
-                                            </Badge>
+                                            <CompactBadge key={`char-${char.id}-rel-${i}`} text={`${rel.target} (${rel.relationship})`} maxChars={24} />
                                           ))}
                                           {char.keyRelationships.length > 3 && (
                                             <span className="text-xs text-gray-400">+{char.keyRelationships.length - 3}</span>
@@ -7856,9 +7890,9 @@ export default function StoryboardGenerator() {
                                     {char.keyScenes && char.keyScenes.length > 0 && (
                                       <div className="mt-2">
                                         <p className="text-xs text-gray-500 mb-1">关键场景：</p>
-                                        <div className="flex flex-wrap gap-1">
+                                        <div className="flex min-w-0 flex-wrap gap-1">
                                           {char.keyScenes.slice(0, 3).map((scene, i) => (
-                                            <Badge key={`char-${char.id}-scene-${i}`} variant="secondary" className="text-xs">{scene}</Badge>
+                                            <CompactBadge key={`char-${char.id}-scene-${i}`} text={scene} maxChars={18} variant="secondary" />
                                           ))}
                                           {char.keyScenes.length > 3 && (
                                             <span className="text-xs text-gray-400">+{char.keyScenes.length - 3}</span>
@@ -7870,9 +7904,9 @@ export default function StoryboardGenerator() {
                                     {char.props && char.props.length > 0 && (
                                       <div className="mt-2">
                                         <p className="text-xs text-gray-500 mb-1">相关道具：</p>
-                                        <div className="flex flex-wrap gap-1">
+                                        <div className="flex min-w-0 flex-wrap gap-1">
                                           {char.props.slice(0, 3).map((prop, i) => (
-                                            <Badge key={`char-${char.id}-prop-${i}`} variant="outline" className="text-xs">{prop}</Badge>
+                                            <CompactBadge key={`char-${char.id}-prop-${i}`} text={prop} maxChars={16} />
                                           ))}
                                           {char.props.length > 3 && (
                                             <span className="text-xs text-gray-400">+{char.props.length - 3}</span>
@@ -7973,7 +8007,7 @@ export default function StoryboardGenerator() {
                           </div>
                         )}
                         
-                        <div className={`grid grid-cols-1 2xl:grid-cols-2 gap-3 ${expandedSections.props ? '' : 'max-h-[400px]'} overflow-y-auto transition-all duration-300`}>
+                        <div className={`grid grid-cols-1 2xl:grid-cols-2 gap-3 ${expandedSections.props ? '' : 'max-h-[400px]'} overflow-x-hidden overflow-y-auto transition-all duration-300`}>
                           {(() => {
                             const propsToDisplay = (propBatchInfo?.allProps?.length ?? 0) > 0 ? propBatchInfo?.allProps : propsData.props;
                             
@@ -7995,7 +8029,7 @@ export default function StoryboardGenerator() {
                             const isAssetsConfirmed = stepConfirmed.assets; // 素材是否已确认
                             
                             return (
-                              <div key={`prop-${prop.name}-${index}`} className={`p-3 border rounded space-y-2 ${isAssetsConfirmed ? 'opacity-75' : ''}`}>
+                              <div key={`prop-${prop.name}-${index}`} className={`min-w-0 overflow-hidden p-3 border rounded space-y-2 ${isAssetsConfirmed ? 'opacity-75' : ''}`}>
                                 {/* 道具图片区域 - 支持多张 */}
                                 <div className="grid grid-cols-3 gap-1.5 min-h-14">
                                   {images.map((img, imgIdx) => (
@@ -8122,26 +8156,30 @@ export default function StoryboardGenerator() {
                                 {images.length > 0 && (
                                   <p className="text-xs text-gray-500">{images.length}/{MAX_IMAGES_PER_ASSET} 张</p>
                                 )}
-                                <div className="flex min-w-0 flex-wrap items-center gap-2">
-                                  <span className="min-w-0 break-words font-medium text-sm">{prop.name}</span>
-                                  <Badge variant="outline" className="text-xs">{prop.type}</Badge>
+                                <div className="flex min-w-0 max-w-full flex-wrap items-center gap-2 overflow-hidden">
+                                  <span className="min-w-0 max-w-full truncate text-sm font-medium" title={normalizeDisplayText(prop.name)}>
+                                    {compactDisplayText(prop.name, 24)}
+                                  </span>
+                                  <CompactBadge text={prop.type} maxChars={12} />
                                   {prop.importance && (
-                                    <Badge className="text-xs">{prop.importance}</Badge>
+                                    <CompactBadge text={prop.importance} maxChars={8} variant="default" />
                                   )}
                                 </div>
                                 {prop.description && (
-                                  <p className="text-xs text-gray-600 dark:text-gray-400 line-clamp-2">{prop.description}</p>
+                                  <p className="line-clamp-2 break-words text-xs leading-5 text-gray-600 [overflow-wrap:anywhere] dark:text-gray-400" title={normalizeDisplayText(prop.description)}>
+                                    {compactDisplayText(prop.description, 90)}
+                                  </p>
                                 )}
                                 {prop.function && (
-                                  <p className="text-xs text-gray-500">功能：{prop.function}</p>
+                                  <p className="truncate text-xs text-gray-500" title={normalizeDisplayText(prop.function)}>功能：{compactDisplayText(prop.function, 42)}</p>
                                 )}
                                 {prop.owner && (
-                                  <p className="text-xs text-gray-500">归属：{prop.owner}</p>
+                                  <p className="truncate text-xs text-gray-500" title={normalizeDisplayText(prop.owner)}>归属：{compactDisplayText(prop.owner, 42)}</p>
                                 )}
                                 {prop.appearanceScenes && prop.appearanceScenes.length > 0 && (
-                                  <div className="flex flex-wrap gap-1">
+                                  <div className="flex min-w-0 flex-wrap gap-1">
                                     {prop.appearanceScenes.slice(0, 2).map((scene: string, i: number) => (
-                                      <Badge key={`prop-${prop.id}-scene-${i}`} variant="secondary" className="text-xs">{scene}</Badge>
+                                      <CompactBadge key={`prop-${prop.id}-scene-${i}`} text={scene} maxChars={20} variant="secondary" />
                                     ))}
                                     {prop.appearanceScenes.length > 2 && (
                                       <span className="text-xs text-gray-400">+{prop.appearanceScenes.length - 2}</span>
