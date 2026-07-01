@@ -254,6 +254,126 @@ function hasUsefulList(value: unknown): value is string[] {
   return Array.isArray(value) && value.some((item) => typeof item === 'string' && item.trim() && !item.includes('待补充'));
 }
 
+function firstUsefulString(...values: unknown[]): string {
+  for (const value of values) {
+    if (typeof value !== 'string') continue;
+    const text = value.trim();
+    if (!text) continue;
+    if (text.includes('待补充') || text.includes('点击添加') || text === '描述') continue;
+    return text;
+  }
+  return '';
+}
+
+function extractSceneContext(content: string, sceneName: string): string {
+  const normalizedName = normalizeSceneNameForMatch(sceneName);
+  const lines = content.split(/\r?\n/);
+  const matchedIndexes: number[] = [];
+
+  lines.forEach((line, index) => {
+    const normalizedLine = normalizeSceneNameForMatch(line);
+    if (
+      line.includes(sceneName) ||
+      (normalizedName && normalizedLine.includes(normalizedName))
+    ) {
+      matchedIndexes.push(index);
+    }
+  });
+
+  if (matchedIndexes.length > 0) {
+    const segments = matchedIndexes.slice(0, 3).map((index) => {
+      const start = Math.max(0, index - 2);
+      const end = Math.min(lines.length, index + 9);
+      return lines.slice(start, end).join('\n');
+    });
+    return cleanContextText(segments.join('\n'));
+  }
+
+  const rawIndex = content.indexOf(sceneName);
+  if (rawIndex >= 0) {
+    return cleanContextText(content.slice(Math.max(0, rawIndex - 500), rawIndex + 1200));
+  }
+
+  return cleanContextText(content.slice(0, 1600));
+}
+
+function cleanContextText(text: string): string {
+  return text
+    .replace(/\r/g, '\n')
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+    .slice(0, 1800);
+}
+
+function extractContextSentences(context: string, sceneName: string): string[] {
+  const normalizedName = normalizeSceneNameForMatch(sceneName);
+  return context
+    .replace(/[“”"「」]/g, '')
+    .split(/[。！？!?；;\n]/)
+    .map((sentence) => sentence.trim())
+    .filter((sentence) => {
+      if (sentence.length < 8 || sentence.length > 90) return false;
+      if (/^(第?\d+[集章节幕场]?|人物|时间|地点|内|外|日|夜)$/i.test(sentence)) return false;
+      const normalizedSentence = normalizeSceneNameForMatch(sentence);
+      return !normalizedName || normalizedSentence !== normalizedName;
+    })
+    .slice(0, 3);
+}
+
+function inferVisualElements(sceneName: string, context: string, defaults: ReturnType<typeof inferSceneDefaults>): string[] {
+  const source = `${sceneName}\n${context}`;
+  const elements: string[] = [];
+  const add = (value: string) => {
+    if (!elements.includes(value)) elements.push(value);
+  };
+
+  const keywordMap: Array<[RegExp, string[]]> = [
+    [/办公室|公司|会议室|工位|总裁|董事/i, ['办公桌椅', '玻璃隔断', '电脑文件', '冷色顶光']],
+    [/医院|病房|诊所|走廊|护士/i, ['白色墙面', '病床器械', '走廊灯光', '消毒氛围']],
+    [/家|客厅|卧室|厨房|房间|宿舍/i, ['生活家具', '暖色灯光', '门窗陈设', '日常杂物']],
+    [/酒店|会所|餐厅|包厢|宴会/i, ['装饰灯光', '桌椅陈设', '精致软装', '空间纵深']],
+    [/街|路|巷|门口|院子|公园|村/i, ['街道路面', '建筑外立面', '自然光影', '行人背景']],
+    [/车|停车场|车库/i, ['车辆轮廓', '反光金属', '道路标线', '低位光源']],
+    [/雨|夜/i, ['湿润地面', '暗部阴影', '反射光', '压低色温']],
+  ];
+
+  keywordMap.forEach(([pattern, values]) => {
+    if (pattern.test(source)) values.forEach(add);
+  });
+
+  if (elements.length === 0) {
+    if (defaults.type === '室外') {
+      ['环境纵深', '自然光影', '空间层次'].forEach(add);
+    } else {
+      ['室内陈设', '主光源', '人物动线'].forEach(add);
+    }
+  }
+
+  return elements.slice(0, 4);
+}
+
+function buildFallbackDescription(sceneName: string, content: string, defaults: ReturnType<typeof inferSceneDefaults>): string {
+  const context = extractSceneContext(content, sceneName);
+  const sentences = extractContextSentences(context, sceneName);
+  const contextSummary = sentences.join('，').slice(0, 70);
+  const visualElements = inferVisualElements(sceneName, context, defaults).slice(0, 3).join('、');
+  const base = `${sceneName}是${defaults.type}场景，时间倾向${defaults.timeOfDay}，整体氛围偏${defaults.atmosphere}。`;
+  const contextPart = contextSummary
+    ? `剧情围绕${contextSummary}展开，`
+    : '剧情在此推进人物关系与关键冲突，';
+  const visualPart = `画面重点呈现${visualElements || '空间布局、光线层次、人物动线'}，让场景具有清晰的短剧视觉记忆点。`;
+
+  return `${base}${contextPart}${visualPart}`;
+}
+
+function inferKeyEvents(sceneName: string, content: string): string[] {
+  const context = extractSceneContext(content, sceneName);
+  const sentences = extractContextSentences(context, sceneName);
+  if (sentences.length > 0) return sentences.slice(0, 3);
+  return [`${sceneName}中发生推动剧情发展的关键事件`];
+}
+
 function inferSceneDefaults(sceneName: string) {
   const isExterior = /外|室外|马路|街|巷|院子|门口|公园|村头/.test(sceneName);
   const isNight = /夜|雨夜|黑夜/.test(sceneName);
@@ -353,32 +473,42 @@ async function extractBatchScenes(
     // 尝试从 LLM 返回的数据中找到匹配的场景
     const matchedScene = findMatchingScene(scenes, sceneName);
     const defaults = inferSceneDefaults(sceneName);
-    const defaultDescription = `该场景为"${sceneName}"，具体环境特点待补充描述。请根据剧本内容补充该场景的视觉特点、环境布局、氛围等信息。`;
+    const defaultDescription = buildFallbackDescription(sceneName, content, defaults);
+    const defaultVisualElements = inferVisualElements(sceneName, extractSceneContext(content, sceneName), defaults);
+    const defaultKeyEvents = inferKeyEvents(sceneName, content);
     
     // 使用 sceneNames 的索引来生成全局唯一的 id
     const globalId = startId + idx + 1;
     
     if (matchedScene) {
+      const matchedDescription = firstUsefulString(
+        matchedScene.description,
+        matchedScene.sceneDescription,
+        matchedScene.visualDescription,
+        matchedScene.environment,
+        matchedScene.setting,
+        matchedScene['场景描述'],
+        matchedScene['描述'],
+      );
       // 判断 description 是否有效：存在、非空、且不是默认的待补充文本
-      const hasValidDescription = matchedScene.description && 
-        matchedScene.description.trim().length > 0 &&
-        !matchedScene.description.includes('待补充') &&
-        !matchedScene.description.includes('环境特点待补充');
+      const hasValidDescription = matchedDescription.length > 0 &&
+        !matchedDescription.includes('待补充') &&
+        !matchedDescription.includes('环境特点待补充');
       
       return {
         id: globalId,
         name: sceneName,
-        description: hasValidDescription ? matchedScene.description : defaultDescription,
+        description: hasValidDescription ? matchedDescription : defaultDescription,
         type: matchedScene.type || defaults.type,
         importance: matchedScene.importance || defaults.importance,
         timeOfDay: matchedScene.timeOfDay || defaults.timeOfDay,
         atmosphere: matchedScene.atmosphere || defaults.atmosphere,
         keyEvents: hasUsefulList(matchedScene.keyEvents)
           ? matchedScene.keyEvents 
-          : ['待补充关键事件'],
+          : defaultKeyEvents,
         visualElements: hasUsefulList(matchedScene.visualElements)
           ? matchedScene.visualElements 
-          : ['待补充视觉元素'],
+          : defaultVisualElements,
       };
     } else {
       // 没有找到匹配的场景，生成默认数据
@@ -390,8 +520,8 @@ async function extractBatchScenes(
         importance: defaults.importance,
         timeOfDay: defaults.timeOfDay,
         atmosphere: defaults.atmosphere,
-        keyEvents: ['待补充关键事件'],
-        visualElements: ['待补充视觉元素'],
+        keyEvents: defaultKeyEvents,
+        visualElements: defaultVisualElements,
       };
     }
   });
@@ -469,6 +599,33 @@ async function extractScenesTraditional(
   const result = tryExtractAndFixJSON(response);
   
   if (result && result.scenes && Array.isArray(result.scenes)) {
+    result.scenes = result.scenes.map((scene: any, index: number) => {
+      const sceneName = firstUsefulString(scene?.name, scene?.sceneName, scene?.['场景名']) || `场景${index + 1}`;
+      const defaults = inferSceneDefaults(sceneName);
+      const description = firstUsefulString(
+        scene?.description,
+        scene?.sceneDescription,
+        scene?.visualDescription,
+        scene?.environment,
+        scene?.setting,
+        scene?.['场景描述'],
+        scene?.['描述'],
+      ) || buildFallbackDescription(sceneName, content, defaults);
+
+      return {
+        id: index + 1,
+        name: sceneName,
+        description,
+        type: scene?.type || defaults.type,
+        importance: scene?.importance || defaults.importance,
+        timeOfDay: scene?.timeOfDay || defaults.timeOfDay,
+        atmosphere: scene?.atmosphere || defaults.atmosphere,
+        keyEvents: hasUsefulList(scene?.keyEvents) ? scene.keyEvents : inferKeyEvents(sceneName, content),
+        visualElements: hasUsefulList(scene?.visualElements)
+          ? scene.visualElements
+          : inferVisualElements(sceneName, extractSceneContext(content, sceneName), defaults),
+      };
+    });
     result.totalScenes = result.scenes.length;
     result.tokenUsage = {
       input: estimateMessagesTokens(messages),
