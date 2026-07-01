@@ -103,10 +103,19 @@ function isAdminGiftTransaction(transaction: WalletSnapshot['transactions'][numb
   return transaction.type === 'grant' && transaction.description.includes('管理员赠送');
 }
 
+function compactTransactionDescription(description: string): string {
+  return description
+    .replace(/（[^）]*(?:模型|规格|Token|输入|输出|缓存|未缓存|medium|low|high|fast|quality|[1248]K|[1248]k|720p|1080p|moon|sun|manfei|seedance|Seedance|Doubao|GPT|DeepSeek)[^）]*）/gi, '')
+    .replace(/\([^)]*(?:模型|规格|Token|输入|输出|缓存|未缓存|medium|low|high|fast|quality|[1248]K|[1248]k|720p|1080p|moon|sun|manfei|seedance|Seedance|Doubao|GPT|DeepSeek)[^)]*\)/gi, '')
+    .replace(/\s+/g, ' ')
+    .trim() || description;
+}
+
 export function CreationPointsWallet() {
   const [open, setOpen] = useState(false);
   const [rechargeOpen, setRechargeOpen] = useState(false);
   const [loginOpen, setLoginOpen] = useState(false);
+  const [showBatches, setShowBatches] = useState(false);
   const [qrDialogMode, setQrDialogMode] = useState<'account' | 'recharge'>('account');
   const [loading, setLoading] = useState(true);
   const [loginLoading, setLoginLoading] = useState(false);
@@ -171,7 +180,7 @@ export function CreationPointsWallet() {
   const adminGiftUsedOrAdjustedPoints = Math.max(0, adminGiftTotalPoints - adminGiftRemainingPoints);
   const visibleTransactions = snapshot?.transactions
     .filter((transaction) => transaction.type !== 'freeze')
-    .slice(0, 20) || [];
+    .slice(0, 12) || [];
   const blackGoldButtonClass = 'gap-2 border border-amber-400/45 bg-[#0b0905] text-amber-100 shadow-[0_0_16px_rgba(245,158,11,0.18)] hover:bg-amber-500/15 hover:text-amber-50 disabled:border-amber-400/20 disabled:bg-black/30 disabled:text-amber-100/35';
 
   const handleLogin = async () => {
@@ -363,53 +372,65 @@ export function CreationPointsWallet() {
 
             {hasAccount && (
             <section>
-              <div className="mb-2 flex items-center justify-between">
-                <h3 className="text-sm font-medium text-amber-100">额度批次</h3>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  className="h-8 w-8 text-amber-100/70 hover:bg-amber-500/10 hover:text-amber-100"
-                  onClick={() => void loadWallet()}
-                  disabled={loading}
-                  title="刷新创作点"
-                >
-                  <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
-                </Button>
+              <div className="mb-2 flex items-center justify-between gap-2">
+                <h3 className="text-xs font-medium text-amber-100/85">额度批次</h3>
+                <div className="flex items-center gap-1.5">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-7 px-2 text-xs text-amber-100/72 hover:bg-amber-500/10 hover:text-amber-100"
+                    onClick={() => setShowBatches((current) => !current)}
+                    aria-expanded={showBatches}
+                  >
+                    {showBatches ? '收起' : `查看 ${snapshot.batches.length} 批`}
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-7 w-7 text-amber-100/60 hover:bg-amber-500/10 hover:text-amber-100"
+                    onClick={() => void loadWallet()}
+                    disabled={loading}
+                    title="刷新创作点"
+                  >
+                    <RefreshCw className={`h-3.5 w-3.5 ${loading ? 'animate-spin' : ''}`} />
+                  </Button>
+                </div>
               </div>
-              <div className="divide-y divide-amber-400/15 rounded-md border border-amber-400/30 bg-[#0b0a08]/70">
+              {showBatches && (
+              <div className="divide-y divide-amber-400/10 rounded-md border border-amber-400/25 bg-[#0b0a08]/55">
                 {snapshot.batches.map((batch) => {
                   const adminGift = isAdminGiftBatch(batch);
                   return (
                     <div
                       key={batch.id}
-                      className={`flex items-center justify-between gap-4 px-3 py-3 text-sm ${
+                      className={`flex items-center justify-between gap-3 px-2.5 py-2 text-xs ${
                         adminGift ? 'bg-amber-500/8' : ''
                       }`}
                     >
                       <div className="min-w-0">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <span className="font-medium">{batch.label}</span>
+                        <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+                          <span className="truncate font-medium text-amber-100/88">{batch.label}</span>
                           {adminGift && (
-                            <Badge className="border border-amber-400/45 bg-black/35 px-2 py-0.5 text-amber-100 shadow-[0_0_12px_rgba(245,158,11,0.16)] hover:bg-amber-500/10">
+                            <Badge className="border border-amber-400/35 bg-black/25 px-1.5 py-0 text-[10px] leading-4 text-amber-100 shadow-[0_0_8px_rgba(245,158,11,0.12)] hover:bg-amber-500/10">
                               管理员赠送 {formatPoints(batch.initialPoints)} 点
                             </Badge>
                           )}
                         </div>
-                        <div className="mt-0.5 text-xs text-amber-100/55">
+                        <div className="mt-0.5 text-[11px] leading-4 text-amber-100/50">
                           {batch.available ? `有效期至 ${formatDate(batch.expiresAt)}` : '已过期'}
                         </div>
                       </div>
                       <div className="shrink-0 text-right">
-                        <div className={`font-medium tabular-nums ${adminGift ? 'text-amber-300' : ''}`}>
+                        <div className={`text-xs font-medium tabular-nums ${adminGift ? 'text-amber-300' : 'text-amber-100/85'}`}>
                           {formatPoints(batch.remainingPoints)}
                         </div>
                         {adminGift && (
-                          <div className="text-xs font-medium text-amber-300">
+                          <div className="text-[10px] font-medium leading-4 text-amber-300/85">
                             管理员赠送
                           </div>
                         )}
                         {batch.frozenPoints > 0 && (
-                          <div className="text-xs text-amber-100/55">
+                          <div className="text-[10px] leading-4 text-amber-100/50">
                             冻结 {formatPoints(batch.frozenPoints)}
                           </div>
                         )}
@@ -418,35 +439,37 @@ export function CreationPointsWallet() {
                   );
                 })}
               </div>
+              )}
             </section>
             )}
 
             {hasAccount && (
             <section>
-              <h3 className="mb-2 text-sm font-medium text-amber-100">最近流水</h3>
-              <div className="divide-y divide-amber-400/15 rounded-md border border-amber-400/30 bg-[#0b0a08]/70">
+              <h3 className="mb-1.5 text-xs font-medium text-amber-100/85">最近流水</h3>
+              <div className="divide-y divide-amber-400/10 rounded-md border border-amber-400/25 bg-[#0b0a08]/55">
                 {visibleTransactions.length === 0 ? (
-                  <div className="px-3 py-8 text-center text-sm text-amber-100/55">暂无流水</div>
+                  <div className="px-3 py-5 text-center text-xs text-amber-100/50">暂无流水</div>
                 ) : visibleTransactions.map((transaction) => {
                   const positive = transaction.type === 'grant' || transaction.type === 'refund';
                   const neutral = transaction.type === 'adjustment';
                   const adminGift = isAdminGiftTransaction(transaction);
+                  const description = compactTransactionDescription(transaction.description);
                   return (
-                    <div key={transaction.id} className="flex items-center justify-between gap-4 px-3 py-2.5 text-sm">
+                    <div key={transaction.id} className="flex items-center justify-between gap-3 px-2.5 py-1.5 text-xs">
                       <div className="min-w-0">
-                        <div className="flex min-w-0 flex-wrap items-center gap-2">
-                          <span className="truncate">{transaction.description}</span>
+                        <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+                          <span className="truncate text-amber-100/82">{description}</span>
                           {adminGift && (
-                            <Badge className="border border-amber-400/45 bg-black/35 text-amber-100 hover:bg-amber-500/10">
+                            <Badge className="border border-amber-400/35 bg-black/25 px-1.5 py-0 text-[10px] leading-4 text-amber-100 hover:bg-amber-500/10">
                               管理员赠送
                             </Badge>
                           )}
                         </div>
-                        <div className="mt-0.5 text-xs text-amber-100/55">
+                        <div className="mt-0.5 text-[10px] leading-4 text-amber-100/45">
                           {formatTime(transaction.createdAt)} · {TRANSACTION_LABELS[transaction.type]}
                         </div>
                       </div>
-                      <div className={`shrink-0 font-medium tabular-nums ${positive ? 'text-emerald-300' : neutral ? 'text-amber-100/70' : ''}`}>
+                      <div className={`shrink-0 text-xs font-medium tabular-nums ${positive ? 'text-emerald-300' : neutral ? 'text-amber-100/65' : 'text-amber-100/82'}`}>
                         {neutral ? '' : positive ? '+' : '-'}{formatPoints(transaction.amount)}
                       </div>
                     </div>

@@ -953,6 +953,64 @@ export default function StoryboardGenerator() {
       outline: 'pending',
     }
   );
+  const hasSceneExtractionResult = Array.isArray(scenesData?.scenes) && scenesData.scenes.length > 0;
+  const hasCharacterExtractionResult = Array.isArray(charactersData?.characters) && charactersData.characters.length > 0;
+  const hasPropExtractionResult = Array.isArray(propsData?.props) && propsData.props.length > 0;
+  const hasOutlineExtractionResult = Array.isArray(outline?.chapters) && outline.chapters.length > 0;
+  const getEffectiveExtractionStatus = (
+    status: ExtractionStatus[keyof ExtractionStatus],
+    hasResult: boolean
+  ): ExtractionStatus[keyof ExtractionStatus] => {
+    return status === 'pending' && hasResult ? 'success' : status;
+  };
+  const effectiveExtractionStatus: ExtractionStatus = {
+    scenes: getEffectiveExtractionStatus(extractionStatus.scenes, hasSceneExtractionResult),
+    characters: getEffectiveExtractionStatus(extractionStatus.characters, hasCharacterExtractionResult),
+    props: getEffectiveExtractionStatus(extractionStatus.props, hasPropExtractionResult),
+    outline: getEffectiveExtractionStatus(extractionStatus.outline, hasOutlineExtractionResult),
+  };
+  const hasExtractionStatusToShow =
+    effectiveExtractionStatus.scenes !== 'pending' ||
+    effectiveExtractionStatus.characters !== 'pending' ||
+    effectiveExtractionStatus.props !== 'pending' ||
+    effectiveExtractionStatus.outline !== 'pending';
+  const isEffectiveExtractionSuccess =
+    effectiveExtractionStatus.scenes === 'success' &&
+    effectiveExtractionStatus.characters === 'success' &&
+    effectiveExtractionStatus.props === 'success' &&
+    effectiveExtractionStatus.outline === 'success';
+
+  useEffect(() => {
+    setExtractionStatus(prev => {
+      const next = { ...prev };
+      let changed = false;
+
+      if (prev.scenes === 'pending' && hasSceneExtractionResult) {
+        next.scenes = 'success';
+        changed = true;
+      }
+      if (prev.characters === 'pending' && hasCharacterExtractionResult) {
+        next.characters = 'success';
+        changed = true;
+      }
+      if (prev.props === 'pending' && hasPropExtractionResult) {
+        next.props = 'success';
+        changed = true;
+      }
+      if (prev.outline === 'pending' && hasOutlineExtractionResult) {
+        next.outline = 'success';
+        changed = true;
+      }
+
+      return changed ? next : prev;
+    });
+  }, [
+    hasSceneExtractionResult,
+    hasCharacterExtractionResult,
+    hasPropExtractionResult,
+    hasOutlineExtractionResult,
+    setExtractionStatus,
+  ]);
   
   // Token 使用统计
   const [tokenUsage, setTokenUsage] = usePersistentState<TokenUsage>(
@@ -3624,10 +3682,10 @@ export default function StoryboardGenerator() {
       );
       const isOutlineComplete = expectedChapters === 0 || extractedChapters >= expectedChapters;
       const isExtractionComplete =
-        extractionStatus.scenes === 'success' &&
-        extractionStatus.characters === 'success' &&
-        extractionStatus.props === 'success' &&
-        extractionStatus.outline === 'success' &&
+        effectiveExtractionStatus.scenes === 'success' &&
+        effectiveExtractionStatus.characters === 'success' &&
+        effectiveExtractionStatus.props === 'success' &&
+        effectiveExtractionStatus.outline === 'success' &&
         isOutlineComplete;
 
       if (!isExtractionComplete) {
@@ -6588,10 +6646,7 @@ export default function StoryboardGenerator() {
             </Card>
 
             {/* Parallel Extraction Status */}
-            {(extractionStatus.scenes !== 'pending' || 
-              extractionStatus.characters !== 'pending' || 
-              extractionStatus.props !== 'pending' || 
-              extractionStatus.outline !== 'pending') && (
+            {hasExtractionStatusToShow && (
               <Card>
                 <CardHeader>
                   <CardTitle className="flex items-center gap-2">
@@ -6599,7 +6654,7 @@ export default function StoryboardGenerator() {
                     并行提取状态
                   </CardTitle>
                   <CardDescription>
-                    四个维度同时分析中
+                    四个维度提取进度
                   </CardDescription>
                 </CardHeader>
                 <CardContent>
@@ -6610,8 +6665,8 @@ export default function StoryboardGenerator() {
                         <span className="text-sm">场景提取</span>
                       </div>
                       <div className="flex items-center gap-2">
-                        {renderStatusIcon(extractionStatus.scenes)}
-                        {extractionStatus.scenes !== 'loading' && extractionStatus.scenes !== 'pending' && (
+                        {renderStatusIcon(effectiveExtractionStatus.scenes)}
+                        {effectiveExtractionStatus.scenes !== 'loading' && effectiveExtractionStatus.scenes !== 'pending' && (
                           <Button
                             size="sm"
                             variant="ghost"
@@ -6630,8 +6685,8 @@ export default function StoryboardGenerator() {
                         <span className="text-sm">人物提取</span>
                       </div>
                       <div className="flex items-center gap-2">
-                        {renderStatusIcon(extractionStatus.characters)}
-                        {extractionStatus.characters !== 'loading' && extractionStatus.characters !== 'pending' && (
+                        {renderStatusIcon(effectiveExtractionStatus.characters)}
+                        {effectiveExtractionStatus.characters !== 'loading' && effectiveExtractionStatus.characters !== 'pending' && (
                           <Button
                             size="sm"
                             variant="ghost"
@@ -6650,8 +6705,8 @@ export default function StoryboardGenerator() {
                         <span className="text-sm">道具提取</span>
                       </div>
                       <div className="flex items-center gap-2">
-                        {renderStatusIcon(extractionStatus.props)}
-                        {extractionStatus.props !== 'loading' && extractionStatus.props !== 'pending' && (
+                        {renderStatusIcon(effectiveExtractionStatus.props)}
+                        {effectiveExtractionStatus.props !== 'loading' && effectiveExtractionStatus.props !== 'pending' && (
                           <Button
                             size="sm"
                             variant="ghost"
@@ -6670,8 +6725,8 @@ export default function StoryboardGenerator() {
                         <span className="text-sm">大纲提取</span>
                       </div>
                       <div className="flex items-center gap-2">
-                        {renderStatusIcon(extractionStatus.outline)}
-                        {extractionStatus.outline !== 'loading' && extractionStatus.outline !== 'pending' && extractionStatus.outline !== 'batch_confirm' && (
+                        {renderStatusIcon(effectiveExtractionStatus.outline)}
+                        {effectiveExtractionStatus.outline !== 'loading' && effectiveExtractionStatus.outline !== 'pending' && effectiveExtractionStatus.outline !== 'batch_confirm' && (
                           <Button
                             size="sm"
                             variant="ghost"
@@ -6727,11 +6782,7 @@ export default function StoryboardGenerator() {
                   )}
                   
                   {/* 提取完成确认按钮 */}
-                  {extractionStatus.scenes === 'success' && 
-                   extractionStatus.characters === 'success' && 
-                   extractionStatus.props === 'success' && 
-                   extractionStatus.outline === 'success' && 
-                   !stepConfirmed.extraction && (
+                  {isEffectiveExtractionSuccess && !stepConfirmed.extraction && (
                     <div className="mt-4 space-y-2">
                       <Button 
                         className="w-full" 
