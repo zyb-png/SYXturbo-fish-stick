@@ -14,6 +14,7 @@ interface AdminAccountRow {
   id: string;
   username: string;
   name?: string;
+  password?: string;
   phone?: string;
   idNumber?: string;
   wechat?: string;
@@ -57,6 +58,10 @@ function createDraft(): AccountPointsDraft {
 
 function readonlyValue(value?: string): string {
   return value?.trim() || '未填写';
+}
+
+function readonlyPasswordValue(value?: string): string {
+  return value?.trim() || '历史账号未保存明文';
 }
 
 function getStatusBadgeClass(status: AdminAccountRow['status']): string {
@@ -396,6 +401,7 @@ export default function AdminAccountsPage() {
 
                       <div className="grid grid-cols-1 gap-1.5 rounded-md border border-amber-400/15 bg-black/20 px-3 py-2 text-xs text-amber-100/65 sm:grid-cols-2">
                         <div>姓名：<span className="text-amber-50">{readonlyValue(account.name)}</span></div>
+                        <div>密码：<span className="text-amber-50">{readonlyPasswordValue(account.password)}</span></div>
                         <div>微信：<span className="text-amber-50">{readonlyValue(account.wechat)}</span></div>
                         <div>手机：<span className="text-amber-50">{readonlyValue(account.phone)}</span></div>
                         <div>身份证：<span className="text-amber-50">{readonlyValue(account.idNumber)}</span></div>

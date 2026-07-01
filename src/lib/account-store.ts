@@ -17,6 +17,7 @@ interface ManagedAccount {
   phone?: string;
   idNumber?: string;
   wechat?: string;
+  passwordPlain?: string;
   status: 'active' | 'disabled' | 'frozen';
   passwordSalt: string;
   passwordHash: string;
@@ -62,6 +63,7 @@ export interface PublicAccount {
 
 export interface AdminAccount extends PublicAccount {
   idNumber?: string;
+  password?: string;
 }
 
 export interface AuthResult {
@@ -129,6 +131,7 @@ function adminAccount(account: ManagedAccount): AdminAccount {
   return {
     ...publicAccount(account),
     idNumber: account.idNumber,
+    password: account.passwordPlain,
   };
 }
 
@@ -149,6 +152,7 @@ function normalizeStore(input: unknown): AccountStoreState {
         ...rawAccount,
         phone: normalizeOptional(rawAccount.phone),
         idNumber: normalizeOptional(rawAccount.idNumber),
+        passwordPlain: normalizeOptional(rawAccount.passwordPlain),
         status: rawAccount.status === 'disabled' || rawAccount.status === 'frozen' ? rawAccount.status : 'active',
       };
     }) as ManagedAccount[] : [],
@@ -295,6 +299,7 @@ export async function createManagedAccount(input: {
       phone: normalizePhone(input.phone, true),
       idNumber: normalizeIdNumber(input.idNumber, true),
       wechat: normalizeOptional(input.wechat),
+      passwordPlain: password,
       status: input.status === 'disabled' ? 'disabled' : 'active',
       passwordSalt: salt,
       passwordHash: hash,
