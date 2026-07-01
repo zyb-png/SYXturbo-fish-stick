@@ -254,12 +254,35 @@ function hasUsefulList(value: unknown): value is string[] {
   return Array.isArray(value) && value.some((item) => typeof item === 'string' && item.trim() && !item.includes('待补充'));
 }
 
+function isScriptExcerptText(text: string): boolean {
+  const normalized = text.replace(/\s+/g, '');
+  const scriptMarkers = [
+    /剧情围绕/,
+    /第[一二三四五六七八九十\d]+集/,
+    /场景[:：]/,
+    /出场人物/,
+    /关键人物/,
+    /对白[:：]/,
+    /台词[:：]/,
+    /（\d{1,3}岁/,
+    /\(\d{1,3}岁/,
+    /《[^》]{2,}》第[一二三四五六七八九十\d]+集/,
+  ];
+
+  if (scriptMarkers.some((pattern) => pattern.test(text))) return true;
+
+  const commaCount = (normalized.match(/[，,、]/g) || []).length;
+  const ageCount = (normalized.match(/\d{1,3}岁/g) || []).length;
+  return commaCount >= 5 && ageCount >= 2;
+}
+
 function firstUsefulString(...values: unknown[]): string {
   for (const value of values) {
     if (typeof value !== 'string') continue;
     const text = value.trim();
     if (!text) continue;
     if (text.includes('待补充') || text.includes('点击添加') || text === '描述') continue;
+    if (isScriptExcerptText(text)) continue;
     return text;
   }
   return '';
@@ -353,18 +376,64 @@ function inferVisualElements(sceneName: string, context: string, defaults: Retur
   return elements.slice(0, 4);
 }
 
+function getSceneDisplayName(sceneName: string): string {
+  return sceneName
+    .replace(/[【\[]\s*(?:内|外|日|夜|白天|黑夜|晨|早|晚|黄昏)\s*[】\]]/g, '')
+    .replace(/\s+(?:内|外|日|夜|白天|黑夜|晨|早|晚|黄昏)\s*$/g, '')
+    .replace(/\s+/g, '')
+    .trim() || sceneName.trim();
+}
+
+function inferLayoutDescription(sceneName: string, context: string, defaults: ReturnType<typeof inferSceneDefaults>): string {
+  const source = `${sceneName}\n${context}`;
+  if (/公馆|宅|别墅|豪宅|正厅|大厅/.test(source)) {
+    return '空间开阔、有厅堂纵深，门廊、墙面和家具形成清晰的层次';
+  }
+  if (/办公室|公司|会议室|工位|董事|总裁/.test(source)) {
+    return '空间以办公桌椅、玻璃隔断和文件设备构成，线条利落、秩序感强';
+  }
+  if (/医院|病房|诊所|走廊/.test(source)) {
+    return '空间以洁净墙面、走廊纵深和医疗设施为主，视觉上偏冷静克制';
+  }
+  if (/家|客厅|卧室|厨房|宿舍|房间/.test(source)) {
+    return '空间带有日常生活痕迹，家具、门窗和杂物让环境更真实';
+  }
+  if (/酒店|会所|餐厅|包厢|宴会/.test(source)) {
+    return '空间有较强装饰感，桌椅、灯光和软装营造精致氛围';
+  }
+  if (defaults.type === '室外') {
+    return '空间有明显前后景关系，建筑外立面、道路或自然环境形成纵深';
+  }
+  return '空间布局清晰，主要陈设和人物动线便于镜头调度';
+}
+
+function inferLightingDescription(sceneName: string, defaults: ReturnType<typeof inferSceneDefaults>): string {
+  if (/夜|雨夜|黑夜/.test(sceneName) || defaults.timeOfDay === '夜晚') {
+    return '光线以低照度和局部暖光为主，暗部阴影保留压迫感';
+  }
+  if (/晨|早|上午/.test(sceneName) || defaults.timeOfDay === '上午') {
+    return '光线偏清晨或上午自然光，画面干净、层次柔和';
+  }
+  if (/晚|黄昏/.test(sceneName) || defaults.timeOfDay === '傍晚') {
+    return '光线带有黄昏色温，明暗过渡柔和但情绪更浓';
+  }
+  return '光线保持真实自然，主次光源分明，方便突出人物表演';
+}
+
+function normalizeVisualAtmosphere(defaults: ReturnType<typeof inferSceneDefaults>): string {
+  return defaults.atmosphere === '剧情推进' ? '克制、真实' : defaults.atmosphere;
+}
+
 function buildFallbackDescription(sceneName: string, content: string, defaults: ReturnType<typeof inferSceneDefaults>): string {
   const context = extractSceneContext(content, sceneName);
-  const sentences = extractContextSentences(context, sceneName);
-  const contextSummary = sentences.join('，').slice(0, 70);
+  const displayName = getSceneDisplayName(sceneName);
   const visualElements = inferVisualElements(sceneName, context, defaults).slice(0, 3).join('、');
-  const base = `${sceneName}是${defaults.type}场景，时间倾向${defaults.timeOfDay}，整体氛围偏${defaults.atmosphere}。`;
-  const contextPart = contextSummary
-    ? `剧情围绕${contextSummary}展开，`
-    : '剧情在此推进人物关系与关键冲突，';
-  const visualPart = `画面重点呈现${visualElements || '空间布局、光线层次、人物动线'}，让场景具有清晰的短剧视觉记忆点。`;
+  const layout = inferLayoutDescription(sceneName, context, defaults);
+  const lighting = inferLightingDescription(sceneName, defaults);
+  const atmosphere = normalizeVisualAtmosphere(defaults);
+  const visualPart = visualElements || '空间布局、光线层次、人物动线';
 
-  return `${base}${contextPart}${visualPart}`;
+  return `${displayName}是${defaults.type}场景，时间倾向${defaults.timeOfDay}，整体氛围偏${atmosphere}。${layout}，${lighting}。画面重点呈现${visualPart}，用于稳定后续场景图的环境质感与镜头空间。`;
 }
 
 function inferKeyEvents(sceneName: string, content: string): string[] {
@@ -384,7 +453,7 @@ function inferSceneDefaults(sceneName: string) {
     type: isExterior ? '室外' : '室内',
     timeOfDay: isNight ? '夜晚' : isMorning ? '上午' : isEvening ? '傍晚' : '白天',
     importance: '次要场景',
-    atmosphere: isNight ? '压抑、紧张' : '剧情推进',
+    atmosphere: isNight ? '压抑、紧张' : '克制、真实',
   };
 }
 
@@ -401,15 +470,16 @@ async function extractBatchScenes(
 
 **重要规则**：
 1. 必须为每个场景生成完整的描述信息，不要遗漏任何字段
-2. description 字段必须详细描述场景的视觉特点、环境氛围、建筑风格等（至少50字）
-3. 如果文本中没有详细描述，请根据场景名称和剧情上下文推断合理的描述
+2. description 字段只写“场景环境视觉描述”，必须描述空间布局、建筑/装饰风格、光线、色调、陈设、氛围等（50-100字）
+3. description 不能摘录剧本文本，不能写第几集、场景标记、出场人物、年龄、剧情事件、台词、对白、人物动作
 4. keyEvents 必须列出该场景中发生的关键剧情事件（至少1-3个）
 5. visualElements 必须列出场景的视觉元素（如：家具、装饰、光线等）
+6. 如果原文没有环境细节，请根据场景名称、内外景和时间推断合理的视觉环境，不要写“待补充”
 
 每个场景包含：
 - id: 序号
 - name: 场景名称（必须与输入的场景名称完全一致）
-- description: 场景详细描述（必须填写，描述视觉特点、环境、氛围等，50-100字）
+- description: 场景环境描述（必须填写，只描述环境、空间、光线、陈设、氛围，不描述剧情和出场人物，50-100字）
 - type: 室内/室外/虚拟（必须填写）
 - importance: 主要场景/次要场景/过渡场景（必须填写）
 - timeOfDay: 时间设定（如：白天、夜晚、黄昏等）
@@ -423,7 +493,7 @@ async function extractBatchScenes(
     {
       "id": 1,
       "name": "场景名称",
-      "description": "详细描述场景的视觉特点、环境布局、建筑风格等",
+      "description": "只描述场景的空间布局、建筑风格、光线色调、陈设和环境氛围，不摘录剧情内容",
       "type": "室内",
       "importance": "主要场景",
       "timeOfDay": "白天",
@@ -552,6 +622,7 @@ async function extractScenesTraditional(
 1. 提取所有独特场景
 2. 合并相同场景的不同叫法
 3. 不要遗漏文本中出现的场景
+4. description 只描述场景环境、空间、光线、陈设、氛围，不要摘录剧情、出场人物、年龄、台词或场景标记
 
 输出JSON：
 {
