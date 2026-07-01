@@ -52,6 +52,7 @@ const TOS_CONFIG = {
   bucket: process.env.TOS_BUCKET || '',
   endpoint: process.env.TOS_ENDPOINT || '',
   publicBaseUrl: (process.env.TOS_PUBLIC_BASE_URL || '').replace(/\/$/, ''),
+  signedUrlExpires: Math.max(60, Math.min(Number(process.env.TOS_SIGNED_URL_EXPIRES || 604800), 604800)),
 };
 
 const VOD_CONFIG = {
@@ -1990,7 +1991,7 @@ async function uploadObject(req, res) {
     accessKeyId: TOS_CONFIG.accessKeyId,
     accessKeySecret: TOS_CONFIG.accessKeySecret,
     region: TOS_CONFIG.region,
-    endpoint: TOS_CONFIG.endpoint || undefined,
+    endpoint: TOS_CONFIG.endpoint || `tos-${TOS_CONFIG.region}.volces.com`,
   });
   await client.putObject({
     bucket: TOS_CONFIG.bucket,
@@ -1998,10 +1999,18 @@ async function uploadObject(req, res) {
     body: Readable.from(buffer),
     contentType: mimeType,
   });
-  const url = TOS_CONFIG.publicBaseUrl
-    ? `${TOS_CONFIG.publicBaseUrl}/${key}`
-    : `https://${TOS_CONFIG.bucket}.tos-${TOS_CONFIG.region}.volces.com/${key}`;
+  const url = getTosAssetDownloadUrl(client, key);
   return sendJson(res, 200, { key, url, size: buffer.length, mimeType });
+}
+
+function getTosAssetDownloadUrl(client, key) {
+  if (TOS_CONFIG.publicBaseUrl) return `${TOS_CONFIG.publicBaseUrl}/${key}`;
+  return client.getPreSignedUrl({
+    bucket: TOS_CONFIG.bucket,
+    key,
+    method: 'GET',
+    expires: TOS_CONFIG.signedUrlExpires,
+  });
 }
 
 function sanitizeFilename(name) {
