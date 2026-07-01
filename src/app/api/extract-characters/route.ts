@@ -233,6 +233,119 @@ function normalizeCharacterRole(role: any): string {
   return '次要配角';
 }
 
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function normalizeGender(value: any): '' | '男' | '女' | '待定' {
+  if (typeof value !== 'string') return '';
+  const text = value.trim();
+  if (!text) return '';
+  if (/待定|未知|不明|无法判断/.test(text)) return '待定';
+  const hasFemale = /女|女性|女生|女孩|女人/.test(text);
+  const hasMale = /男|男性|男生|男孩|男人/.test(text);
+  if (hasFemale && !hasMale) return '女';
+  if (hasMale && !hasFemale) return '男';
+  return '';
+}
+
+function collectCharacterEvidence(content: string, name: string, radius = 140, maxCount = 6): string[] {
+  if (!name) return [];
+  const evidence: string[] = [];
+  const seen = new Set<string>();
+  const regex = new RegExp(escapeRegExp(name), 'g');
+  let match: RegExpExecArray | null;
+
+  while ((match = regex.exec(content)) !== null && evidence.length < maxCount) {
+    const start = Math.max(0, match.index - radius);
+    const end = Math.min(content.length, match.index + name.length + radius);
+    const snippet = content.slice(start, end).replace(/\s+/g, ' ').trim();
+    if (snippet && !seen.has(snippet)) {
+      seen.add(snippet);
+      evidence.push(snippet);
+    }
+  }
+
+  return evidence;
+}
+
+function inferGenderFromName(name: string): '' | '男' | '女' {
+  if (!name) return '';
+  if (/母|妈|妈妈|姐姐|妹妹|阿姨|嫂|妻|夫人|太太|小姐|姑娘|女孩|女儿|新娘|老板娘/.test(name)) return '女';
+  if (/父|爸|爸爸|叔|伯|哥|哥哥|爷|爷爷|儿子|先生|少爷|老爷|公子|男孩/.test(name)) return '男';
+  if (/沈念|明珠|巧云|春梅|桂芳|晓晓|梦瑶|小芳|小美/.test(name)) return '女';
+  if (/延之|方宇|顾父|王叔|老陈|张村长/.test(name)) return '男';
+  if (/[婷娜娟芳梅兰雪霞莉丽敏婧妍媛瑶琳倩萍慧颖]$/.test(name)) return '女';
+  if (/[伟强刚勇军杰磊鹏涛斌龙峰]$/.test(name)) return '男';
+  return '';
+}
+
+function inferGenderFromEvidence(name: string, content: string): '' | '男' | '女' {
+  const evidence = collectCharacterEvidence(content, name, 220, 10).join(' ');
+  if (!evidence) return '';
+
+  const femalePatterns = [
+    /她/g,
+    /女主|女配|女二|女反派|女儿|养女|亲生女|女孩|女生|女人|姑娘|小姐|大小姐|千金|夫人|太太|母亲|妈妈|姐姐|妹妹|妻子|老婆|未婚妻|新娘|闺蜜|姐妹|母女|父女|姐弟/g,
+    /叫她|喊她|问她|对她说|拉着她|抱住她|保护她|她的|嫁给|娶她/g,
+    new RegExp(`${escapeRegExp(name)}[（(][^）)]*(女|养女|女儿|姑娘|小姐|大小姐|千金|太太|夫人|妻子|未婚妻|新娘|姐姐|妹妹)`, 'g'),
+    new RegExp(`${escapeRegExp(name)}[^。！？\\n]{0,40}(她|女儿|养女|小姐|姑娘|妻子|未婚妻|母亲|妈妈|姐姐|妹妹|新娘|太太|夫人)`, 'g'),
+    new RegExp(`(她|女儿|养女|小姐|姑娘|妻子|未婚妻|母亲|妈妈|姐姐|妹妹|新娘|太太|夫人)[^。！？\\n]{0,40}${escapeRegExp(name)}`, 'g'),
+  ];
+  const malePatterns = [
+    /他/g,
+    /男主|男配|男二|男反派|儿子|养子|亲生子|男孩|男生|男人|先生|少爷|老爷|公子|父亲|爸爸|哥哥|弟弟|丈夫|老公|未婚夫|新郎|兄弟|父子|母子|兄妹/g,
+    /叫他|喊他|问他|对他说|拉着他|抱住他|保护他|他的|他娶|他要娶/g,
+    new RegExp(`${escapeRegExp(name)}[（(][^）)]*(男|养子|儿子|先生|少爷|老爷|公子|丈夫|未婚夫|新郎|父亲|爸爸|哥哥|弟弟)`, 'g'),
+    new RegExp(`${escapeRegExp(name)}[^。！？\\n]{0,40}(他|儿子|养子|先生|少爷|丈夫|未婚夫|父亲|爸爸|哥哥|弟弟|新郎)`, 'g'),
+    new RegExp(`(他|儿子|养子|先生|少爷|丈夫|未婚夫|父亲|爸爸|哥哥|弟弟|新郎)[^。！？\\n]{0,40}${escapeRegExp(name)}`, 'g'),
+  ];
+
+  const score = (patterns: RegExp[]) => patterns.reduce((sum, pattern) => {
+    pattern.lastIndex = 0;
+    return sum + (evidence.match(pattern)?.length || 0);
+  }, 0);
+
+  const femaleScore = score(femalePatterns);
+  const maleScore = score(malePatterns);
+  if (femaleScore > maleScore) return '女';
+  if (maleScore > femaleScore) return '男';
+  return '';
+}
+
+function resolveCharacterGender(name: string, content: string, modelGender: any): '男' | '女' | '待定' {
+  const normalizedModelGender = normalizeGender(modelGender);
+  const evidenceGender = inferGenderFromEvidence(name, content);
+  const nameHintGender = inferGenderFromName(name);
+
+  if (evidenceGender) return evidenceGender;
+  if (normalizedModelGender && normalizedModelGender !== '待定') {
+    if (nameHintGender && nameHintGender !== normalizedModelGender) return nameHintGender;
+    return normalizedModelGender;
+  }
+  if (nameHintGender) return nameHintGender;
+  return '待定';
+}
+
+function textContradictsGender(value: any, gender: '男' | '女' | '待定'): boolean {
+  if (gender === '待定') return false;
+  const text = Array.isArray(value) || (value && typeof value === 'object')
+    ? JSON.stringify(value)
+    : String(value || '');
+  if (gender === '女') return /男性角色|男士|男装|男人|男孩|男生/.test(text);
+  return /女性角色|女士|女装|女人|女孩|女生/.test(text);
+}
+
+function buildCharacterContextDigest(content: string, characterNames: string[]): string {
+  return characterNames.map((name) => {
+    const snippets = collectCharacterEvidence(content, name, 120, 4);
+    const evidence = snippets.length > 0
+      ? snippets.map((snippet, index) => `${index + 1}. ${snippet}`).join('\n')
+      : '未在文本片段中找到明确上下文，请勿凭空设定性别。';
+    return `【${name}】\n${evidence}`;
+  }).join('\n\n');
+}
+
 /**
  * 提取一批人物的详细信息
  */
@@ -254,13 +367,16 @@ async function extractBatchCharacters(
 8. 每个人物至少需要有一个造型（默认造型）
 9. 描述要适合真人电影风格，避免卡通化或过度夸张
 10. role 只能使用：主角、主要配角、次要配角、龙套、路人、背景人物
+11. gender 只能使用：男、女、待定。必须根据参考文本中的称谓、代词、亲属关系、括号身份说明判断；不要因为示例、职业或默认习惯把未知人物写成男性。
+12. 如果人物上下文中出现“她、女儿、养女、小姐、夫人、母亲、姐姐、妹妹、妻子、姑娘”等女性证据，gender 必须为“女”；出现“他、儿子、先生、父亲、哥哥、弟弟、丈夫”等男性证据，gender 才写“男”；没有明确证据时写“待定”。
+13. 性别判断优先级：先看别人对该人物的称呼和亲属/婚恋关系，其次看角色间互动方式里的代词和行为关系，最后才参考姓名气质；不能只因为职业、地位、年龄或模板示例判断性别。
 
 每个人物包含：
 - id: 序号
 - name: 人物名称（必须与输入的人物名称完全一致）
 - role: 主角/主要配角/次要配角/龙套/路人/背景人物（必须填写）
 - age: 年龄（如：25岁、中年、老年等）
-- gender: 性别
+- gender: 男/女/待定
 - personality: 性格特点数组（必须填写，至少2个）
 - appearance: 外貌详细描述（**必须填写，80-150字**，包含身高体型、发型、五官、皮肤质感、穿着风格等细节）
 - faceFeatures: 固定脸型特征对象（**必须填写**，包含脸型、眼睛、鼻子、嘴巴、肤色，这些特征在所有场景下保持一致）
@@ -293,7 +409,7 @@ async function extractBatchCharacters(
       "name": "人物名称1",
       "role": "主角",
       "age": "25岁",
-      "gender": "男",
+      "gender": "女",
       "personality": ["勇敢", "聪明", "正义感强"],
       "appearance": "详细描述外貌特征，包括身高体型、发型、五官特点、皮肤质感、穿着风格等（80-150字）",
       "faceFeatures": {
@@ -345,10 +461,11 @@ async function extractBatchCharacters(
 - 生成图片时，需要同时使用 faceFeatures 和 looks 的描述，确保脸型一致但造型变化`;
 
   const characterList = characterNames.map((c, i) => `${i + 1}. ${c}`).join('\n');
+  const characterContextDigest = buildCharacterContextDigest(content, characterNames);
   
   const messages = [
     { role: 'system' as const, content: systemPrompt },
-    { role: 'user' as const, content: `请为以下所有人物生成详细信息（不要遗漏任何人）：\n${characterList}\n\n参考文本：\n${content.substring(0, 30000)}` }
+    { role: 'user' as const, content: `请为以下所有人物生成详细信息（不要遗漏任何人）：\n${characterList}\n\n每个人物的上下文证据（优先依据这些片段判断性别、年龄、身份和关系）：\n${characterContextDigest}\n\n完整参考文本：\n${content.substring(0, 30000)}` }
   ];
 
   let response = '';
@@ -426,7 +543,7 @@ async function extractBatchCharacters(
     
     // 使用 characterNames 的索引来生成全局唯一的 id
     const globalId = startId + idx + 1;
-    const defaultGender = matchedChar?.gender || (/春梅|桂芳|张敏|晓晓|助理|负责人2/.test(charName) ? '女' : '男');
+    const defaultGender = resolveCharacterGender(charName, content, matchedChar?.gender);
     const defaultAge = matchedChar?.age || (/村长|王叔|老陈|老板|刘总|孙总|钱老板/.test(charName) ? '45岁左右' : /李春梅|赵桂芳/.test(charName) ? '中年' : /张敏|李晓晓|小助理/.test(charName) ? '25岁左右' : /方宇/.test(charName) ? '28岁左右' : '30岁左右');
     const defaultPersonality = /方宇/.test(charName)
       ? ['冷静克制', '证据意识强', '外柔内刚']
@@ -439,35 +556,47 @@ async function extractBatchCharacters(
             : ['性格鲜明', '行动直接', '服务剧情冲突'];
     
     // 生成默认的脸型特征
-    const generateDefaultFaceFeatures = (char: any) => ({
-      faceShape: (char.gender || defaultGender) === '女' ? '鹅蛋脸或柔和椭圆脸，轮廓自然清晰' : '椭圆脸或方中带圆的脸型，轮廓稳定',
-      eyes: (char.gender || defaultGender) === '女' ? '眼型清晰有神，情绪表达明显' : '眼神专注，眉眼有辨识度',
-      nose: '鼻梁自然端正，符合写实真人比例',
-      mouth: (char.gender || defaultGender) === '女' ? '唇形自然，表情变化细腻' : '唇线清楚，表情克制有力度',
-      skinTone: (char.gender || defaultGender) === '女' ? '自然肤色，质感干净' : '自然健康肤色，保留真实皮肤质感',
-    });
+    const generateDefaultFaceFeatures = (char: any) => {
+      const gender = normalizeGender(char.gender) || defaultGender;
+      return {
+        faceShape: gender === '女' ? '鹅蛋脸或柔和椭圆脸，轮廓自然清晰' : gender === '男' ? '椭圆脸或方中带圆的脸型，轮廓稳定' : '自然写实脸型，轮廓清晰稳定',
+        eyes: gender === '女' ? '眼型清晰有神，情绪表达明显' : gender === '男' ? '眼神专注，眉眼有辨识度' : '眼神清晰，情绪表达自然',
+        nose: '鼻梁自然端正，符合写实真人比例',
+        mouth: gender === '女' ? '唇形自然，表情变化细腻' : gender === '男' ? '唇线清楚，表情克制有力度' : '唇形自然，表情变化符合剧情',
+        skinTone: gender === '女' ? '自然肤色，质感干净' : gender === '男' ? '自然健康肤色，保留真实皮肤质感' : '自然肤色，保留真实皮肤质感',
+      };
+    };
 
     // 生成默认的造型（至少一个）
-    const generateDefaultLooks = (char: any) => [{
-      id: 'look-1',
-      scene: '默认造型',
-      description: `${char.name}的基础出场造型，保持脸型和五官一致，服装根据人物身份与剧情阶段呈现写实短剧质感。`,
-      costume: char.costume && char.costume.length > 0 ? char.costume[0] : ((char.gender || defaultGender) === '女' ? '简洁生活装或职业装，颜色自然，方便在不同场景延展' : '简洁日常装或商务装，剪裁利落，贴合人物身份'),
-      hairstyle: (char.gender || defaultGender) === '女' ? '自然披发、低马尾或利落短发，根据场景微调' : '干净短发或自然整理发型',
-      accessories: [],
-      makeup: (char.gender || defaultGender) === '女' ? '自然淡妆' : '自然无妆或轻微修饰',
-      mood: '自然',
-    }];
+    const generateDefaultLooks = (char: any) => {
+      const gender = normalizeGender(char.gender) || defaultGender;
+      return [{
+        id: 'look-1',
+        scene: '默认造型',
+        description: `${char.name}的基础出场造型，保持脸型和五官一致，服装根据人物身份与剧情阶段呈现写实短剧质感。`,
+        costume: char.costume && char.costume.length > 0 && !textContradictsGender(char.costume[0], gender) ? char.costume[0] : (gender === '女' ? '简洁生活装或职业装，颜色自然，方便在不同场景延展' : gender === '男' ? '简洁日常装或商务装，剪裁利落，贴合人物身份' : '简洁写实服装，颜色自然，贴合人物身份'),
+        hairstyle: gender === '女' ? '自然披发、低马尾或利落短发，根据场景微调' : gender === '男' ? '干净短发或自然整理发型' : '自然整理发型，贴合人物身份',
+        accessories: [],
+        makeup: gender === '女' ? '自然淡妆' : gender === '男' ? '自然无妆或轻微修饰' : '自然妆造',
+        mood: '自然',
+      }];
+    };
 
     // 生成默认的外貌描述（更详细的模板）
     const generateDefaultAppearance = (char: any) => {
-      const genderText = char.gender || defaultGender;
+      const genderText = normalizeGender(char.gender) || defaultGender;
       const ageText = char.age || defaultAge;
       const personalityText = char.personality && Array.isArray(char.personality) && char.personality.length > 0 
         ? char.personality[0] 
         : defaultPersonality[0];
+      const genderRoleText = genderText === '待定' ? '角色' : `${genderText}性角色`;
+      const bodyText = genderText === '女'
+        ? '身形自然匀称，面部线条柔和但有辨识度'
+        : genderText === '男'
+          ? '身材比例匀称，面部轮廓清晰'
+          : '身材比例自然，面部轮廓清晰';
       
-      return `${char.name}是${ageText}的${genderText}性角色，${personalityText}。身材比例匀称，面部轮廓清晰，眼神和神态能体现人物当下情绪。服装以日常、商务或剧情场景搭配为主，整体贴合真人短剧写实风格。`;
+      return `${char.name}是${ageText}的${genderRoleText}，${personalityText}。${bodyText}，眼神和神态能体现人物当下情绪。服装以日常、商务或剧情场景搭配为主，整体贴合真人短剧写实风格。`;
     };
     
     // 辅助函数：判断字符串是否有效（非空且不包含"待补充"相关关键词）
@@ -512,30 +641,45 @@ async function extractBatchCharacters(
     if (matchedChar) {
       // 使用 LLM 返回的数据，填充缺失的字段
       console.log(`人物 ${charName} 找到匹配数据，使用 LLM 返回的信息`);
+      const normalizedModelGender = normalizeGender(matchedChar.gender);
+      const genderWasCorrected = Boolean(normalizedModelGender && normalizedModelGender !== '待定' && normalizedModelGender !== defaultGender);
+      const safeMatchedChar = { ...matchedChar, name: charName, gender: defaultGender };
+      const defaultLook = generateDefaultLooks(safeMatchedChar)[0];
+      const safeLooks = !genderWasCorrected && !textContradictsGender(matchedChar.looks, defaultGender)
+        ? getValue(matchedChar.looks, generateDefaultLooks(safeMatchedChar))
+        : generateDefaultLooks(safeMatchedChar);
+      const safeCostume = !genderWasCorrected && !textContradictsGender(matchedChar.costume, defaultGender)
+        ? getValue(matchedChar.costume, [defaultLook.costume])
+        : [defaultLook.costume];
+      const safeCostumeDetails = !genderWasCorrected && matchedChar.costumeDetails && !textContradictsGender(matchedChar.costumeDetails, defaultGender)
+        ? matchedChar.costumeDetails
+        : {
+            mainOutfit: defaultLook.costume,
+            accessories: defaultLook.accessories,
+            colorScheme: '自然写实配色',
+            styleNotes: '贴合人物身份和短剧现实题材风格',
+          };
       return {
         id: globalId,
         name: charName,
         role: normalizeCharacterRole(getValue(matchedChar.role, '次要配角')),
         age: getValue(matchedChar.age, defaultAge),
-        gender: getValue(matchedChar.gender, defaultGender),
+        gender: defaultGender,
         personality: getValue(matchedChar.personality, defaultPersonality),
         // appearance 字段使用专门的验证函数
-        appearance: isValidAppearance(matchedChar.appearance) 
+        appearance: isValidAppearance(matchedChar.appearance) && !textContradictsGender(matchedChar.appearance, defaultGender)
           ? matchedChar.appearance 
-          : generateDefaultAppearance(matchedChar),
-        faceFeatures: matchedChar.faceFeatures || generateDefaultFaceFeatures(matchedChar),
-        looks: getValue(matchedChar.looks, generateDefaultLooks(matchedChar)),
+          : generateDefaultAppearance(safeMatchedChar),
+        faceFeatures: !genderWasCorrected && !textContradictsGender(matchedChar.faceFeatures, defaultGender)
+          ? matchedChar.faceFeatures || generateDefaultFaceFeatures(safeMatchedChar)
+          : generateDefaultFaceFeatures(safeMatchedChar),
+        looks: safeLooks,
         background: getValue(matchedChar.background, `${charName}在剧情中承担${normalizeCharacterRole(getValue(matchedChar.role, '次要配角'))}功能，主要围绕核心矛盾推进人物关系和事件冲突。`),
         keyRelationships: getValue(matchedChar.keyRelationships, []),
         arc: getValue(matchedChar.arc, `${charName}随着剧情推进经历立场、情绪或处境变化，形象服务于故事冲突和反转。`),
         keyScenes: getValue(matchedChar.keyScenes, []),
-        costume: getValue(matchedChar.costume, [generateDefaultLooks(matchedChar)[0].costume]),
-        costumeDetails: matchedChar.costumeDetails || {
-          mainOutfit: generateDefaultLooks(matchedChar)[0].costume,
-          accessories: generateDefaultLooks(matchedChar)[0].accessories,
-          colorScheme: '自然写实配色',
-          styleNotes: '贴合人物身份和短剧现实题材风格',
-        },
+        costume: safeCostume,
+        costumeDetails: safeCostumeDetails,
         props: getValue(matchedChar.props, []),
       };
     } else {
@@ -603,6 +747,8 @@ async function extractCharactersTraditional(
 5. faceFeatures 必须是固定脸型特征，包括脸型、眼睛、鼻子、嘴巴、肤色，后续所有造型都保持一致
 6. looks 必须识别人物在不同场景/阶段的造型变化，包括服装、发型、配饰、化妆、情绪状态
 7. background 写背景故事，keyRelationships 写人物关系，arc 写人物弧光，keyScenes 写关键场景，props 写标志性道具
+8. gender 只能使用：男、女、待定。必须根据文本中的称谓、代词、亲属关系、括号身份说明、角色互动方式判断；不要默认男性，不确定就写“待定”。
+9. 性别判断优先级：先看别人对该人物的称呼和亲属/婚恋关系，其次看角色间互动方式里的代词和行为关系，最后才参考姓名气质。
 
 请以 JSON 格式返回结果，格式如下：
 {
@@ -613,7 +759,7 @@ async function extractCharactersTraditional(
       "name": "人物名称",
       "role": "主角/主要配角/次要配角/龙套/路人/背景人物",
       "age": "年龄",
-      "gender": "性别",
+      "gender": "女",
       "personality": ["性格特点1", "性格特点2"],
       "appearance": "80-150字外貌描述，包含身高体型、发型、五官、肤色质感、穿着风格",
       "faceFeatures": {
@@ -695,6 +841,10 @@ async function extractCharactersTraditional(
       result.characters = result.characters.map((character: any) => ({
         ...character,
         role: normalizeCharacterRole(character.role),
+        gender: resolveCharacterGender(character.name || '', content, character.gender),
+        appearance: textContradictsGender(character.appearance, resolveCharacterGender(character.name || '', content, character.gender))
+          ? ''
+          : character.appearance,
       }));
     }
 

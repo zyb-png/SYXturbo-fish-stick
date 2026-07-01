@@ -205,10 +205,42 @@ function CompactBadge({
   );
 }
 
+function normalizeGenderValue(value?: string): string {
+  if (!isUsefulText(value)) return '';
+  if (/待定|未知|不明/.test(value)) return '待定';
+  const hasFemale = /女|女性|女生|女孩|女人/.test(value);
+  const hasMale = /男|男性|男生|男孩|男人/.test(value);
+  if (hasFemale && !hasMale) return '女';
+  if (hasMale && !hasFemale) return '男';
+  return value.trim();
+}
+
+function inferGenderFromNameHint(name: string): string {
+  if (/母|妈|妈妈|姐姐|妹妹|阿姨|嫂|妻|夫人|太太|小姐|姑娘|女孩|女儿|新娘|老板娘/.test(name)) return '女';
+  if (/父|爸|爸爸|叔|伯|哥|哥哥|爷|爷爷|儿子|先生|少爷|老爷|公子|男孩/.test(name)) return '男';
+  if (/沈念|明珠|巧云|春梅|桂芳|晓晓|梦瑶|小芳|小美/.test(name)) return '女';
+  if (/延之|方宇|顾父|王叔|老陈|张村长/.test(name)) return '男';
+  if (/[婷娜娟芳梅兰雪霞莉丽敏婧妍媛瑶琳倩萍慧颖]$/.test(name)) return '女';
+  if (/[伟强刚勇军杰磊鹏涛斌龙峰]$/.test(name)) return '男';
+  return '';
+}
+
 function inferCharacterGender(name: string, current?: string): string {
-  if (isUsefulText(current)) return current;
-  if (/春梅|桂芳|张敏|晓晓|助理|负责人2/.test(name)) return '女';
-  return '男';
+  const gender = normalizeGenderValue(current);
+  const nameHint = inferGenderFromNameHint(name);
+  if (nameHint && gender && gender !== '待定' && nameHint !== gender) return nameHint;
+  if (gender) return gender;
+  if (nameHint) return nameHint;
+  return '待定';
+}
+
+function characterTextContradictsGender(value: unknown, gender: string): boolean {
+  if (gender !== '男' && gender !== '女') return false;
+  const text = Array.isArray(value) || (value && typeof value === 'object')
+    ? JSON.stringify(value)
+    : String(value || '');
+  if (gender === '女') return /男性角色|男士|男装|男人|男孩|男生/.test(text);
+  return /女性角色|女士|女装|女人|女孩|女生/.test(text);
 }
 
 function inferCharacterAge(name: string, current?: string): string {
@@ -247,20 +279,29 @@ function buildCharacterAppearance(character: Partial<Character>): string {
   const gender = inferCharacterGender(name, character.gender);
   const age = inferCharacterAge(name, character.age);
   const personality = inferCharacterPersonality(name, character.personality)[0];
-  const body = gender === '女' ? '身形匀称，姿态灵活，面部线条柔和但表情有辨识度' : '身材比例匀称，肩背有力，面部轮廓清晰';
-  const styling = gender === '女' ? '服装以生活化或职业化搭配为主，颜色和材质随剧情阶段变化' : '服装以日常、商务或工作场景搭配为主，整体干净利落';
-  return `${name}是${age}的${gender}性角色，${personality}。${body}，眼神和神态能体现人物当下情绪。${styling}，适合真人短剧写实风格，可根据场景切换不同造型。`;
+  const body = gender === '女'
+    ? '身形匀称，姿态灵活，面部线条柔和但表情有辨识度'
+    : gender === '男'
+      ? '身材比例匀称，肩背有力，面部轮廓清晰'
+      : '身材比例自然，面部轮廓清晰，表情有辨识度';
+  const styling = gender === '女'
+    ? '服装以生活化或职业化搭配为主，颜色和材质随剧情阶段变化'
+    : gender === '男'
+      ? '服装以日常、商务或工作场景搭配为主，整体干净利落'
+      : '服装贴合人物身份和剧情场景，整体自然写实';
+  const genderRole = gender === '男' || gender === '女' ? `${gender}性角色` : '角色';
+  return `${name}是${age}的${genderRole}，${personality}。${body}，眼神和神态能体现人物当下情绪。${styling}，适合真人短剧写实风格，可根据场景切换不同造型。`;
 }
 
 function buildCharacterFaceFeatures(character: Partial<Character>): FaceFeatures {
   const name = character.name || '该人物';
   const gender = inferCharacterGender(name, character.gender);
   return {
-    faceShape: gender === '女' ? '鹅蛋脸或柔和椭圆脸，轮廓自然清晰' : '椭圆脸或方中带圆的脸型，轮廓稳定',
-    eyes: gender === '女' ? '眼型清晰有神，情绪表达明显' : '眼神专注，眉眼有辨识度',
+    faceShape: gender === '女' ? '鹅蛋脸或柔和椭圆脸，轮廓自然清晰' : gender === '男' ? '椭圆脸或方中带圆的脸型，轮廓稳定' : '自然写实脸型，轮廓清晰稳定',
+    eyes: gender === '女' ? '眼型清晰有神，情绪表达明显' : gender === '男' ? '眼神专注，眉眼有辨识度' : '眼神清晰，情绪表达自然',
     nose: '鼻梁自然端正，符合写实真人比例',
-    mouth: gender === '女' ? '唇形自然，表情变化细腻' : '唇线清楚，表情克制有力度',
-    skinTone: gender === '女' ? '自然肤色，质感干净' : '自然健康肤色，保留真实皮肤质感',
+    mouth: gender === '女' ? '唇形自然，表情变化细腻' : gender === '男' ? '唇线清楚，表情克制有力度' : '唇形自然，表情变化符合剧情',
+    skinTone: gender === '女' ? '自然肤色，质感干净' : gender === '男' ? '自然健康肤色，保留真实皮肤质感' : '自然肤色，保留真实皮肤质感',
   };
 }
 
@@ -271,10 +312,10 @@ function buildCharacterLook(character: Partial<Character>): CharacterLook {
     id: 'look-1',
     scene: '默认造型',
     description: `${name}的基础出场造型，保持脸型和五官一致，服装根据人物身份与剧情阶段呈现写实短剧质感。`,
-    costume: gender === '女' ? '简洁生活装或职业装，颜色自然，方便在不同场景延展' : '简洁日常装或商务装，剪裁利落，贴合人物身份',
-    hairstyle: gender === '女' ? '自然披发、低马尾或利落短发，根据场景微调' : '干净短发或自然整理发型',
+    costume: gender === '女' ? '简洁生活装或职业装，颜色自然，方便在不同场景延展' : gender === '男' ? '简洁日常装或商务装，剪裁利落，贴合人物身份' : '简洁写实服装，颜色自然，贴合人物身份',
+    hairstyle: gender === '女' ? '自然披发、低马尾或利落短发，根据场景微调' : gender === '男' ? '干净短发或自然整理发型' : '自然整理发型，贴合人物身份',
     accessories: [],
-    makeup: gender === '女' ? '自然淡妆' : '自然无妆或轻微修饰',
+    makeup: gender === '女' ? '自然淡妆' : gender === '男' ? '自然无妆或轻微修饰' : '自然妆造',
     mood: '自然',
   };
 }
@@ -287,18 +328,20 @@ function normalizeCharacterVisualInfo(character: Character): Character {
     gender: inferCharacterGender(character.name, character.gender),
     personality: inferCharacterPersonality(character.name, character.personality),
   };
+  const originalGender = normalizeGenderValue(character.gender);
+  const genderWasCorrected = Boolean(originalGender && originalGender !== '待定' && originalGender !== normalized.gender);
 
-  normalized.appearance = isUsefulText(character.appearance)
+  normalized.appearance = isUsefulText(character.appearance) && !genderWasCorrected && !characterTextContradictsGender(character.appearance, normalized.gender)
     ? character.appearance
     : buildCharacterAppearance(normalized);
 
   const defaultFaceFeatures = buildCharacterFaceFeatures(normalized);
   normalized.faceFeatures = {
-    faceShape: isUsefulText(character.faceFeatures?.faceShape) ? character.faceFeatures.faceShape : defaultFaceFeatures.faceShape,
-    eyes: isUsefulText(character.faceFeatures?.eyes) ? character.faceFeatures.eyes : defaultFaceFeatures.eyes,
-    nose: isUsefulText(character.faceFeatures?.nose) ? character.faceFeatures.nose : defaultFaceFeatures.nose,
-    mouth: isUsefulText(character.faceFeatures?.mouth) ? character.faceFeatures.mouth : defaultFaceFeatures.mouth,
-    skinTone: isUsefulText(character.faceFeatures?.skinTone) ? character.faceFeatures.skinTone : defaultFaceFeatures.skinTone,
+    faceShape: !genderWasCorrected && isUsefulText(character.faceFeatures?.faceShape) ? character.faceFeatures.faceShape : defaultFaceFeatures.faceShape,
+    eyes: !genderWasCorrected && isUsefulText(character.faceFeatures?.eyes) ? character.faceFeatures.eyes : defaultFaceFeatures.eyes,
+    nose: !genderWasCorrected && isUsefulText(character.faceFeatures?.nose) ? character.faceFeatures.nose : defaultFaceFeatures.nose,
+    mouth: !genderWasCorrected && isUsefulText(character.faceFeatures?.mouth) ? character.faceFeatures.mouth : defaultFaceFeatures.mouth,
+    skinTone: !genderWasCorrected && isUsefulText(character.faceFeatures?.skinTone) ? character.faceFeatures.skinTone : defaultFaceFeatures.skinTone,
   };
 
   normalized.looks = Array.isArray(character.looks) && character.looks.length > 0
