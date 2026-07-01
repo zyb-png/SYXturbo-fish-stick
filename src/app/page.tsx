@@ -5874,41 +5874,48 @@ export default function StoryboardGenerator() {
     }
   };
 
-  // 下载图片
-  const downloadImage = async (imageUrl: string, fileName: string) => {
+  // 下载/保存媒体到本机下载目录
+  const saveMediaToDownloads = async (mediaUrl: string, fileName: string, mediaLabel: '图片' | '视频') => {
+    if (!(await requireLoginBeforePaidAction())) return;
+
     try {
       const saveResponse = await fetch('/api/assets-save-to-downloads', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          imageUrl,
+          imageUrl: mediaUrl,
           fileName,
         }),
       });
       const saveData = await saveResponse.json().catch(() => null);
       if (saveResponse.ok && saveData?.success) {
-        toast.success(`图片已保存到下载目录：${saveData.filename || fileName}`);
+        toast.success(`${mediaLabel}已保存到下载目录：${saveData.filename || fileName}`, {
+          description: saveData.targetPath,
+          duration: 6000,
+        });
         return;
       }
 
-      const response = await fetch(getDisplayImageUrl(imageUrl));
-      if (!response.ok) {
-        throw new Error(`下载失败: ${response.status}`);
+      if (saveResponse.status === 401 && saveData?.code === 'LOGIN_REQUIRED') {
+        showLoginRequired(saveData.error || LOGIN_REQUIRED_PROMPT);
+        return;
       }
-      const blob = await response.blob();
-      const url = window.URL.createObjectURL(blob);
-      const link = document.createElement('a');
-      link.href = url;
-      link.download = `${fileName}.png`;
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-      window.URL.revokeObjectURL(url);
-      toast.success('图片下载成功');
+
+      throw new Error(saveData?.error || `${mediaLabel}保存失败`);
     } catch (error) {
-      console.error('图片下载失败:', error);
-      toast.error('图片下载失败');
+      console.error(`${mediaLabel}下载失败:`, error);
+      toast.error(getNetworkErrorMessage(error, `下载${mediaLabel}`));
     }
+  };
+
+  // 下载图片
+  const downloadImage = async (imageUrl: string, fileName: string) => {
+    await saveMediaToDownloads(imageUrl, fileName, '图片');
+  };
+
+  // 下载视频
+  const downloadVideo = async (videoUrl: string, fileName: string) => {
+    await saveMediaToDownloads(videoUrl, fileName, '视频');
   };
 
   const getStoryboardImageFileName = (chapterNumber: number, groupIndex: number) => {
@@ -10749,10 +10756,14 @@ export default function StoryboardGenerator() {
                                                     style={{ aspectRatio: videoRatio === '16:9' ? '16/9' : '9/16' }}
                                                   />
                                                   <div className="absolute top-2 right-2 flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                                                    <Button size="sm" variant="secondary" className="h-7" asChild>
-                                                      <a href={video.videoUrl} download target="_blank" rel="noopener noreferrer">
-                                                        <Download className="w-3 h-3" />
-                                                      </a>
+                                                    <Button
+                                                      size="sm"
+                                                      variant="secondary"
+                                                      className="h-7"
+                                                      title="保存视频到下载目录"
+                                                      onClick={() => downloadVideo(video.videoUrl, `第${cs.chapterNumber}集_第${pg.groupIndex}组视频`)}
+                                                    >
+                                                      <Download className="w-3 h-3" />
                                                     </Button>
                                                     <Button
                                                       size="sm"
@@ -11062,11 +11073,10 @@ export default function StoryboardGenerator() {
                                                   size="sm"
                                                   variant="secondary"
                                                   className="h-7"
-                                                  asChild
+                                                  title="保存视频到下载目录"
+                                                  onClick={() => downloadVideo(video.videoUrl, `第${cs.chapterNumber}集_镜头${shot.shotNumber}_视频`)}
                                                 >
-                                                  <a href={video.videoUrl} download target="_blank" rel="noopener noreferrer">
-                                                    <Download className="w-3 h-3" />
-                                                  </a>
+                                                  <Download className="w-3 h-3" />
                                                 </Button>
                                                 <Button
                                                   size="sm"
