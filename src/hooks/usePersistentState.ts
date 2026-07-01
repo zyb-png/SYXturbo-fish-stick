@@ -213,21 +213,32 @@ function backupStateToServer(key: string, serializedValue: string, options?: { k
   }
 }
 
-async function restoreStateFromServer(key: string): Promise<string | null> {
-  if (typeof window === 'undefined' || !isStoryboardStateKey(key)) return null;
+async function restoreStateFromServer(key: string): Promise<{ value: string | null; blockedByLogin: boolean }> {
+  if (typeof window === 'undefined' || !isStoryboardStateKey(key)) {
+    return { value: null, blockedByLogin: false };
+  }
 
   try {
     const response = await fetch(`${PROJECT_STATE_API}?key=${encodeURIComponent(key)}`, {
       cache: 'no-store',
     });
 
-    if (!response.ok) return null;
+    if (response.status === 401) {
+      return { value: null, blockedByLogin: true };
+    }
+
+    if (!response.ok) {
+      return { value: null, blockedByLogin: false };
+    }
 
     const data = await response.json();
-    return data?.success && typeof data.value === 'string' ? data.value : null;
+    return {
+      value: data?.success && typeof data.value === 'string' ? data.value : null,
+      blockedByLogin: false,
+    };
   } catch (error) {
     console.warn(`[持久化] 读取本地文件备份失败: ${key}`, error);
-    return null;
+    return { value: null, blockedByLogin: false };
   }
 }
 
@@ -309,8 +320,14 @@ export function usePersistentState<T>(
 
     const hydrate = async () => {
       try {
+        const backupResult = await restoreStateFromServer(key);
+        if (backupResult.blockedByLogin) {
+          persistenceDebugLog(`[持久化] 未登录，跳过状态恢复: ${key}`);
+          return;
+        }
+
         const item = window.localStorage.getItem(key);
-        const backup = await restoreStateFromServer(key);
+        const backup = backupResult.value;
         const serialized = backup || item;
 
         if (serialized) {
@@ -344,7 +361,8 @@ export function usePersistentState<T>(
       } catch (error) {
         console.error(`[持久化] 读取失败: ${key}`, error);
 
-        const backup = await restoreStateFromServer(key);
+        const backupResult = await restoreStateFromServer(key);
+        const backup = backupResult.blockedByLogin ? null : backupResult.value;
         if (backup) {
           try {
             const decompressed = decompressData(backup);

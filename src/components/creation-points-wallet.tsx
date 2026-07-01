@@ -196,6 +196,7 @@ export function CreationPointsWallet() {
       setOpen(true);
       window.dispatchEvent(new CustomEvent('manfei:wallet-updated'));
       toast.success('账号登录成功');
+      window.setTimeout(() => window.location.reload(), 500);
     } catch (loginError) {
       toast.error(loginError instanceof Error ? loginError.message : '登录失败');
     } finally {
@@ -208,6 +209,7 @@ export function CreationPointsWallet() {
       await fetch('/api/auth/logout', { method: 'POST' });
       await loadWallet(true);
       toast.success('已退出账号');
+      window.setTimeout(() => window.location.reload(), 500);
     } catch {
       toast.error('退出登录失败');
     }
