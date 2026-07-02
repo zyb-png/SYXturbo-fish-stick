@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { type FormEvent, useCallback, useEffect, useState } from 'react';
 import { Coins, Gift, KeyRound, Loader2, LogOut, QrCode, RefreshCw, Snowflake, TrendingDown, WalletCards } from 'lucide-react';
 import { toast } from 'sonner';
 import { Badge } from '@/components/ui/badge';
@@ -183,7 +183,10 @@ export function CreationPointsWallet() {
     .slice(0, 12) || [];
   const blackGoldButtonClass = 'gap-2 border border-amber-400/45 bg-[#0b0905] text-amber-100 shadow-[0_0_16px_rgba(245,158,11,0.18)] hover:bg-amber-500/15 hover:text-amber-50 disabled:border-amber-400/20 disabled:bg-black/30 disabled:text-amber-100/35';
 
-  const handleLogin = async () => {
+  const handleLogin = async (event?: FormEvent<HTMLFormElement>) => {
+    event?.preventDefault();
+    if (loginLoading || !loginForm.username || !loginForm.password) return;
+
     setLoginLoading(true);
     try {
       const response = await fetch('/api/auth/login', {
@@ -203,9 +206,9 @@ export function CreationPointsWallet() {
       setLoginForm({ username: '', password: '' });
       setLoginOpen(false);
       setOpen(true);
+      await loadWallet(true);
       window.dispatchEvent(new CustomEvent('manfei:wallet-updated'));
       toast.success('账号登录成功');
-      window.setTimeout(() => window.location.reload(), 500);
     } catch (loginError) {
       toast.error(loginError instanceof Error ? loginError.message : '登录失败');
     } finally {
@@ -542,16 +545,14 @@ export function CreationPointsWallet() {
               输入后台录入的账号和密码，登录后创作点会实时同步。新账号首次登录赠送 500 创作点。
             </DialogDescription>
           </DialogHeader>
-          <div className="space-y-3">
+          <form className="space-y-3" onSubmit={(event) => void handleLogin(event)}>
             <div className="space-y-2">
               <Label htmlFor="wallet-login-username" className="text-amber-100/80">账号</Label>
               <Input
                 id="wallet-login-username"
                 value={loginForm.username}
                 onChange={(event) => setLoginForm((current) => ({ ...current, username: event.target.value }))}
-                onKeyDown={(event) => {
-                  if (event.key === 'Enter' && loginForm.username && loginForm.password) void handleLogin();
-                }}
+                autoComplete="username"
                 className="border-amber-400/30 bg-black/35 text-amber-50"
               />
             </div>
@@ -561,21 +562,19 @@ export function CreationPointsWallet() {
                 id="wallet-login-password"
                 value={loginForm.password}
                 onChange={(event) => setLoginForm((current) => ({ ...current, password: event.target.value }))}
-                onKeyDown={(event) => {
-                  if (event.key === 'Enter' && loginForm.username && loginForm.password) void handleLogin();
-                }}
+                autoComplete="current-password"
                 className="border-amber-400/30 bg-black/35 text-amber-50"
               />
             </div>
             <Button
+              type="submit"
               className={`w-full ${blackGoldButtonClass}`}
-              onClick={() => void handleLogin()}
               disabled={loginLoading || !loginForm.username || !loginForm.password}
             >
               {loginLoading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <KeyRound className="mr-2 h-4 w-4" />}
               登录
             </Button>
-          </div>
+          </form>
         </DialogContent>
       </Dialog>
     </div>
