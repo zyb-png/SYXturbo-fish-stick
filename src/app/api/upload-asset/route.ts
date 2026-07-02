@@ -3,6 +3,8 @@ import { S3Storage } from 'coze-coding-dev-sdk';
 import fs from 'fs';
 import path from 'path';
 import { requireUserLoginResponse } from '@/lib/auth-guard';
+import { getAccountAssetsPath, getAccountRemoteKey } from '@/lib/account-assets';
+import type { PublicAccount } from '@/lib/account-store';
 
 // 图片数量限制
 const MAX_IMAGES_PER_ASSET = 10;
@@ -57,7 +59,7 @@ export async function POST(request: NextRequest) {
     // 保存文件。优先保存本地，配置了对象存储时再同步上传。
     const fileBuffer = Buffer.from(await file.arrayBuffer());
     const ext = file.name.split('.').pop() || 'png';
-    const localResult = await saveUploadedAssetToLocal(type, name || file.name, fileBuffer, file.name);
+    const localResult = await saveUploadedAssetToLocal(auth.account, type, name || file.name, fileBuffer, file.name);
 
     let imageUrl = localResult.localUrl;
     let imageKey = localResult.fileName;
@@ -72,7 +74,7 @@ export async function POST(request: NextRequest) {
           region: "cn-beijing",
         });
 
-        const fileName = `assets/${type}/custom_${id}_${Date.now()}.${ext}`;
+        const fileName = getAccountRemoteKey(auth.account, `assets/${type}/custom_${id}_${Date.now()}.${ext}`);
         imageKey = await storage.uploadFile({
           fileContent: fileBuffer,
           fileName,
@@ -108,21 +110,9 @@ export async function POST(request: NextRequest) {
 }
 
 // 保存上传的素材到本地文件夹
-async function saveUploadedAssetToLocal(type: string, name: string, buffer: Buffer, originalFileName: string): Promise<{ fileName: string; localUrl: string }> {
-  // 读取配置
-  const configPath = path.join(process.cwd(), 'assets-config.json');
-  let assetsPath = path.join(process.cwd(), 'assets');
-  
-  try {
-    if (fs.existsSync(configPath)) {
-      const configData = fs.readFileSync(configPath, 'utf-8');
-      const config = JSON.parse(configData);
-      assetsPath = config.assetsPath || assetsPath;
-    }
-  } catch (e) {
-    console.log('读取资产配置失败，使用默认路径');
-  }
-  
+async function saveUploadedAssetToLocal(account: PublicAccount, type: string, name: string, buffer: Buffer, originalFileName: string): Promise<{ fileName: string; localUrl: string }> {
+  const assetsPath = getAccountAssetsPath(account);
+
   // 文件夹映射
   const folderMap: Record<string, string> = {
     scene: '场景图片',

@@ -7,6 +7,12 @@ import {
   getAssetStorageConfigSync,
   getManfeiConfigSync,
 } from './app-settings';
+import {
+  getAccountAssetsPath,
+  getAccountProjectStateDir,
+  getAccountRemoteKey,
+} from './account-assets';
+import type { PublicAccount } from './account-store';
 
 type ManfeiAssetCacheRecord = {
   assetId: string;
@@ -40,33 +46,13 @@ const ASSET_STATUS_POLL_MS = 2_000;
 const inFlightAssets = new Map<string, Promise<string>>();
 let cacheWriteQueue = Promise.resolve();
 
-function readAssetsPath(): string {
-  const configPath = path.join(process.cwd(), 'assets-config.json');
-  let assetsPath = path.join(process.cwd(), 'assets');
-
-  try {
-    if (fs.existsSync(configPath)) {
-      const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
-      if (typeof config.assetsPath === 'string' && config.assetsPath.trim()) {
-        assetsPath = path.isAbsolute(config.assetsPath)
-          ? config.assetsPath
-          : path.join(process.cwd(), config.assetsPath);
-      }
-    }
-  } catch (error) {
-    console.warn('[manfei] 读取资产路径失败，使用默认路径:', error);
-  }
-
-  return assetsPath;
+function getCachePath(account: Pick<PublicAccount, 'id'>): string {
+  return path.join(getAccountProjectStateDir(account), 'manfei-assets.json');
 }
 
-function getCachePath(): string {
-  return path.join(readAssetsPath(), 'project-state', 'manfei-assets.json');
-}
-
-async function readCache(): Promise<ManfeiAssetCache> {
+async function readCache(account: Pick<PublicAccount, 'id'>): Promise<ManfeiAssetCache> {
   try {
-    const parsed = JSON.parse(await fsp.readFile(getCachePath(), 'utf-8'));
+    const parsed = JSON.parse(await fsp.readFile(getCachePath(account), 'utf-8'));
     return {
       version: 1,
       records: parsed?.records && typeof parsed.records === 'object' ? parsed.records : {},
@@ -76,11 +62,11 @@ async function readCache(): Promise<ManfeiAssetCache> {
   }
 }
 
-async function updateCache(hash: string, record: ManfeiAssetCacheRecord): Promise<void> {
+async function updateCache(account: Pick<PublicAccount, 'id'>, hash: string, record: ManfeiAssetCacheRecord): Promise<void> {
   const run = cacheWriteQueue.then(async () => {
-    const cache = await readCache();
+    const cache = await readCache(account);
     cache.records[hash] = record;
-    const cachePath = getCachePath();
+    const cachePath = getCachePath(account);
     await fsp.mkdir(path.dirname(cachePath), { recursive: true });
     await fsp.writeFile(cachePath, `${JSON.stringify(cache, null, 2)}\n`, 'utf-8');
   });
@@ -107,7 +93,7 @@ function getFileExtension(contentType: string): string {
   return '.png';
 }
 
-function resolveLocalAssetPath(url: string): { filePath: string; contentType: string } | null {
+function resolveLocalAssetPath(account: Pick<PublicAccount, 'id'>, url: string): { filePath: string; contentType: string } | null {
   const parsed = new URL(url, 'http://localhost');
   if (parsed.pathname !== '/api/assets-view') return null;
 
@@ -118,7 +104,7 @@ function resolveLocalAssetPath(url: string): { filePath: string; contentType: st
   const safeFolder = path.basename(folder);
   const safeFilename = path.basename(filename);
   return {
-    filePath: path.join(readAssetsPath(), safeFolder, safeFilename),
+    filePath: path.join(getAccountAssetsPath(account), safeFolder, safeFilename),
     contentType: getContentType(safeFilename),
   };
 }
@@ -142,7 +128,7 @@ function isPublicHttpUrl(url: string): boolean {
   }
 }
 
-async function loadImageSource(url: string): Promise<{
+async function loadImageSource(account: Pick<PublicAccount, 'id'>, url: string): Promise<{
   buffer?: Buffer;
   contentType?: string;
   publicUrl?: string;
@@ -161,7 +147,7 @@ async function loadImageSource(url: string): Promise<{
     };
   }
 
-  const localAsset = resolveLocalAssetPath(url);
+  const localAsset = resolveLocalAssetPath(account, url);
   if (!localAsset || !fs.existsSync(localAsset.filePath)) {
     throw new Error(`无法读取本地素材：${url}`);
   }
@@ -181,6 +167,7 @@ function normalizeTosEndpoint(endpointUrl: string): string {
 }
 
 async function uploadToPublicStorage(
+  account: Pick<PublicAccount, 'id'>,
   buffer: Buffer,
   contentType: string,
   hash: string,
@@ -196,7 +183,7 @@ async function uploadToPublicStorage(
     throw new Error('本地图片需要先上传到火山 TOS。素材存储未配置，请联系管理员');
   }
 
-  const key = `manfei-assets/${hash}${getFileExtension(contentType)}`;
+  const key = getAccountRemoteKey(account, `manfei-assets/${hash}${getFileExtension(contentType)}`);
   const client = new TosClient({
     accessKeyId: config.accessKeyId,
     accessKeySecret: config.secretAccessKey,
@@ -279,8 +266,8 @@ async function createAsset(publicUrl: string): Promise<string> {
   return assetId;
 }
 
-export async function prepareManfeiImageAsset(url: string): Promise<string> {
-  const source = await loadImageSource(url);
+export async function prepareManfeiImageAsset(url: string, account: Pick<PublicAccount, 'id'>): Promise<string> {
+  const source = await loadImageSource(account, url);
   let hash: string;
 
   if (source.buffer) {
@@ -289,11 +276,12 @@ export async function prepareManfeiImageAsset(url: string): Promise<string> {
     hash = crypto.createHash('sha256').update(source.publicUrl || url).digest('hex');
   }
 
-  const existingPromise = inFlightAssets.get(hash);
+  const inFlightKey = `${account.id}:${hash}`;
+  const existingPromise = inFlightAssets.get(inFlightKey);
   if (existingPromise) return existingPromise;
 
   const promise = (async () => {
-    const cache = await readCache();
+    const cache = await readCache(account);
     const cached = cache.records[hash];
     if (cached?.assetId && cached.status === 'Active') {
       return cached.assetId;
@@ -302,13 +290,14 @@ export async function prepareManfeiImageAsset(url: string): Promise<string> {
     const uploaded = source.publicUrl
       ? { publicUrl: source.publicUrl, objectKey: undefined }
       : await uploadToPublicStorage(
+        account,
         source.buffer as Buffer,
         source.contentType || 'image/png',
         hash,
       );
     const publicUrl = uploaded.publicUrl;
     const assetId = await createAsset(publicUrl);
-    await updateCache(hash, {
+    await updateCache(account, hash, {
       assetId,
       objectKey: uploaded.objectKey,
       status: 'Active',
@@ -317,15 +306,15 @@ export async function prepareManfeiImageAsset(url: string): Promise<string> {
     return assetId;
   })();
 
-  inFlightAssets.set(hash, promise);
+  inFlightAssets.set(inFlightKey, promise);
   try {
     return await promise;
   } finally {
-    inFlightAssets.delete(hash);
+    inFlightAssets.delete(inFlightKey);
   }
 }
 
-export async function prepareManfeiImageAssets(urls: string[], concurrency = 4): Promise<string[]> {
+export async function prepareManfeiImageAssets(urls: string[], account: Pick<PublicAccount, 'id'>, concurrency = 4): Promise<string[]> {
   const uniqueUrls = Array.from(new Set(urls.filter(Boolean))).slice(0, 9);
   const results = new Array<string>(uniqueUrls.length);
   let cursor = 0;
@@ -333,7 +322,7 @@ export async function prepareManfeiImageAssets(urls: string[], concurrency = 4):
   const workers = Array.from({ length: Math.min(concurrency, uniqueUrls.length) }, async () => {
     while (cursor < uniqueUrls.length) {
       const index = cursor++;
-      results[index] = await prepareManfeiImageAsset(uniqueUrls[index]);
+      results[index] = await prepareManfeiImageAsset(uniqueUrls[index], account);
     }
   });
 

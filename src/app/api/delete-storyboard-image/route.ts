@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { S3Storage, HeaderUtils } from 'coze-coding-dev-sdk';
+import { S3Storage } from 'coze-coding-dev-sdk';
 import { requireUserLoginResponse } from '@/lib/auth-guard';
+import { isAccountRemoteKey } from '@/lib/account-assets';
 
 export async function POST(request: NextRequest) {
   const auth = await requireUserLoginResponse();
@@ -16,8 +17,14 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    if (!isAccountRemoteKey(auth.account, imageKey)) {
+      return NextResponse.json(
+        { error: '无权删除该分镜图片' },
+        { status: 403 }
+      );
+    }
+
     // 初始化存储
-    const customHeaders = HeaderUtils.extractForwardHeaders(request.headers);
     const storage = new S3Storage({
       endpointUrl: process.env.COZE_BUCKET_ENDPOINT_URL,
       accessKey: "",

@@ -8,6 +8,10 @@ import {
   getAssetStorageConfigSync,
   getManfeiConfigSync,
 } from '@/lib/app-settings';
+import {
+  getAccountProjectStateDir,
+  getAccountRemoteKey,
+} from '@/lib/account-assets';
 import { settleManfeiVideoCreationPointsByTaskId } from '@/lib/manfei-billing';
 import { getCurrentUserAccount } from '@/lib/account-store';
 import {
@@ -46,24 +50,8 @@ function getHandcraftPath(request: NextRequest): string {
     : pathname;
 }
 
-function readAssetsPath(): string {
-  const fallback = path.join(process.cwd(), 'assets');
-  const configPath = path.join(process.cwd(), 'assets-config.json');
-
-  try {
-    if (!fs.existsSync(configPath)) return fallback;
-    const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
-    const configured = typeof config.assetsPath === 'string' ? config.assetsPath.trim() : '';
-    if (!configured) return fallback;
-    return path.isAbsolute(configured) ? configured : path.join(process.cwd(), configured);
-  } catch (error) {
-    console.warn('[handcraft] 读取资产配置失败，使用默认目录:', error);
-    return fallback;
-  }
-}
-
-function getAppStatePath(): string {
-  return path.join(readAssetsPath(), 'project-state', APP_STATE_FILE);
+function getAppStatePath(account: NonNullable<Awaited<ReturnType<typeof getCurrentUserAccount>>>): string {
+  return path.join(getAccountProjectStateDir(account), APP_STATE_FILE);
 }
 
 function normalizeTosEndpoint(endpointUrl: string): string {
@@ -74,7 +62,10 @@ function normalizeTosEndpoint(endpointUrl: string): string {
   }
 }
 
-function buildObjectKey(filename: string): string {
+function buildObjectKey(
+  account: NonNullable<Awaited<ReturnType<typeof getCurrentUserAccount>>>,
+  filename: string
+): string {
   const ext = path.extname(filename).toLowerCase();
   const safeBase = path.basename(filename, ext)
     .replace(/[^\w.-]+/g, '-')
@@ -82,7 +73,7 @@ function buildObjectKey(filename: string): string {
     .slice(0, 64) || 'file';
   const stamp = new Date().toISOString().replace(/[-:TZ.]/g, '').slice(0, 14);
   const random = crypto.randomBytes(4).toString('hex');
-  return `${TOS_UPLOAD_PREFIX}/${stamp}_${random}_${safeBase}${ext}`;
+  return getAccountRemoteKey(account, `${TOS_UPLOAD_PREFIX}/${stamp}_${random}_${safeBase}${ext}`);
 }
 
 function parseJson(text: string): JsonRecord {
@@ -219,7 +210,14 @@ async function handleUsage(request: NextRequest): Promise<NextResponse> {
 }
 
 async function handleAppState(request: NextRequest): Promise<NextResponse> {
-  const appStatePath = getAppStatePath();
+  const account = await getCurrentUserAccount();
+  if (!account) return json({
+    success: false,
+    error: '请先登录账号后再使用该功能',
+    code: 'LOGIN_REQUIRED',
+  }, 401);
+
+  const appStatePath = getAppStatePath(account);
   if (request.method === 'GET') {
     try {
       const value = JSON.parse(await fsp.readFile(appStatePath, 'utf-8'));
@@ -254,6 +252,12 @@ async function handleUploadObject(request: NextRequest): Promise<NextResponse> {
   if (request.method !== 'POST') return json({ error: 'Method not allowed' }, 405);
   const loginResponse = await requireUserLogin();
   if (loginResponse) return loginResponse;
+  const account = await getCurrentUserAccount();
+  if (!account) return json({
+    success: false,
+    error: '请先登录账号后再使用该功能',
+    code: 'LOGIN_REQUIRED',
+  }, 401);
 
   const config = getAssetStorageConfigSync();
   const bucket = config.accessPointAlias || config.bucketName;
@@ -277,7 +281,7 @@ async function handleUploadObject(request: NextRequest): Promise<NextResponse> {
     return json({ error: '文件超过 64MB，请改用公网 URL 或更大的上传通道' }, 400);
   }
 
-  const key = buildObjectKey(filename);
+  const key = buildObjectKey(account, filename);
   const client = new TosClient({
     accessKeyId: config.accessKeyId,
     accessKeySecret: config.secretAccessKey,

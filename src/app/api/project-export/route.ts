@@ -3,6 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import archiver from 'archiver';
 import { requireUserLoginResponse } from '@/lib/auth-guard';
+import { getAccountAssetsPath } from '@/lib/account-assets';
 
 // 项目版本号
 const PROJECT_VERSION = '1.0.0';
@@ -15,15 +16,8 @@ export async function GET(request: NextRequest) {
     const { searchParams } = new URL(request.url);
     const projectName = searchParams.get('name') || 'storyboard-project';
 
-    // 读取项目配置
     const configPath = path.join(process.cwd(), 'assets-config.json');
-    let assetsPath = path.join(process.cwd(), 'assets');
-    
-    if (fs.existsSync(configPath)) {
-      const configData = fs.readFileSync(configPath, 'utf-8');
-      const config = JSON.parse(configData);
-      assetsPath = config.assetsPath || assetsPath;
-    }
+    const assetsPath = getAccountAssetsPath(auth.account);
 
     // 创建 zip 流
     const chunks: Buffer[] = [];

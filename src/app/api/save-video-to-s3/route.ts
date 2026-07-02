@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { S3Storage } from 'coze-coding-dev-sdk';
 import { requireUserLoginResponse } from '@/lib/auth-guard';
+import { getAccountRemoteKey } from '@/lib/account-assets';
 
 // 保存视频到 S3
 export async function POST(request: NextRequest) {
@@ -29,13 +30,22 @@ export async function POST(request: NextRequest) {
       region: "cn-beijing",
     });
 
-    // 使用 uploadFromUrl 从 URL 下载并上传到 S3
-    // 生成文件名: 章节X_镜头Y_序号Z.扩展名
-    const fileName = `assets/videos/章节${chapterNumber}_镜头${shotNumber}_${videoIndex + 1}.mp4`;
-    
-    const key = await storage.uploadFromUrl({
-      url: videoUrl,
-      timeout: 120000, // 2分钟超时
+    const response = await fetch(videoUrl);
+    if (!response.ok) {
+      throw new Error(`下载视频失败：HTTP ${response.status}`);
+    }
+
+    const videoBuffer = Buffer.from(await response.arrayBuffer());
+    const contentType = response.headers.get('content-type') || 'video/mp4';
+    const fileName = getAccountRemoteKey(
+      auth.account,
+      `assets/videos/章节${chapterNumber || '未知'}_镜头${shotNumber || '未知'}_${Number(videoIndex || 0) + 1}_${Date.now()}.mp4`
+    );
+
+    const key = await storage.uploadFile({
+      fileContent: videoBuffer,
+      fileName,
+      contentType,
     });
 
     console.log(`视频已保存到 S3: ${key}`);

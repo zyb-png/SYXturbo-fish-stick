@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import fs from 'fs';
 import path from 'path';
 import { requireUserLoginResponse } from '@/lib/auth-guard';
+import { getAccountAssetsPath } from '@/lib/account-assets';
 
 // 文件夹映射
 const FOLDER_MAP: Record<string, string> = {
@@ -21,19 +22,7 @@ export async function GET(request: NextRequest) {
     const { searchParams } = new URL(request.url);
     const type = searchParams.get('type'); // scenes, characters, props, storyboards, videos
     
-    // 读取配置
-    const configPath = path.join(process.cwd(), 'assets-config.json');
-    let assetsPath = path.join(process.cwd(), 'assets');
-    
-    try {
-      if (fs.existsSync(configPath)) {
-        const configData = fs.readFileSync(configPath, 'utf-8');
-        const config = JSON.parse(configData);
-        assetsPath = config.assetsPath || assetsPath;
-      }
-    } catch (e) {
-      console.log('读取资产配置失败，使用默认路径');
-    }
+    const assetsPath = getAccountAssetsPath(auth.account);
     
     // 恢复素材图片（场景、人物、道具）
     if (type === 'assets') {

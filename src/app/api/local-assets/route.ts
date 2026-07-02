@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import fs from 'fs';
 import path from 'path';
 import { requireUserLoginResponse } from '@/lib/auth-guard';
+import { getAccountAssetsPath } from '@/lib/account-assets';
 
 // 资产类型映射 - 键名改为复数形式以匹配前端
 const ASSET_FOLDERS: Record<string, string> = {
@@ -39,15 +40,7 @@ export async function POST(request: NextRequest) {
     // 转换单数形式为复数形式
     const pluralType = SINGULAR_TO_PLURAL[type] || type;
     
-    // 读取配置
-    const configPath = path.join(process.cwd(), 'assets-config.json');
-    let assetsPath = path.join(process.cwd(), 'assets');
-    
-    if (fs.existsSync(configPath)) {
-      const configData = fs.readFileSync(configPath, 'utf-8');
-      const config = JSON.parse(configData);
-      assetsPath = config.assetsPath || assetsPath;
-    }
+    const assetsPath = getAccountAssetsPath(auth.account);
     
     // 获取文件夹名称
     const folderName = ASSET_FOLDERS[pluralType] || '其他';
@@ -124,15 +117,7 @@ export async function GET(request: NextRequest) {
     const { searchParams } = new URL(request.url);
     const type = searchParams.get('type');
     
-    // 读取配置
-    const configPath = path.join(process.cwd(), 'assets-config.json');
-    let assetsPath = path.join(process.cwd(), 'assets');
-    
-    if (fs.existsSync(configPath)) {
-      const configData = fs.readFileSync(configPath, 'utf-8');
-      const config = JSON.parse(configData);
-      assetsPath = config.assetsPath || assetsPath;
-    }
+    const assetsPath = getAccountAssetsPath(auth.account);
     
     const result: Record<string, Array<{ name: string; path: string; size: number; time: Date }>> = {};
     
@@ -183,14 +168,16 @@ export async function DELETE(request: NextRequest) {
   try {
     const { filePath } = await request.json();
     
-    if (!filePath || !fs.existsSync(filePath)) {
+    const assetsPath = path.resolve(getAccountAssetsPath(auth.account));
+    const targetPath = typeof filePath === 'string' ? path.resolve(filePath) : '';
+    if (!targetPath || !targetPath.startsWith(`${assetsPath}${path.sep}`) || !fs.existsSync(targetPath)) {
       return NextResponse.json({
         success: false,
         error: '文件不存在',
       }, { status: 404 });
     }
     
-    fs.unlinkSync(filePath);
+    fs.unlinkSync(targetPath);
     
     return NextResponse.json({
       success: true,

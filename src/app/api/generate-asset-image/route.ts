@@ -11,6 +11,8 @@ import {
   InsufficientCreationPointsError,
 } from '@/lib/creation-points';
 import { calculateImageCreationPoints } from '@/lib/provider-pricing';
+import { getAccountAssetsPath, getAccountRemoteKey } from '@/lib/account-assets';
+import type { PublicAccount } from '@/lib/account-store';
 
 // 图片数量限制
 const MAX_IMAGES_PER_ASSET = 10;
@@ -320,7 +322,7 @@ export async function POST(request: NextRequest) {
     }
     const imageBuffer = Buffer.from(await imageResponse.arrayBuffer());
     const outputName = assetImageName || (resolvedImageVariant === 'character-four-view' ? `${data.name || `asset-${data.id}`}的四视图` : (data.name || `asset-${data.id}`));
-    const localResult = await saveToLocalAssets(type, outputName, imageBuffer, lookId);
+    const localResult = await saveToLocalAssets(auth.account, type, outputName, imageBuffer, lookId);
 
     let storedImageUrl = localResult.localUrl;
     let imageKey = localResult.fileName;
@@ -336,7 +338,7 @@ export async function POST(request: NextRequest) {
           region: "cn-beijing",
         });
         const lookSuffix = lookId ? `_${lookId}` : '';
-        const fileName = `assets/${type}/${outputName || data.id}${lookSuffix}_${Date.now()}.png`;
+        const fileName = getAccountRemoteKey(auth.account, `assets/${type}/${outputName || data.id}${lookSuffix}_${Date.now()}.png`);
         imageKey = await storage.uploadFile({
           fileContent: imageBuffer,
           fileName,
@@ -521,10 +523,10 @@ function buildPrompt(type: string, data: any, lookId?: string, imageVariant?: st
 }
 
 // 保存图片到本地资产文件夹
-async function saveToLocalAssets(type: string, name: string, buffer: Buffer, lookId?: string) {
+async function saveToLocalAssets(account: PublicAccount, type: string, name: string, buffer: Buffer, lookId?: string) {
   const lookSuffix = lookId ? `_${lookId}` : '';
   const folderName = ASSET_FOLDERS[type] || '其他';
-  const assetsDir = path.join(getAssetsPath(), folderName);
+  const assetsDir = path.join(getAccountAssetsPath(account), folderName);
 
   // 确保目录存在
   if (!fs.existsSync(assetsDir)) {
@@ -542,21 +544,4 @@ async function saveToLocalAssets(type: string, name: string, buffer: Buffer, loo
     fileName,
     filePath,
   };
-}
-
-function getAssetsPath(): string {
-  const configPath = path.join(process.cwd(), 'assets-config.json');
-  let assetsPath = path.join(process.cwd(), 'assets');
-
-  try {
-    if (fs.existsSync(configPath)) {
-      const configData = fs.readFileSync(configPath, 'utf-8');
-      const config = JSON.parse(configData);
-      assetsPath = config.assetsPath || assetsPath;
-    }
-  } catch (error) {
-    console.warn('读取资产配置失败，使用默认 assets 目录:', error);
-  }
-
-  return assetsPath;
 }

@@ -1,52 +1,14 @@
 import { NextRequest, NextResponse } from 'next/server';
 import fs from 'fs';
 import path from 'path';
-import { S3Storage } from 'coze-coding-dev-sdk';
 import { requireUserLoginResponse } from '@/lib/auth-guard';
+import { getAccountAssetsPath, readAssetFoldersConfig } from '@/lib/account-assets';
+import type { PublicAccount } from '@/lib/account-store';
 
 /**
- * 清除 S3 和本地资产目录中的所有资产文件
- * 包括：场景图片、人物图片、道具图片、分镜图片、视频文件
+ * 清除当前账号本地资产目录中的资产文件。
+ * S3 旧前缀是全局共享的，不能在普通账号清除数据时批量删除。
  */
-
-const DEFAULT_ASSET_FOLDERS = {
-  scenes: '场景图片',
-  characters: '人物图片',
-  props: '道具图片',
-  storyboards: '分镜图片',
-  videos: '视频文件',
-};
-
-function readLocalAssetsConfig() {
-  const configPath = path.join(process.cwd(), 'assets-config.json');
-  const fallbackAssetsPath = path.join(process.cwd(), 'assets');
-  let assetsPath = fallbackAssetsPath;
-  let folders = DEFAULT_ASSET_FOLDERS;
-
-  try {
-    if (fs.existsSync(configPath)) {
-      const rawConfig = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
-      if (typeof rawConfig.assetsPath === 'string' && rawConfig.assetsPath.trim()) {
-        assetsPath = path.isAbsolute(rawConfig.assetsPath)
-          ? rawConfig.assetsPath
-          : path.join(process.cwd(), rawConfig.assetsPath);
-      }
-      if (rawConfig.folders && typeof rawConfig.folders === 'object') {
-        folders = {
-          ...DEFAULT_ASSET_FOLDERS,
-          ...rawConfig.folders,
-        };
-      }
-    }
-  } catch (error) {
-    console.warn('读取本地资产配置失败，使用默认 assets 目录:', error);
-  }
-
-  return {
-    assetsPath: path.resolve(assetsPath),
-    folders,
-  };
-}
 
 function countFilesRecursively(targetPath: string): number {
   if (!fs.existsSync(targetPath)) return 0;
@@ -59,8 +21,9 @@ function countFilesRecursively(targetPath: string): number {
   ), 0);
 }
 
-function clearLocalAssetFolders() {
-  const { assetsPath, folders } = readLocalAssetsConfig();
+function clearLocalAssetFolders(account: PublicAccount) {
+  const assetsPath = path.resolve(getAccountAssetsPath(account));
+  const folders = readAssetFoldersConfig();
   const deletedByFolder: Record<string, number> = {};
   let totalDeleted = 0;
 
@@ -113,7 +76,7 @@ export async function POST(request: NextRequest) {
   };
 
   try {
-    localDeleted = clearLocalAssetFolders();
+    localDeleted = clearLocalAssetFolders(auth.account);
   } catch (localError) {
     console.error('清除本地资产失败:', localError);
     return NextResponse.json({
@@ -121,64 +84,6 @@ export async function POST(request: NextRequest) {
       error: '清除本地资产失败，请稍后重试',
       details: localError instanceof Error ? localError.message : '未知错误',
     }, { status: 500 });
-  }
-
-  try {
-    if (process.env.COZE_BUCKET_ENDPOINT_URL && process.env.COZE_BUCKET_NAME) {
-      const storage = new S3Storage({
-        endpointUrl: process.env.COZE_BUCKET_ENDPOINT_URL,
-        accessKey: "",
-        secretKey: "",
-        bucketName: process.env.COZE_BUCKET_NAME,
-        region: "cn-beijing",
-      });
-
-      // 要清除的 S3 文件夹前缀
-      const prefixesToDelete = [
-        'assets/scene/',      // 场景图片
-        'assets/character/',  // 人物图片
-        'assets/prop/',       // 道具图片
-        'storyboards/',       // 分镜图片
-        'assets/video/',      // 视频文件
-        'assets/videos/',     // 兼容旧的视频文件前缀
-      ];
-
-      const deletedByType: Record<string, number> = {};
-      let totalDeleted = 0;
-
-      for (const prefix of prefixesToDelete) {
-        try {
-          // 列出该前缀下的所有文件
-          const result = await storage.listFiles({
-            prefix,
-            maxKeys: 1000,
-          });
-
-          if (result.keys && result.keys.length > 0) {
-            // 批量删除文件
-            for (const key of result.keys) {
-              try {
-                await storage.deleteFile({ fileKey: key });
-                totalDeleted++;
-              } catch (deleteError) {
-                console.warn(`删除文件失败: ${key}`, deleteError);
-              }
-            }
-            deletedByType[prefix] = result.keys.length;
-            console.log(`已删除 ${prefix} 下的 ${result.keys.length} 个文件`);
-          } else {
-            deletedByType[prefix] = 0;
-          }
-        } catch (listError) {
-          console.warn(`列出 ${prefix} 文件失败:`, listError);
-          deletedByType[prefix] = 0;
-        }
-      }
-
-      s3Deleted = { deletedByType, totalDeleted };
-    }
-  } catch (s3Error) {
-    console.warn('清除 S3 资产失败，已继续保留本地清除结果:', s3Error);
   }
 
   try {

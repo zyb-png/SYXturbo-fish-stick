@@ -3,6 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import AdmZip from 'adm-zip';
 import { requireUserLoginResponse } from '@/lib/auth-guard';
+import { getAccountAssetsPath } from '@/lib/account-assets';
 
 // 项目版本号
 const PROJECT_VERSION = '1.0.0';
@@ -57,15 +58,7 @@ export async function POST(request: NextRequest) {
       projectState = JSON.parse(stateEntry.getData().toString('utf8'));
     }
 
-    // 读取资产配置路径
-    const configPath = path.join(process.cwd(), 'assets-config.json');
-    let assetsPath = path.join(process.cwd(), 'assets');
-    
-    if (fs.existsSync(configPath)) {
-      const configData = fs.readFileSync(configPath, 'utf-8');
-      const config = JSON.parse(configData);
-      assetsPath = config.assetsPath || assetsPath;
-    }
+    const assetsPath = getAccountAssetsPath(auth.account);
 
     // 确保资产文件夹存在
     if (!fs.existsSync(assetsPath)) {
@@ -119,12 +112,6 @@ export async function POST(request: NextRequest) {
           }
         }
       }
-    }
-
-    // 恢复资产配置
-    const configEntry = zipEntries.find(e => e.entryName === 'config/assets-config.json');
-    if (configEntry) {
-      fs.writeFileSync(configPath, configEntry.getData().toString('utf8'));
     }
 
     return NextResponse.json({

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import fs from 'fs';
 import path from 'path';
 import { requireUserLoginResponse } from '@/lib/auth-guard';
+import { getAccountAssetsPath } from '@/lib/account-assets';
 
 // 获取资产文件列表
 export async function GET(request: NextRequest) {
@@ -12,19 +13,7 @@ export async function GET(request: NextRequest) {
     const { searchParams } = new URL(request.url);
     const folder = searchParams.get('folder') || '';
     
-    // 读取配置
-    const configPath = path.join(process.cwd(), 'assets-config.json');
-    let assetsPath = path.join(process.cwd(), 'assets');
-    
-    try {
-      if (fs.existsSync(configPath)) {
-        const configData = fs.readFileSync(configPath, 'utf-8');
-        const config = JSON.parse(configData);
-        assetsPath = config.assetsPath || assetsPath;
-      }
-    } catch (e) {
-      console.log('读取资产配置失败，使用默认路径');
-    }
+    const assetsPath = getAccountAssetsPath(auth.account);
     
     // 如果指定了文件夹，则列出该文件夹内容
     if (folder) {

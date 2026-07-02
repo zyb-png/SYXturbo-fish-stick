@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { S3Storage } from 'coze-coding-dev-sdk';
 import { requireUserLoginResponse } from '@/lib/auth-guard';
+import { getAccountRemotePrefix } from '@/lib/account-assets';
 
 // 文件夹映射
 const FOLDER_MAP: Record<string, { prefix: string; name: string }> = {
@@ -31,7 +32,7 @@ export async function GET(request: NextRequest) {
 
     // 如果指定了文件夹，则列出该文件夹内容
     if (folder && FOLDER_MAP[folder]) {
-      const prefix = FOLDER_MAP[folder].prefix;
+      const prefix = getAccountRemotePrefix(auth.account, FOLDER_MAP[folder].prefix);
       
       try {
         const result = await storage.listFiles({ 
@@ -87,7 +88,7 @@ export async function GET(request: NextRequest) {
     for (const [key, { prefix }] of Object.entries(FOLDER_MAP)) {
       try {
         const listResult = await storage.listFiles({ 
-          prefix, 
+          prefix: getAccountRemotePrefix(auth.account, prefix),
           maxKeys: 1000 
         });
         

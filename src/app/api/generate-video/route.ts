@@ -109,7 +109,7 @@ export async function POST(request: NextRequest) {
     creationPointTaskId = pointTask.taskId;
 
     console.log(`[manfei] 准备 ${imageUrls.length} 张参考图，模型 moon-manfei-new，分辨率 720p，比例 ${ratio}，时长 ${duration} 秒`);
-    const assetIds = await prepareManfeiImageAssets(imageUrls, 4);
+    const assetIds = await prepareManfeiImageAssets(imageUrls, auth.account, 4);
     const taskId = await createManfeiVideoTask({
       prompt,
       assetIds,

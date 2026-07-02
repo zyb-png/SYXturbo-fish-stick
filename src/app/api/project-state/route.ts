@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
-import fs from 'fs';
 import fsp from 'fs/promises';
 import path from 'path';
 import { requireUserLoginResponse } from '@/lib/auth-guard';
+import { getAccountProjectStateDir } from '@/lib/account-assets';
 
 type StateValues = Record<string, string>;
 
@@ -12,7 +12,6 @@ interface StateFile {
   values: StateValues;
 }
 
-const STATE_DIR_NAME = 'project-state';
 const STATE_FILE_NAME = 'storyboard_state.json';
 const PROTECTED_NON_EMPTY_KEYS = new Set([
   'storyboard_file_content',
@@ -39,29 +38,8 @@ function isAllowedKey(key: unknown): key is string {
   );
 }
 
-function resolveAssetsPath() {
-  const fallback = path.join(process.cwd(), 'assets');
-  const configPath = path.join(process.cwd(), 'assets-config.json');
-
-  try {
-    if (!fs.existsSync(configPath)) return fallback;
-
-    const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
-    const configuredPath = typeof config.assetsPath === 'string' && config.assetsPath.trim()
-      ? config.assetsPath.trim()
-      : fallback;
-
-    return path.isAbsolute(configuredPath)
-      ? configuredPath
-      : path.join(process.cwd(), configuredPath);
-  } catch (error) {
-    console.warn('[项目状态] 读取资产配置失败，使用默认 assets 目录:', error);
-    return fallback;
-  }
-}
-
-function getStatePath() {
-  const stateDir = path.join(resolveAssetsPath(), STATE_DIR_NAME);
+function getStatePath(accountId: string) {
+  const stateDir = getAccountProjectStateDir({ id: accountId });
   return {
     stateDir,
     stateFile: path.join(stateDir, STATE_FILE_NAME),
@@ -77,8 +55,8 @@ function hasExistingNonEmptyValue(value: string | undefined) {
   return typeof value === 'string' && !isRawEmptyValue(value) && value.length > 10;
 }
 
-async function readStateFile(): Promise<StateFile> {
-  const { stateFile } = getStatePath();
+async function readStateFile(accountId: string): Promise<StateFile> {
+  const { stateFile } = getStatePath(accountId);
 
   try {
     const raw = await fsp.readFile(stateFile, 'utf-8');
@@ -113,8 +91,8 @@ async function readStateFile(): Promise<StateFile> {
   }
 }
 
-async function writeStateFile(values: StateValues) {
-  const { stateDir, stateFile } = getStatePath();
+async function writeStateFile(accountId: string, values: StateValues) {
+  const { stateDir, stateFile } = getStatePath(accountId);
   const tempFile = `${stateFile}.${process.pid}.tmp`;
   await fsp.mkdir(stateDir, { recursive: true });
 
@@ -134,12 +112,12 @@ async function writeStateFile(values: StateValues) {
   }
 }
 
-function queueStateUpdate(update: (values: StateValues) => StateValues | void) {
+function queueStateUpdate(accountId: string, update: (values: StateValues) => StateValues | void) {
   const run = writeQueue.then(async () => {
-    const stateFile = await readStateFile();
+    const stateFile = await readStateFile(accountId);
     const nextValues = { ...stateFile.values };
     const updateResult = update(nextValues);
-    await writeStateFile(updateResult || nextValues);
+    await writeStateFile(accountId, updateResult || nextValues);
   });
 
   writeQueue = run.catch(() => undefined);
@@ -149,11 +127,12 @@ function queueStateUpdate(update: (values: StateValues) => StateValues | void) {
 export async function GET(request: NextRequest) {
   const auth = await requireUserLoginResponse();
   if (auth.response) return auth.response;
+  const accountId = auth.account.id;
 
   try {
     const { searchParams } = new URL(request.url);
     const key = searchParams.get('key');
-    const stateFile = await readStateFile();
+    const stateFile = await readStateFile(accountId);
 
     if (key) {
       if (!isAllowedKey(key)) {
@@ -192,6 +171,7 @@ export async function GET(request: NextRequest) {
 export async function POST(request: NextRequest) {
   const auth = await requireUserLoginResponse();
   if (auth.response) return auth.response;
+  const accountId = auth.account.id;
 
   try {
     const body = await request.json();
@@ -204,7 +184,7 @@ export async function POST(request: NextRequest) {
         return acc;
       }, {});
 
-      await queueStateUpdate((values) => ({
+      await queueStateUpdate(accountId, (values) => ({
         ...values,
         ...Object.fromEntries(
           Object.entries(incomingValues).filter(([key, value]) => {
@@ -242,7 +222,7 @@ export async function POST(request: NextRequest) {
       }, { status: 400 });
     }
 
-    await queueStateUpdate((values) => {
+    await queueStateUpdate(accountId, (values) => {
       if (
         PROTECTED_NON_EMPTY_KEYS.has(key) &&
         isRawEmptyValue(value) &&
@@ -272,6 +252,7 @@ export async function POST(request: NextRequest) {
 export async function DELETE(request: NextRequest) {
   const auth = await requireUserLoginResponse();
   if (auth.response) return auth.response;
+  const accountId = auth.account.id;
 
   try {
     const { searchParams } = new URL(request.url);
@@ -285,7 +266,7 @@ export async function DELETE(request: NextRequest) {
         }, { status: 400 });
       }
 
-      await queueStateUpdate((values) => {
+      await queueStateUpdate(accountId, (values) => {
         delete values[key];
       });
 
@@ -296,7 +277,7 @@ export async function DELETE(request: NextRequest) {
       });
     }
 
-    const { stateFile } = getStatePath();
+    const { stateFile } = getStatePath(accountId);
     await fsp.rm(stateFile, { force: true });
 
     return NextResponse.json({

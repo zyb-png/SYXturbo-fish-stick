@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { S3Storage } from 'coze-coding-dev-sdk';
 import { requireUserLoginResponse } from '@/lib/auth-guard';
+import { isAccountRemoteKey } from '@/lib/account-assets';
 
 // 获取 S3 对象的签名 URL
 export async function GET(request: NextRequest) {
@@ -15,6 +16,13 @@ export async function GET(request: NextRequest) {
       return NextResponse.json(
         { error: '缺少 key 参数' },
         { status: 400 }
+      );
+    }
+
+    if (!isAccountRemoteKey(auth.account, key)) {
+      return NextResponse.json(
+        { error: '无权访问该资产' },
+        { status: 403 }
       );
     }
     

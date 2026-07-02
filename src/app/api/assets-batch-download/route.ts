@@ -5,6 +5,7 @@ import path from 'path';
 import archiver from 'archiver';
 import { PassThrough, Readable } from 'stream';
 import { requireUserLoginResponse } from '@/lib/auth-guard';
+import { getAccountAssetsPath } from '@/lib/account-assets';
 
 export const runtime = 'nodejs';
 
@@ -17,27 +18,6 @@ const FOLDER_MAP: Record<string, string> = {
 };
 
 const MEDIA_FILE_PATTERN = /\.(png|jpe?g|gif|webp|mp4|webm|mov)$/i;
-
-function readAssetsPath() {
-  const configPath = path.join(process.cwd(), 'assets-config.json');
-  let assetsPath = path.join(process.cwd(), 'assets');
-
-  try {
-    if (fs.existsSync(configPath)) {
-      const configData = fs.readFileSync(configPath, 'utf-8');
-      const config = JSON.parse(configData);
-      if (typeof config.assetsPath === 'string' && config.assetsPath.trim()) {
-        assetsPath = path.isAbsolute(config.assetsPath)
-          ? config.assetsPath
-          : path.join(process.cwd(), config.assetsPath);
-      }
-    }
-  } catch (error) {
-    console.warn('读取资产配置失败，使用默认 assets 目录:', error);
-  }
-
-  return assetsPath;
-}
 
 function getUniqueFolderPath(parentDir: string, folderName: string) {
   let targetPath = path.join(parentDir, folderName);
@@ -80,7 +60,7 @@ export async function POST(request: NextRequest) {
       }, { status: 400 });
     }
 
-    const assetsPath = readAssetsPath();
+    const assetsPath = getAccountAssetsPath(auth.account);
     const sourceFolder = path.join(assetsPath, folderName);
 
     if (!fs.existsSync(sourceFolder)) {

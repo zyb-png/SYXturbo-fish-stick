@@ -6,6 +6,8 @@ const ESTIMATED_LOCAL_STORAGE_QUOTA = 5 * 1024 * 1024;
 const MAX_LOCAL_STORAGE_VALUE_SIZE = 200 * 1024;
 const SAVE_DEBOUNCE_MS = 2000;
 const PERSISTENCE_DEBUG = false;
+const ACTIVE_ACCOUNT_KEY = 'storyboard_active_account_id';
+const ACCOUNT_KEY_PREFIX = 'storyboard_account_';
 const PROTECTED_NON_EMPTY_KEYS = new Set<string>([
   'storyboard_file_content',
   'storyboard_scenes_data',
@@ -171,6 +173,44 @@ function isStoryboardStateKey(key: string): boolean {
   return key.startsWith('storyboard_');
 }
 
+function safeAccountKey(accountId: string): string {
+  return accountId.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 80) || 'account';
+}
+
+function getScopedStorageKey(key: string, accountId: string | null): string {
+  return accountId ? `${ACCOUNT_KEY_PREFIX}${safeAccountKey(accountId)}_${key}` : key;
+}
+
+function isScopedStoryboardStateKey(key: string): boolean {
+  return key.startsWith(ACCOUNT_KEY_PREFIX) || key.startsWith('storyboard_');
+}
+
+function isLegacyRawStoryboardStateKey(key: string): boolean {
+  return key.startsWith('storyboard_') &&
+    !key.startsWith(ACCOUNT_KEY_PREFIX) &&
+    key !== ACTIVE_ACCOUNT_KEY;
+}
+
+let accountIdPromise: Promise<string | null> | null = null;
+
+async function resolvePersistenceAccountId(): Promise<string | null> {
+  if (typeof window === 'undefined') return null;
+  if (!accountIdPromise) {
+    accountIdPromise = fetch('/api/creation-points', {
+      cache: 'no-store',
+      headers: { 'X-Skip-Login-Prompt': '1' },
+    })
+      .then(async (response) => {
+        if (!response.ok) return null;
+        const result = await response.json();
+        const accountId = typeof result?.account?.id === 'string' ? result.account.id : '';
+        return accountId || null;
+      })
+      .catch(() => null);
+  }
+  return accountIdPromise;
+}
+
 function isEmptyValue(value: unknown): boolean {
   if (Array.isArray(value)) return value.length === 0;
   if (value && typeof value === 'object') return Object.keys(value as Record<string, unknown>).length === 0;
@@ -310,6 +350,8 @@ export function usePersistentState<T>(
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingSaveRef = useRef<T | null>(null);
   const hasPendingSaveRef = useRef(false);
+  const accountIdRef = useRef<string | null>(null);
+  const scopedKeyRef = useRef(key);
 
   // 始终保持 ref 指向最新 state
   stateRef.current = state;
@@ -320,15 +362,28 @@ export function usePersistentState<T>(
 
     const hydrate = async () => {
       try {
+        const accountId = await resolvePersistenceAccountId();
+        accountIdRef.current = accountId;
+        scopedKeyRef.current = getScopedStorageKey(key, accountId);
+
+        if (!accountId) {
+          persistenceDebugLog(`[持久化] 未登录，跳过账号状态恢复: ${key}`);
+          return;
+        }
+
         const backupResult = await restoreStateFromServer(key);
         if (backupResult.blockedByLogin) {
           persistenceDebugLog(`[持久化] 未登录，跳过状态恢复: ${key}`);
           return;
         }
 
-        const item = window.localStorage.getItem(key);
+        window.localStorage.setItem(ACTIVE_ACCOUNT_KEY, accountId);
+
+        const scopedKey = scopedKeyRef.current;
+        const item = window.localStorage.getItem(scopedKey);
+        const legacyItem = item ? null : window.localStorage.getItem(key);
         const backup = backupResult.value;
-        const serialized = backup || item;
+        const serialized = backup || item || legacyItem;
 
         if (serialized) {
           const decompressed = decompressData(serialized);
@@ -338,16 +393,20 @@ export function usePersistentState<T>(
             try {
               const backupSize = new Blob([backup]).size;
               if (backupSize <= MAX_LOCAL_STORAGE_VALUE_SIZE && checkStorageSpace(backupSize)) {
-                window.localStorage.setItem(key, backup);
+                window.localStorage.setItem(scopedKey, backup);
               } else {
-                window.localStorage.removeItem(key);
+                window.localStorage.removeItem(scopedKey);
                 persistenceDebugLog(`[持久化] ${key} 已从本地文件恢复，跳过浏览器缓存 (${(backupSize / 1024).toFixed(2)} KB)`);
               }
             } catch (storageError) {
               console.warn(`[持久化] 浏览器存储空间不足，状态仅从本地文件恢复: ${key}`, storageError);
             }
-          } else if (item) {
-            backupStateToServer(key, item);
+          } else if (item || legacyItem) {
+            if (legacyItem) {
+              window.localStorage.setItem(scopedKey, legacyItem);
+              persistenceDebugLog(`[持久化] 已将旧浏览器缓存迁入当前账号: ${key}`);
+            }
+            backupStateToServer(key, item || legacyItem || '');
           }
 
           persistenceDebugLog(`[持久化] 从${backup ? '本地文件备份' : '浏览器'}恢复状态: ${key}`);
@@ -407,7 +466,13 @@ export function usePersistentState<T>(
         return;
       }
 
-      const existing = window.localStorage.getItem(key);
+      if (!accountIdRef.current) {
+        persistenceDebugLog(`[持久化] 跳过保存 ${key}: 未登录账号`);
+        return;
+      }
+
+      const scopedKey = scopedKeyRef.current;
+      const existing = window.localStorage.getItem(scopedKey);
       if (existing && existing.length > 10) {
         const isEmptyDefault = typeof value === 'object' && value !== null &&
           (value as Record<string, unknown>).constructor === Object &&
@@ -434,12 +499,12 @@ export function usePersistentState<T>(
 
       // 大状态只写入项目本地文件备份，避免浏览器 localStorage 5MB 配额被撑满。
       if (size > MAX_LOCAL_STORAGE_VALUE_SIZE || !checkStorageSpace(size)) {
-        window.localStorage.removeItem(key);
+        window.localStorage.removeItem(scopedKeyRef.current);
         persistenceDebugLog(`[持久化] ${key} 仅保存到项目本地文件备份，释放浏览器缓存 (${(size / 1024).toFixed(2)} KB)。`);
         return;
       }
 
-      window.localStorage.setItem(key, serialized);
+      window.localStorage.setItem(scopedKeyRef.current, serialized);
       persistenceDebugLog(`[持久化] 保存状态: ${key}, 大小: ${(size / 1024).toFixed(2)} KB`);
     } catch (error) {
       if (error instanceof DOMException && error.name === 'QuotaExceededError') {
@@ -495,7 +560,7 @@ export function usePersistentState<T>(
       }
       pendingSaveRef.current = null;
       hasPendingSaveRef.current = false;
-      window.localStorage.removeItem(key);
+      window.localStorage.removeItem(scopedKeyRef.current);
       deleteStateBackup(key);
       persistenceDebugLog(`[持久化] 清除状态: ${key}`);
     } catch (error) {
@@ -534,16 +599,21 @@ export function usePersistentStateManager() {
   const clearAll = useCallback(() => {
     if (typeof window === 'undefined') return;
 
+    const accountId = window.localStorage.getItem(ACTIVE_ACCOUNT_KEY);
+    const scopedPrefix = accountId ? `${ACCOUNT_KEY_PREFIX}${safeAccountKey(accountId)}_` : '';
     const keysToRemove: string[] = [];
     for (let i = 0; i < window.localStorage.length; i++) {
       const key = window.localStorage.key(i);
-      if (key?.startsWith('storyboard_')) {
+      if (!key) continue;
+      if (scopedPrefix) {
+        if (key.startsWith(scopedPrefix) || isLegacyRawStoryboardStateKey(key)) keysToRemove.push(key);
+      } else if (isLegacyRawStoryboardStateKey(key)) {
         keysToRemove.push(key);
       }
     }
     keysToRemove.forEach(key => window.localStorage.removeItem(key));
     deleteStateBackup();
-    console.log(`[持久化] 已清除所有状态，共 ${keysToRemove.length} 项`);
+    console.log(`[持久化] 已清除当前账号状态，共 ${keysToRemove.length} 项`);
   }, []);
 
   // 导出所有数据
@@ -551,13 +621,20 @@ export function usePersistentStateManager() {
     if (typeof window === 'undefined') return null;
 
     const data: Record<string, any> = {};
+    const accountId = window.localStorage.getItem(ACTIVE_ACCOUNT_KEY);
+    const scopedPrefix = accountId ? `${ACCOUNT_KEY_PREFIX}${safeAccountKey(accountId)}_` : '';
     for (let i = 0; i < window.localStorage.length; i++) {
       const key = window.localStorage.key(i);
-      if (key?.startsWith('storyboard_')) {
+      if (!key) continue;
+      const shouldExport = scopedPrefix
+        ? key.startsWith(scopedPrefix)
+        : key.startsWith('storyboard_') && !key.startsWith(ACCOUNT_KEY_PREFIX);
+      if (shouldExport) {
         try {
           const raw = window.localStorage.getItem(key);
           if (raw) {
-            data[key] = decompressData(raw);
+            const rawKey = scopedPrefix ? key.slice(scopedPrefix.length) : key;
+            data[rawKey] = decompressData(raw);
           }
         } catch (e) {
           // ignore
@@ -574,7 +651,8 @@ export function usePersistentStateManager() {
     Object.entries(data).forEach(([key, value]) => {
       if (key.startsWith('storyboard_')) {
         const serialized = typeof value === 'string' ? value : compressData(value);
-        window.localStorage.setItem(key, serialized);
+        const accountId = window.localStorage.getItem(ACTIVE_ACCOUNT_KEY);
+        window.localStorage.setItem(getScopedStorageKey(key, accountId), serialized);
         backupStateToServer(key, serialized);
       }
     });
@@ -606,7 +684,7 @@ export function usePersistentStateManager() {
       const size = value ? new Blob([value]).size : 0;
       result.totalSize += size;
 
-      const isStoryboardKey = key.startsWith('storyboard_');
+      const isStoryboardKey = isScopedStoryboardStateKey(key);
       if (isStoryboardKey) {
         result.storyboardKeys++;
       }

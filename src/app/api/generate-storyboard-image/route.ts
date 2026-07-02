@@ -10,6 +10,8 @@ import {
   InsufficientCreationPointsError,
 } from '@/lib/creation-points';
 import { calculateImageCreationPoints } from '@/lib/provider-pricing';
+import { getAccountAssetsPath, getAccountRemoteKey } from '@/lib/account-assets';
+import type { PublicAccount } from '@/lib/account-store';
 import fs from 'fs';
 import path from 'path';
 
@@ -118,7 +120,7 @@ function isLocalHostName(hostname: string): boolean {
   return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1';
 }
 
-function resolveLocalAssetFilePath(urlString: string): { filePath: string; contentType: string } | null {
+function resolveLocalAssetFilePath(account: PublicAccount, urlString: string): { filePath: string; contentType: string } | null {
   const url = new URL(urlString, 'http://localhost');
   if (url.pathname !== '/api/assets-view') return null;
 
@@ -129,12 +131,13 @@ function resolveLocalAssetFilePath(urlString: string): { filePath: string; conte
   const safeFolder = folder.replace(/\.\./g, '');
   const safeFilename = filename.replace(/\.\./g, '');
   return {
-    filePath: path.join(getAssetsPath(), safeFolder, safeFilename),
+    filePath: path.join(getAccountAssetsPath(account), safeFolder, safeFilename),
     contentType: getContentTypeFromFileName(safeFilename),
   };
 }
 
 async function readReferenceImage(
+  account: PublicAccount,
   imageUrl: string,
   request: NextRequest,
   index: number
@@ -152,7 +155,7 @@ async function readReferenceImage(
     };
   }
 
-  const localAsset = resolveLocalAssetFilePath(value);
+  const localAsset = resolveLocalAssetFilePath(account, value);
   if (localAsset) {
     const buffer = await fs.promises.readFile(localAsset.filePath);
     return {
@@ -227,7 +230,8 @@ async function normalizeReferenceImages(
   apiKey: string,
   endpoints: ReturnType<typeof buildRunningHubEndpoints>,
   referenceImages: unknown,
-  request: NextRequest
+  request: NextRequest,
+  account: PublicAccount
 ): Promise<string[]> {
   if (!Array.isArray(referenceImages)) return [];
 
@@ -246,7 +250,7 @@ async function normalizeReferenceImages(
         continue;
       }
 
-      const image = await readReferenceImage(imageUrl, request, index + 1);
+      const image = await readReferenceImage(account, imageUrl, request, index + 1);
       if (!image) continue;
 
       const uploadedUrl = await uploadReferenceImageToRunningHub(apiKey, endpoints, image);
@@ -480,7 +484,7 @@ async function runRunningHubImageToImage(
 /**
  * 保存图片。没有对象存储配置时保存到本地资产目录。
  */
-async function saveGeneratedImage(imageUrl: string): Promise<{ url: string; key: string }> {
+async function saveGeneratedImage(account: PublicAccount, imageUrl: string): Promise<{ url: string; key: string }> {
   const imageResponse = await fetch(imageUrl);
   if (!imageResponse.ok) {
     throw new Error(`下载图片失败: ${imageResponse.status}`);
@@ -495,7 +499,7 @@ async function saveGeneratedImage(imageUrl: string): Promise<{ url: string; key:
 
   if (process.env.COZE_BUCKET_ENDPOINT_URL && process.env.COZE_BUCKET_NAME) {
     try {
-      const key = `storyboard/${fileName}`;
+      const key = getAccountRemoteKey(account, `storyboards/${fileName}`);
       const storage = new S3Storage({
         endpointUrl: process.env.COZE_BUCKET_ENDPOINT_URL,
         accessKey: "",
@@ -515,7 +519,7 @@ async function saveGeneratedImage(imageUrl: string): Promise<{ url: string; key:
   }
 
   const folderName = '分镜图片';
-  const folderPath = path.join(getAssetsPath(), folderName);
+  const folderPath = path.join(getAccountAssetsPath(account), folderName);
   await fs.promises.mkdir(folderPath, { recursive: true });
   const filePath = path.join(folderPath, fileName);
   await fs.promises.writeFile(filePath, imageBuffer);
@@ -524,23 +528,6 @@ async function saveGeneratedImage(imageUrl: string): Promise<{ url: string; key:
     url: `/api/assets-view?folder=${encodeURIComponent(folderName)}&filename=${encodeURIComponent(fileName)}`,
     key: fileName,
   };
-}
-
-function getAssetsPath(): string {
-  const configPath = path.join(process.cwd(), 'assets-config.json');
-  let assetsPath = path.join(process.cwd(), 'assets');
-
-  try {
-    if (fs.existsSync(configPath)) {
-      const configData = fs.readFileSync(configPath, 'utf-8');
-      const config = JSON.parse(configData);
-      assetsPath = config.assetsPath || assetsPath;
-    }
-  } catch (error) {
-    console.warn('读取资产配置失败，使用默认 assets 目录:', error);
-  }
-
-  return assetsPath;
 }
 
 export async function POST(request: NextRequest) {
@@ -629,7 +616,7 @@ export async function POST(request: NextRequest) {
     let imageUrl: string;
     let imageModel = TEXT_TO_IMAGE_MODEL;
 
-    const normalizedReferenceImages = await normalizeReferenceImages(runninghubKey, runninghubEndpoints, referenceImages, request);
+    const normalizedReferenceImages = await normalizeReferenceImages(runninghubKey, runninghubEndpoints, referenceImages, request, auth.account);
 
     if (normalizedReferenceImages.length > 0) {
       console.log(`🖼️ 使用图生图模式（rhart-image-g-2-official/image-to-image），参考图数量: ${normalizedReferenceImages.length}，实际传入最多 ${STORYBOARD_REF_IMAGE_LIMIT} 张`);
@@ -652,7 +639,7 @@ export async function POST(request: NextRequest) {
 
     // 第三步：持久化保存
     console.log('💾 保存图片...');
-    const { url: signedUrl, key } = await saveGeneratedImage(imageUrl);
+    const { url: signedUrl, key } = await saveGeneratedImage(auth.account, imageUrl);
 
     console.log(`✅ 故事板图片生成成功: ${signedUrl?.substring(0, 60)}...`);
 

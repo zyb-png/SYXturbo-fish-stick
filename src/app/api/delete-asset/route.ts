@@ -1,8 +1,18 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { S3Storage, HeaderUtils } from 'coze-coding-dev-sdk';
+import { S3Storage } from 'coze-coding-dev-sdk';
 import fs from 'fs';
 import path from 'path';
 import { requireUserLoginResponse } from '@/lib/auth-guard';
+import { getAccountAssetsPath, isAccountRemoteKey, readAssetFoldersConfig } from '@/lib/account-assets';
+
+function resolveAccountAssetPath(assetsPath: string, folder: string, filename: string): string | null {
+  const root = path.resolve(assetsPath);
+  const safeFolder = path.basename(folder);
+  const safeFilename = path.basename(filename);
+  const filePath = path.resolve(root, safeFolder, safeFilename);
+  if (!filePath.startsWith(`${root}${path.sep}`)) return null;
+  return filePath;
+}
 
 export async function POST(request: NextRequest) {
   const auth = await requireUserLoginResponse();
@@ -10,20 +20,7 @@ export async function POST(request: NextRequest) {
 
   try {
     const { imageKey, imageUrl, folder } = await request.json();
-
-    // 读取配置
-    const configPath = path.join(process.cwd(), 'assets-config.json');
-    let assetsPath = path.join(process.cwd(), 'assets');
-    
-    try {
-      if (fs.existsSync(configPath)) {
-        const configData = fs.readFileSync(configPath, 'utf-8');
-        const config = JSON.parse(configData);
-        assetsPath = config.assetsPath || assetsPath;
-      }
-    } catch (e) {
-      console.log('读取资产配置失败，使用默认路径');
-    }
+    const assetsPath = getAccountAssetsPath(auth.account);
 
     // 优先删除本地文件
     if (imageUrl) {
@@ -34,11 +31,9 @@ export async function POST(request: NextRequest) {
         const filename = url.searchParams.get('filename');
         
         if (folderParam && filename) {
-          const safeFolder = folderParam.replace(/\.\./g, '');
-          const safeFilename = filename.replace(/\.\./g, '');
-          const filePath = path.join(assetsPath, safeFolder, safeFilename);
+          const filePath = resolveAccountAssetPath(assetsPath, folderParam, filename);
           
-          if (fs.existsSync(filePath)) {
+          if (filePath && fs.existsSync(filePath)) {
             fs.unlinkSync(filePath);
             console.log(`已删除本地文件: ${filePath}`);
             return NextResponse.json({
@@ -54,11 +49,9 @@ export async function POST(request: NextRequest) {
 
     // 如果提供了 folder 和 filename，直接删除
     if (folder && imageKey) {
-      const safeFolder = folder.replace(/\.\./g, '');
-      const safeFilename = imageKey.replace(/\.\./g, '');
-      const filePath = path.join(assetsPath, safeFolder, safeFilename);
+      const filePath = resolveAccountAssetPath(assetsPath, folder, imageKey);
       
-      if (fs.existsSync(filePath)) {
+      if (filePath && fs.existsSync(filePath)) {
         fs.unlinkSync(filePath);
         console.log(`已删除本地文件: ${filePath}`);
         return NextResponse.json({
@@ -68,10 +61,25 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    // 如果是 S3 文件（有 imageKey 且不是 restored- 开头）
-    if (imageKey && !imageKey.startsWith('restored-')) {
+    // 有些旧调用只传本地文件名不传分类；只在当前账号的标准资产分类里查找。
+    if (imageKey && !isAccountRemoteKey(auth.account, imageKey)) {
+      const folders = readAssetFoldersConfig();
+      for (const folderName of Object.values(folders)) {
+        const filePath = resolveAccountAssetPath(assetsPath, folderName, imageKey);
+        if (filePath && fs.existsSync(filePath)) {
+          fs.unlinkSync(filePath);
+          console.log(`已删除当前账号本地文件: ${filePath}`);
+          return NextResponse.json({
+            success: true,
+            message: '本地图片删除成功',
+          });
+        }
+      }
+    }
+
+    // 如果是当前账号的 S3 文件，才允许删除。
+    if (imageKey && isAccountRemoteKey(auth.account, imageKey)) {
       try {
-        const customHeaders = HeaderUtils.extractForwardHeaders(request.headers);
         const storage = new S3Storage({
           endpointUrl: process.env.COZE_BUCKET_ENDPOINT_URL,
           accessKey: "",
