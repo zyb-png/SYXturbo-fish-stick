@@ -274,6 +274,13 @@ function findAccountByLogin(state: AccountStoreState, username: string): Managed
   ));
 }
 
+function findAccountById(state: AccountStoreState, accountId: unknown): ManagedAccount {
+  const id = normalizeUsername(accountId);
+  const account = state.accounts.find((item) => item.id === id);
+  if (!account) throw new Error('账号不存在');
+  return account;
+}
+
 export async function createManagedAccount(input: {
   username: string;
   password: string;
@@ -308,6 +315,63 @@ export async function createManagedAccount(input: {
     };
     state.accounts.push(account);
     return publicAccount(account);
+  });
+}
+
+export async function setManagedAccountStatus(input: {
+  accountId: string;
+  status: 'active' | 'disabled';
+}): Promise<PublicAccount> {
+  return queueStoreMutation((state) => {
+    const account = findAccountById(state, input.accountId);
+    const nextStatus = input.status === 'disabled' ? 'disabled' : 'active';
+    const updatedAt = nowIso();
+    account.status = nextStatus;
+    account.updatedAt = updatedAt;
+    if (nextStatus === 'disabled') {
+      state.userSessions = state.userSessions.filter((session) => session.accountId !== account.id);
+    }
+    return publicAccount(account);
+  });
+}
+
+export async function renameManagedAccount(input: {
+  accountId: string;
+  name: string;
+}): Promise<PublicAccount> {
+  return queueStoreMutation((state) => {
+    const account = findAccountById(state, input.accountId);
+    const name = normalizeOptional(input.name);
+    if (!name) throw new Error('请输入新的显示名称');
+    account.name = name;
+    account.updatedAt = nowIso();
+    return publicAccount(account);
+  });
+}
+
+export async function changeManagedAccountPassword(input: {
+  accountId: string;
+  password: string;
+}): Promise<PublicAccount> {
+  return queueStoreMutation((state) => {
+    const account = findAccountById(state, input.accountId);
+    const password = typeof input.password === 'string' ? input.password : '';
+    if (password.length < 4) throw new Error('密码至少需要 4 位');
+    const { salt, hash } = makePasswordHash(password);
+    account.passwordPlain = password;
+    account.passwordSalt = salt;
+    account.passwordHash = hash;
+    account.updatedAt = nowIso();
+    state.userSessions = state.userSessions.filter((session) => session.accountId !== account.id);
+    return publicAccount(account);
+  });
+}
+
+export async function deleteManagedAccount(accountId: string): Promise<void> {
+  await queueStoreMutation((state) => {
+    const account = findAccountById(state, accountId);
+    state.accounts = state.accounts.filter((item) => item.id !== account.id);
+    state.userSessions = state.userSessions.filter((session) => session.accountId !== account.id);
   });
 }
 

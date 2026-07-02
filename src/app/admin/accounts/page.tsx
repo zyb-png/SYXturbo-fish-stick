@@ -6,6 +6,14 @@ import { ArrowLeft, Lock, Plus, RefreshCw, ShieldCheck, Users, WalletCards } fro
 import { toast, Toaster } from 'sonner';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { PasswordInput } from '@/components/password-input';
@@ -33,6 +41,14 @@ interface AdminAccountRow {
 interface AccountPointsDraft {
   addPoints: string;
   deductPoints: string;
+}
+
+type AccountOperationType = 'quota' | 'rename' | 'password' | 'delete';
+
+interface AccountOperationState {
+  type: AccountOperationType;
+  account: AdminAccountRow;
+  value: string;
 }
 
 function formatPoints(value: number): string {
@@ -92,6 +108,7 @@ export default function AdminAccountsPage() {
     idNumber: '',
     wechat: '',
   });
+  const [operation, setOperation] = useState<AccountOperationState | null>(null);
 
   const totalAvailable = useMemo(
     () => accounts.reduce((sum, account) => sum + account.wallet.availablePoints, 0),
@@ -230,8 +247,9 @@ export default function AdminAccountsPage() {
       accountId,
       points: Number(points || 0),
     }, '点数已增加');
-    if (!added) return;
+    if (!added) return added;
     updateDraft(accountId, { addPoints: '' });
+    return added;
   };
 
   const deductPointsFromAccount = async (accountId: string, points: string) => {
@@ -240,9 +258,71 @@ export default function AdminAccountsPage() {
       accountId,
       points: Number(points || 0),
     }, '点数已扣除');
-    if (!deducted) return;
+    if (!deducted) return deducted;
     updateDraft(accountId, { deductPoints: '' });
+    return deducted;
   };
+
+  const openOperation = (type: AccountOperationType, account: AdminAccountRow) => {
+    setOperation({
+      type,
+      account,
+      value: type === 'rename' ? (account.name || account.username) : '',
+    });
+  };
+
+  const closeOperation = () => {
+    setOperation(null);
+  };
+
+  const toggleAccountStatus = async (account: AdminAccountRow) => {
+    const nextStatus = account.status === 'disabled' ? 'active' : 'disabled';
+    const verb = nextStatus === 'active' ? '启用' : '禁用';
+    const ok = window.confirm(`确认${verb}账号「${account.name || account.username}」吗？`);
+    if (!ok) return;
+    await postAction({
+      action: 'setStatus',
+      accountId: account.id,
+      status: nextStatus,
+    }, `账号已${verb}`);
+  };
+
+  const submitOperation = async () => {
+    if (!operation) return;
+    const { account, type, value } = operation;
+    if (type === 'rename') {
+      const updated = await postAction({
+        action: 'rename',
+        accountId: account.id,
+        name: value,
+      }, '名称已修改');
+      if (updated) closeOperation();
+      return;
+    }
+    if (type === 'password') {
+      const updated = await postAction({
+        action: 'changePassword',
+        accountId: account.id,
+        password: value,
+      }, '密码已修改，用户需重新登录');
+      if (updated) closeOperation();
+      return;
+    }
+    if (type === 'delete') {
+      const expected = account.username;
+      if (value.trim() !== expected) {
+        toast.error(`请输入账号名 ${expected} 确认删除`);
+        return;
+      }
+      const deleted = await postAction({
+        action: 'delete',
+        accountId: account.id,
+      }, '账号已删除');
+      if (deleted) closeOperation();
+    }
+  };
+
+  const operationDraft = operation ? drafts[operation.account.id] || createDraft() : createDraft();
 
   return (
     <main className="min-h-screen bg-[#070706] px-6 py-8 text-[#f6e9c7]">
@@ -377,14 +457,12 @@ export default function AdminAccountsPage() {
                 <div>姓名/账号</div>
                 <div>资料（只读）</div>
                 <div>点数</div>
-                <div>创作点操作</div>
+                <div>账号操作</div>
               </div>
               <div className="divide-y divide-amber-400/12">
                 {displayAccounts.length === 0 ? (
                   <div className="px-4 py-10 text-center text-sm text-amber-100/60">暂无账号</div>
-                ) : displayAccounts.map((account) => {
-                  const draft = drafts[account.id] || createDraft();
-                  return (
+                ) : displayAccounts.map((account) => (
                     <div key={account.id} className="grid grid-cols-1 gap-4 px-4 py-4 text-sm lg:grid-cols-[1.05fr_1.45fr_1fr_1.25fr]">
                       <div className="min-w-0">
                         <div className="flex flex-wrap items-center gap-2">
@@ -413,25 +491,205 @@ export default function AdminAccountsPage() {
                         <div className="text-amber-100/60">累计消耗 {formatPoints(account.wallet.consumedPoints)}</div>
                       </div>
 
-                      <div className="space-y-2">
-                        <div className="grid grid-cols-2 gap-2">
-                          <Input type="number" min="1" placeholder="增加点数" value={draft.addPoints} onChange={(event) => updateDraft(account.id, { addPoints: event.target.value })} className="border-amber-400/25 bg-black/35" />
-                          <Button variant="outline" className="border-amber-400/30 bg-black/20 text-amber-100 hover:bg-amber-500/10" onClick={() => void addPointsToAccount(account.id, draft.addPoints)} disabled={loading || !Number(draft.addPoints || 0)}>
-                            增加点数
-                          </Button>
-                        </div>
-                        <div className="grid grid-cols-2 gap-2">
-                          <Input type="number" min="1" placeholder="扣除点数" value={draft.deductPoints} onChange={(event) => updateDraft(account.id, { deductPoints: event.target.value })} className="border-amber-400/25 bg-black/35" />
-                          <Button variant="outline" className="border-red-400/30 bg-black/20 text-red-100 hover:bg-red-500/10 hover:text-red-50" onClick={() => void deductPointsFromAccount(account.id, draft.deductPoints)} disabled={loading || !Number(draft.deductPoints || 0)}>
-                            扣除点数
-                          </Button>
-                        </div>
+                      <div className="flex flex-wrap gap-2 self-start">
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="h-8 border-amber-400/35 bg-black/20 px-3 text-xs text-amber-100 hover:bg-amber-500/10"
+                          onClick={() => void toggleAccountStatus(account)}
+                          disabled={loading}
+                        >
+                          {account.status === 'disabled' ? '启用' : '禁用'}
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="h-8 border-amber-400/35 bg-black/20 px-3 text-xs text-amber-100 hover:bg-amber-500/10"
+                          onClick={() => openOperation('quota', account)}
+                          disabled={loading}
+                        >
+                          额度
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="h-8 border-amber-400/35 bg-black/20 px-3 text-xs text-amber-100 hover:bg-amber-500/10"
+                          onClick={() => openOperation('password', account)}
+                          disabled={loading}
+                        >
+                          改密
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="h-8 border-amber-400/35 bg-black/20 px-3 text-xs text-amber-100 hover:bg-amber-500/10"
+                          onClick={() => openOperation('rename', account)}
+                          disabled={loading}
+                        >
+                          改名
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="h-8 border-red-400/45 bg-black/20 px-3 text-xs text-red-100 hover:bg-red-500/10 hover:text-red-50"
+                          onClick={() => openOperation('delete', account)}
+                          disabled={loading}
+                        >
+                          删除
+                        </Button>
                       </div>
                     </div>
-                  );
-                })}
+                ))}
               </div>
             </section>
+
+            <Dialog open={Boolean(operation)} onOpenChange={(open) => {
+              if (!open) closeOperation();
+            }}>
+              {operation && (
+                <DialogContent className="max-w-md border-amber-400/35 bg-[#080706] text-amber-100 shadow-[0_0_34px_rgba(245,158,11,0.16)]">
+                  <DialogHeader>
+                    <DialogTitle>
+                      {operation.type === 'quota' && '调整账号额度'}
+                      {operation.type === 'rename' && '修改显示名称'}
+                      {operation.type === 'password' && '修改账号密码'}
+                      {operation.type === 'delete' && '删除账号'}
+                    </DialogTitle>
+                    <DialogDescription className="text-amber-100/62">
+                      当前账号：{operation.account.name || operation.account.username}（{operation.account.username}）
+                    </DialogDescription>
+                  </DialogHeader>
+
+                  {operation.type === 'quota' && (
+                    <div className="space-y-4">
+                      <div className="grid grid-cols-3 divide-x divide-amber-400/15 rounded-md border border-amber-400/20 bg-black/25 text-xs">
+                        <div className="px-3 py-2">
+                          <div className="text-amber-100/55">可用</div>
+                          <div className="mt-1 text-base font-semibold text-emerald-300">{formatPoints(operation.account.wallet.availablePoints)}</div>
+                        </div>
+                        <div className="px-3 py-2">
+                          <div className="text-amber-100/55">冻结</div>
+                          <div className="mt-1 text-base font-semibold">{formatPoints(operation.account.wallet.frozenPoints)}</div>
+                        </div>
+                        <div className="px-3 py-2">
+                          <div className="text-amber-100/55">累计消耗</div>
+                          <div className="mt-1 text-base font-semibold">{formatPoints(operation.account.wallet.consumedPoints)}</div>
+                        </div>
+                      </div>
+                      <div className="grid grid-cols-2 gap-2">
+                        <Input
+                          type="number"
+                          min="1"
+                          placeholder="增加点数"
+                          value={operationDraft.addPoints}
+                          onChange={(event) => updateDraft(operation.account.id, { addPoints: event.target.value })}
+                          className="border-amber-400/25 bg-black/35"
+                        />
+                        <Button
+                          variant="outline"
+                          className="border-amber-400/30 bg-black/20 text-amber-100 hover:bg-amber-500/10"
+                          onClick={async () => {
+                            const added = await addPointsToAccount(operation.account.id, operationDraft.addPoints);
+                            if (added) closeOperation();
+                          }}
+                          disabled={loading || !Number(operationDraft.addPoints || 0)}
+                        >
+                          增加点数
+                        </Button>
+                        <Input
+                          type="number"
+                          min="1"
+                          placeholder="扣除点数"
+                          value={operationDraft.deductPoints}
+                          onChange={(event) => updateDraft(operation.account.id, { deductPoints: event.target.value })}
+                          className="border-amber-400/25 bg-black/35"
+                        />
+                        <Button
+                          variant="outline"
+                          className="border-red-400/30 bg-black/20 text-red-100 hover:bg-red-500/10 hover:text-red-50"
+                          onClick={async () => {
+                            const deducted = await deductPointsFromAccount(operation.account.id, operationDraft.deductPoints);
+                            if (deducted) closeOperation();
+                          }}
+                          disabled={loading || !Number(operationDraft.deductPoints || 0)}
+                        >
+                          扣除点数
+                        </Button>
+                      </div>
+                      <div className="text-xs leading-5 text-amber-100/55">
+                        增加或扣除额度不会改写累计消耗；累计消耗只记录实际使用 API 的扣费。
+                      </div>
+                    </div>
+                  )}
+
+                  {operation.type === 'rename' && (
+                    <div className="space-y-2">
+                      <Label htmlFor="rename-account-name">新的显示名称</Label>
+                      <Input
+                        id="rename-account-name"
+                        value={operation.value}
+                        onChange={(event) => setOperation({ ...operation, value: event.target.value })}
+                        className="border-amber-400/25 bg-black/35"
+                      />
+                    </div>
+                  )}
+
+                  {operation.type === 'password' && (
+                    <div className="space-y-2">
+                      <Label htmlFor="change-account-password">新密码</Label>
+                      <PasswordInput
+                        id="change-account-password"
+                        value={operation.value}
+                        onChange={(event) => setOperation({ ...operation, value: event.target.value })}
+                        className="border-amber-400/25 bg-black/35"
+                      />
+                      <div className="text-xs text-amber-100/55">修改后该用户需要使用新密码重新登录。</div>
+                    </div>
+                  )}
+
+                  {operation.type === 'delete' && (
+                    <div className="space-y-3">
+                      <div className="rounded-md border border-red-400/25 bg-red-950/20 p-3 text-sm leading-6 text-red-100">
+                        删除后该账号将无法登录，账号钱包点数记录会被清除；不会删除已经生成的作品资产文件。
+                      </div>
+                      <div className="space-y-2">
+                        <Label htmlFor="delete-account-confirm">输入账号名确认删除：{operation.account.username}</Label>
+                        <Input
+                          id="delete-account-confirm"
+                          value={operation.value}
+                          onChange={(event) => setOperation({ ...operation, value: event.target.value })}
+                          className="border-red-400/30 bg-black/35"
+                        />
+                      </div>
+                    </div>
+                  )}
+
+                  {operation.type !== 'quota' && (
+                    <DialogFooter>
+                      <Button
+                        variant="outline"
+                        className="border-amber-400/25 bg-black/20 text-amber-100 hover:bg-amber-500/10"
+                        onClick={closeOperation}
+                      >
+                        取消
+                      </Button>
+                      <Button
+                        className={operation.type === 'delete' ? 'bg-red-500 text-white hover:bg-red-400' : 'bg-amber-500 text-black hover:bg-amber-400'}
+                        onClick={() => void submitOperation()}
+                        disabled={
+                          loading ||
+                          (operation.type === 'rename' && !operation.value.trim()) ||
+                          (operation.type === 'password' && operation.value.length < 4) ||
+                          (operation.type === 'delete' && operation.value.trim() !== operation.account.username)
+                        }
+                      >
+                        {operation.type === 'delete' ? '确认删除' : '确认'}
+                      </Button>
+                    </DialogFooter>
+                  )}
+                </DialogContent>
+              )}
+            </Dialog>
           </>
         )}
       </div>

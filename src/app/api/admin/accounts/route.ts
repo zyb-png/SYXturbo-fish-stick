@@ -1,11 +1,16 @@
 import { NextRequest, NextResponse } from 'next/server';
 import {
+  changeManagedAccountPassword,
   createManagedAccount,
+  deleteManagedAccount,
   listAdminAccounts,
+  renameManagedAccount,
   requireAdminSession,
+  setManagedAccountStatus,
 } from '@/lib/account-store';
 import {
   deductCreationPointsFromAccount,
+  deleteCreationPointStateForAccount,
   getCreationPointSnapshotForAccount,
   grantCreationPointsToAccount,
 } from '@/lib/creation-points';
@@ -79,6 +84,27 @@ export async function POST(request: NextRequest) {
         points,
         description: `后台扣除点数 ${points.toLocaleString('zh-CN')} 点`,
       });
+    } else if (action === 'setStatus') {
+      if (body.status !== 'active' && body.status !== 'disabled') {
+        throw new Error('账号状态无效');
+      }
+      await setManagedAccountStatus({
+        accountId: body.accountId,
+        status: body.status,
+      });
+    } else if (action === 'rename') {
+      await renameManagedAccount({
+        accountId: body.accountId,
+        name: body.name,
+      });
+    } else if (action === 'changePassword') {
+      await changeManagedAccountPassword({
+        accountId: body.accountId,
+        password: body.password,
+      });
+    } else if (action === 'delete') {
+      await deleteManagedAccount(body.accountId);
+      await deleteCreationPointStateForAccount(String(body.accountId || ''));
     } else if (action === 'setPoints') {
       throw new Error('设置点数已停用，请使用增加点数');
     } else if (action === 'grantPoints') {

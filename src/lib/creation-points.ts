@@ -740,6 +740,11 @@ export async function deductCreationPointsFromAccount(input: {
   return getCreationPointSnapshotForAccount(account.id);
 }
 
+export async function deleteCreationPointStateForAccount(accountId: string): Promise<void> {
+  await mutationQueue;
+  await fsp.rm(getStatePath(accountId), { force: true });
+}
+
 export async function setAccountAvailableCreationPoints(input: {
   accountId: string;
   points: number;
