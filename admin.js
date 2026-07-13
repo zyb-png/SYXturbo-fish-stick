@@ -5,6 +5,7 @@ const adminState = {
   pricing: [],
   billing: null,
   managementMode: 'accounts',
+  balanceRefreshTimer: null,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -41,6 +42,7 @@ async function loadAdminData() {
       return;
     }
     renderSession();
+    startBalanceAutoRefresh();
     switchManagementMode(adminState.managementMode);
     await Promise.all([loadAccounts(), loadProjects(), loadPricing()]);
     await loadUsage();
@@ -54,6 +56,17 @@ async function loadAdminData() {
 async function refreshSession() {
   adminState.session = await api('/api/session');
   renderSession();
+}
+
+function startBalanceAutoRefresh() {
+  if (adminState.balanceRefreshTimer) clearInterval(adminState.balanceRefreshTimer);
+  adminState.balanceRefreshTimer = setInterval(async () => {
+    try {
+      await refreshSession();
+    } catch (error) {
+      console.warn('刷新 API 总余额失败', error);
+    }
+  }, 15000);
 }
 
 function switchManagementMode(mode) {
