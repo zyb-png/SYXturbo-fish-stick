@@ -3,7 +3,7 @@ FROM swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/library/node:22-alpine A
 WORKDIR /app
 ENV ONNXRUNTIME_NODE_INSTALL=skip
 RUN corepack enable
-COPY package.json pnpm-lock.yaml .npmrc ./
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc ./
 RUN corepack pnpm install --frozen-lockfile
 
 FROM swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/library/node:22-alpine AS builder
@@ -25,7 +25,7 @@ ENV DEPLOY_RUN_PORT=5001
 
 RUN corepack enable
 RUN apk add --no-cache bash
-COPY --from=builder /app/package.json /app/pnpm-lock.yaml /app/.npmrc ./
+COPY --from=builder /app/package.json /app/pnpm-lock.yaml /app/pnpm-workspace.yaml /app/.npmrc ./
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/.next ./.next
 COPY --from=builder /app/public ./public
