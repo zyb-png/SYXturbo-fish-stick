@@ -22,12 +22,70 @@ const SETTLEMENT_POLL_INTERVAL_MS = 10_000;
 const SETTLEMENT_MAX_ATTEMPTS = 720;
 const settlementMonitors = new Set<string>();
 
+interface VideoVoiceAssignment {
+  characterName: string;
+  variantLabel: string;
+  voiceName: string;
+  voiceDescription: string;
+  dialogueLines: string[];
+}
+
 function cleanVideoPrompt(prompt: string): string {
   return String(prompt || '')
     .replace(/[\x00-\x08\x0B-\x0C\x0E-\x1F\x7F]/g, '')
     .replace(/[\u{1F300}-\u{1F9FF}]/gu, '')
     .trim()
     .slice(0, MAX_VIDEO_PROMPT_CHARS);
+}
+
+function cleanInlineText(value: unknown, maxLength: number): string {
+  return String(value || '')
+    .replace(/[\x00-\x1F\x7F]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, maxLength);
+}
+
+function normalizeSpeakerIdentity(value: unknown): string {
+  return cleanInlineText(value, 80)
+    .replace(/[（(][^）)]*[）)]/g, '')
+    .replace(/[\s，,。；;：:、·]+/g, '')
+    .toLocaleLowerCase();
+}
+
+function normalizeVoiceAssignments(value: unknown): VideoVoiceAssignment[] {
+  if (!Array.isArray(value)) return [];
+  return value.slice(0, 24).flatMap(item => {
+    if (!item || typeof item !== 'object') return [];
+    const source = item as Record<string, unknown>;
+    const characterName = cleanInlineText(source.characterName, 40);
+    const voiceName = cleanInlineText(source.voiceName, 60);
+    const voiceDescription = cleanInlineText(source.voiceDescription, 320);
+    if (!characterName || !voiceName || !voiceDescription) return [];
+    return [{
+      characterName,
+      variantLabel: cleanInlineText(source.variantLabel, 60) || '主要时期',
+      voiceName,
+      voiceDescription,
+      dialogueLines: Array.isArray(source.dialogueLines)
+        ? source.dialogueLines.map(line => cleanInlineText(line, 180)).filter(Boolean).slice(0, 6)
+        : [],
+    }];
+  });
+}
+
+function buildVoiceInstruction(assignments: VideoVoiceAssignment[]): string {
+  if (assignments.length === 0) return '';
+  return [
+    '【人物音色绑定】',
+    ...assignments.map(assignment => {
+      const dialogue = assignment.dialogueLines.length > 0
+        ? `；对应台词：${assignment.dialogueLines.map(line => `“${line}”`).join('、')}`
+        : '';
+      return `- ${assignment.characterName}（${assignment.variantLabel}）使用「${assignment.voiceName}」：${assignment.voiceDescription}${dialogue}`;
+    }),
+    '强制要求：谁说台词就只使用该人物当前时期/状态绑定的音色；同一人物同一状态全程保持一致，不得串音、换声或把台词分配给其他人物；台词必须逐字保持原文。',
+  ].join('\n');
 }
 
 function normalizeRatio(value: unknown): string {
@@ -81,7 +139,28 @@ export async function POST(request: NextRequest) {
 
   try {
     const body = await request.json();
-    const prompt = cleanVideoPrompt(body.prompt);
+    const voiceAssignments = normalizeVoiceAssignments(body.voiceAssignments);
+    const speakingCharacters = Array.from(new Set<string>(
+      (Array.isArray(body.speakingCharacters) ? body.speakingCharacters : [])
+        .map((name: unknown) => cleanInlineText(name, 40))
+        .filter((name: string): name is string => name.length > 0)
+    ));
+    const assignedSpeakers = new Set(voiceAssignments.map(item => normalizeSpeakerIdentity(item.characterName)));
+    const missingVoiceBindings = speakingCharacters.filter(name => !assignedSpeakers.has(normalizeSpeakerIdentity(name)));
+    if (missingVoiceBindings.length > 0) {
+      return NextResponse.json({
+        success: false,
+        error: `以下说话人物尚未绑定音色：${missingVoiceBindings.join('、')}`,
+        code: 'VOICE_BINDING_REQUIRED',
+      }, { status: 400 });
+    }
+
+    const voiceInstruction = buildVoiceInstruction(voiceAssignments);
+    const basePrompt = String(body.prompt || '').replace(
+      /【人物音色绑定】[\s\S]*?强制要求：[^\n]*(?:\n|$)/g,
+      ''
+    );
+    const prompt = cleanVideoPrompt([voiceInstruction, basePrompt].filter(Boolean).join('\n\n'));
     const ratio = normalizeRatio(body.ratio || body.videoRatio);
     const duration = normalizeDuration(body.duration);
     const imageUrls = Array.from(new Set([
@@ -103,12 +182,13 @@ export async function POST(request: NextRequest) {
         duration,
         ratio,
         referenceImageCount: imageUrls.length,
+        voiceBindingCount: voiceAssignments.length,
         model: 'moon-manfei-new',
       },
     });
     creationPointTaskId = pointTask.taskId;
 
-    console.log(`[manfei] 准备 ${imageUrls.length} 张参考图，模型 moon-manfei-new，分辨率 720p，比例 ${ratio}，时长 ${duration} 秒`);
+    console.log(`[manfei] 准备 ${imageUrls.length} 张参考图、${voiceAssignments.length} 个人物音色约束，模型 moon-manfei-new，分辨率 720p，比例 ${ratio}，时长 ${duration} 秒`);
     const assetIds = await prepareManfeiImageAssets(imageUrls, auth.account, 4);
     const taskId = await createManfeiVideoTask({
       prompt,
@@ -130,6 +210,7 @@ export async function POST(request: NextRequest) {
         duration,
         ratio,
         referenceAssetCount: assetIds.length,
+        voiceBindingCount: voiceAssignments.length,
       },
     });
   } catch (error: unknown) {

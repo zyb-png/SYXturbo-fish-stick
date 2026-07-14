@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useCallback, useRef, useEffect } from 'react';
+import { Fragment, useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Progress } from '@/components/ui/progress';
@@ -30,12 +30,12 @@ import {
   AlertDialogTrigger,
 } from '@/components/ui/alert-dialog';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
-import { 
-  Upload, 
-  FileText, 
-  Film, 
-  Image as ImageIcon, 
-  Video, 
+import {
+  Upload,
+  FileText,
+  Film,
+  Image as ImageIcon,
+  Video,
   Sparkles,
   CheckCircle2,
   Circle,
@@ -66,6 +66,8 @@ import {
   Settings,
   ArrowRightCircle,
   Check,
+  Layers3,
+  Volume2,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { AssetsFolderManager } from '@/components/assets-folder-manager';
@@ -75,7 +77,41 @@ import { ImageLibrarySelector } from '@/components/image-library-selector';
 import { StorageMonitor } from '@/components/storage-monitor';
 import { WorkspaceModeSwitch } from '@/components/workspace-mode-switch';
 import { PasswordInput } from '@/components/password-input';
+import { CharacterVoiceLibrary, type VoiceUploadInput } from '@/components/character-voice-library';
 import { usePersistentState, usePersistentStateManager, STORAGE_KEYS, TokenUsage, INITIAL_TOKEN_USAGE } from '@/hooks/usePersistentState';
+import {
+  normalizeVoiceCharacterName,
+  resolveVideoVoiceAssignments,
+  type CharacterVoiceExtraction,
+  type VoiceLibraryItem,
+} from '@/lib/character-voice';
+import { normalizeExecutionScriptText } from '@/lib/execution-script-format';
+import { normalizeCharacterLooks, type CharacterLookChangeType } from '@/lib/character-look-utils';
+import {
+  formatCharacterBodyProfile,
+  hasCharacterBodyProfile,
+  inheritBodyProfileForLooks,
+  mergeCharacterBodyProfiles,
+  normalizeCharacterBodyProfile,
+  stripBodyDetailsFromAppearance,
+  type CharacterBodyProfile,
+} from '@/lib/character-body-profile';
+import { getCanonicalEpisodeTitle, normalizeEpisodeChapterTitles } from '@/lib/outline-utils';
+import { expandPropStateUnits } from '@/lib/prop-state-utils';
+import {
+  getSceneMainLocation,
+  getSceneStateReasonLabel,
+  normalizeSceneLocationIdentity,
+  normalizeSceneMarkerIdentity,
+  normalizeSceneStateUnits,
+} from '@/lib/scene-state-utils';
+import {
+  formatStoryboardDurationSeconds,
+  groupContiguousItemsByDuration,
+  STORYBOARD_DURATION_GROUPING_STRATEGY,
+  STORYBOARD_GROUP_MAX_SECONDS,
+  sumStoryboardDurations,
+} from '@/lib/storyboard-duration-groups';
 
 interface Chapter {
   chapterNumber: number;
@@ -104,6 +140,26 @@ interface Scene {
   keyEvents: string[];
   visualElements: string[];
   estimatedDuration: string;
+  physicalLocation?: string;
+  mainSceneName?: string;
+  stateLabel?: string;
+  stateReason?: string;
+  stateReasonLabel?: string;
+  stateChangeEvidence?: string;
+  stateVisualDifference?: string;
+  isIndependentState?: boolean;
+  stateSequence?: number;
+  totalStates?: number;
+  referenceSceneName?: string;
+  imageMode?: 'text-to-image' | 'image-to-image' | string;
+  episodeNumbers?: number[];
+  occurrences?: Array<{
+    episodeNumber?: number | null;
+    episodeLabel?: string;
+    heading?: string;
+    stateLabel?: string;
+  }>;
+  aliases?: string[];
 }
 
 // 造型接口
@@ -117,13 +173,36 @@ interface CharacterLook {
   accessories: string[];
   makeup: string;
   mood: string;
+  continuityNote?: string;
+  changeType?: CharacterLookChangeType;
+  ageStage?: string;
+  physicalState?: string;
+  transformationState?: string;
+  bodyProfile?: CharacterBodyProfile;
+  bodyChanges?: string;
+  episodeNumbers?: number[];
+  sceneNames?: string[];
+  sourceEvidence?: string;
+  referenceLookId?: string;
+  referenceReason?: string;
+  isBaseLook?: boolean;
+  generationPriority?: number;
+  identitySourceUrl?: string;
+  identityNeedsReview?: boolean;
   imageUrl?: string;
+  alternateImageUrls?: string[];
+  imagePrompt?: string;
   isCustom?: boolean;
   isGenerating?: boolean;
   generatingStatus?: string;
   fourViewImageUrl?: string;
+  fourViewPrompt?: string;
+  fourViewIdentitySourceUrl?: string;
+  fourViewLookSourceUrl?: string;
+  fourViewIdentityNeedsReview?: boolean;
   isGeneratingFourView?: boolean;
   fourViewStatus?: string;
+  isLifecycleFallback?: boolean;
 }
 
 // 脸型特征接口
@@ -142,8 +221,9 @@ interface Character {
   age: string;
   gender: string;
   personality: string[];
-  appearance: string;  // 基本外貌描述（脸型、五官等）
+  appearance: string;  // 正脸近景描述（发型、脸型、五官、肤色等）
   faceFeatures: FaceFeatures;  // 脸型特征（保持一致性）
+  bodyProfile?: CharacterBodyProfile;  // 全身体态档案，仅用于造型图和四视图
   background: string;
   keyRelationships: Array<{ target: string; relationship: string }>;
   arc: string;
@@ -157,6 +237,52 @@ interface Character {
     styleNotes: string;
   };
   props: string[];
+  identityImageConfirmed?: boolean;
+  confirmedFaceImageUrl?: string;
+  identityConfirmedAt?: number;
+  aliases?: string[];
+  timelineAudit?: {
+    status: 'complete' | 'needs-review';
+    requiredCount: number;
+    coveredCount: number;
+    modelAddedCount: number;
+    fallbackAddedCount: number;
+    missingLabels: string[];
+    auditedAt: number;
+  };
+}
+
+const CHARACTER_LOOK_PRIORITY_STYLES = {
+  1: {
+    label: 'P1 身份基础',
+    cardClass: 'border-emerald-400/35 border-l-4 border-l-emerald-400 bg-emerald-500/[0.04]',
+    badgeClass: 'border-emerald-300/45 bg-emerald-500/15 text-emerald-100',
+  },
+  2: {
+    label: 'P2 年龄时期',
+    cardClass: 'border-sky-400/35 border-l-4 border-l-sky-400 bg-sky-500/[0.04]',
+    badgeClass: 'border-sky-300/45 bg-sky-500/15 text-sky-100',
+  },
+  3: {
+    label: 'P3 场景换装',
+    cardClass: 'border-amber-400/35 border-l-4 border-l-amber-400 bg-amber-500/[0.04]',
+    badgeClass: 'border-amber-300/45 bg-amber-500/15 text-amber-100',
+  },
+  4: {
+    label: 'P4 身体状态',
+    cardClass: 'border-orange-400/35 border-l-4 border-l-orange-400 bg-orange-500/[0.04]',
+    badgeClass: 'border-orange-300/45 bg-orange-500/15 text-orange-100',
+  },
+  5: {
+    label: 'P5 特殊/复合',
+    cardClass: 'border-fuchsia-400/35 border-l-4 border-l-fuchsia-400 bg-fuchsia-500/[0.04]',
+    badgeClass: 'border-fuchsia-300/45 bg-fuchsia-500/15 text-fuchsia-100',
+  },
+} as const;
+
+function getCharacterLookPriorityStyle(look: CharacterLook) {
+  const priority = Math.min(5, Math.max(1, Math.round(Number(look.generationPriority) || 3))) as keyof typeof CHARACTER_LOOK_PRIORITY_STYLES;
+  return CHARACTER_LOOK_PRIORITY_STYLES[priority];
 }
 
 const PLACEHOLDER_TEXT = /待补充|待完善|暂无|未知|默认造型|温和的性格体现在举止间|根据剧情需要，会有不同的服装搭配/;
@@ -202,6 +328,195 @@ function CompactBadge({
     >
       <span className="min-w-0 truncate">{compactDisplayText(fullText, maxChars)}</span>
     </Badge>
+  );
+}
+
+function AssetGenerationPlaceholder({ status }: { status?: string }) {
+  return (
+    <div
+      className="relative flex h-full min-h-[150px] w-full flex-col items-center justify-center overflow-hidden bg-black/45 px-4 text-center"
+      role="status"
+      aria-live="polite"
+    >
+      <div className="absolute inset-2 rounded-md border border-amber-300/20 animate-pulse" />
+      <div className="absolute inset-x-8 top-1/2 h-px bg-amber-300/20 animate-pulse" />
+      <div className="relative flex size-12 items-center justify-center rounded-full border border-amber-300/35 bg-amber-400/10 shadow-[0_0_24px_rgba(251,191,36,0.18)]">
+        <Loader2 className="size-6 animate-spin text-amber-200" />
+      </div>
+      <div className="relative mt-3 text-sm font-medium text-amber-100">图片生成处理中</div>
+      <div className="relative mt-1 max-w-full truncate text-xs text-amber-100/60" title={status || '请求已提交，正在处理'}>
+        {status || '请求已提交，正在处理'}
+      </div>
+      <div className="relative mt-3 flex items-center gap-1">
+        <span className="size-1.5 animate-pulse rounded-full bg-amber-300/45" />
+        <span className="size-1.5 animate-pulse rounded-full bg-amber-300/70 [animation-delay:180ms]" />
+        <span className="size-1.5 animate-pulse rounded-full bg-amber-200 [animation-delay:360ms]" />
+      </div>
+    </div>
+  );
+}
+
+function AssetImageStack({
+  images,
+  name,
+  type,
+  generationStatus,
+  isGenerating,
+  isAssetsConfirmed,
+  onOpenChooser,
+  onPreview,
+  onGenerateFromImage,
+  onDownload,
+  onRemove,
+}: {
+  images: AssetSingleImage[];
+  name: string;
+  type: 'scene' | 'character' | 'prop';
+  generationStatus?: string;
+  isGenerating: boolean;
+  isAssetsConfirmed: boolean;
+  onOpenChooser: () => void;
+  onPreview: (image: AssetSingleImage) => void;
+  onGenerateFromImage: (image: AssetSingleImage) => void;
+  onDownload: (image: AssetSingleImage) => void;
+  onRemove: (image: AssetSingleImage) => void;
+}) {
+  const completedImages = images.filter(image => Boolean(image.imageUrl) && !image.isGenerating);
+  const primaryImage = completedImages[0];
+  const ghostImages = completedImages.slice(1, MAX_IMAGES_PER_ASSET);
+  const isPortrait = type === 'character';
+  const frameClass = isPortrait
+    ? 'aspect-[4/5] min-h-[260px] w-full'
+    : 'aspect-video min-h-[150px] w-full sm:min-h-[180px]';
+  const objectClass = isPortrait ? 'object-cover object-top' : 'object-cover';
+  const typeLabel = type === 'scene' ? '场景' : type === 'character' ? '人物' : '道具';
+  const EmptyIcon = type === 'scene' ? ImageIcon : type === 'character' ? Users : Package;
+
+  if (!primaryImage) {
+    if (isGenerating) {
+      return (
+        <div className={`overflow-hidden rounded-md border border-amber-300/35 bg-black/35 ${frameClass}`}>
+          <AssetGenerationPlaceholder status={generationStatus} />
+        </div>
+      );
+    }
+    return (
+      <div className={`flex flex-col items-center justify-center gap-2 rounded-md border border-dashed border-amber-400/25 bg-black/20 text-amber-100/45 ${frameClass}`}>
+        <EmptyIcon className="size-9" />
+        <span className="text-xs">尚未生成{typeLabel}图</span>
+      </div>
+    );
+  }
+
+  return (
+    <div className={`group/stack relative ${ghostImages.length > 0 ? 'mb-4 mr-2' : ''}`}>
+      <div className={`relative ${frameClass}`}>
+        {ghostImages.map((image, index) => (
+          <div
+            key={`ghost-${image.imageId}`}
+            className={`pointer-events-none absolute inset-0 overflow-hidden rounded-md border border-amber-300/30 bg-black shadow-[0_8px_24px_rgba(0,0,0,0.55)] transition-all duration-300 ${
+              index === 0
+                ? 'translate-x-1 translate-y-2 opacity-55 group-hover/stack:translate-x-2 group-hover/stack:translate-y-3 group-hover/stack:opacity-80'
+                : 'translate-x-2 translate-y-4 opacity-30 group-hover/stack:translate-x-4 group-hover/stack:translate-y-5 group-hover/stack:opacity-60'
+            }`}
+            style={{ zIndex: 10 - index }}
+            aria-hidden="true"
+          >
+            <img src={image.imageUrl} alt="" className={`h-full w-full ${objectClass}`} />
+          </div>
+        ))}
+
+        <button
+          type="button"
+          className="relative z-20 block h-full w-full overflow-hidden rounded-md border border-amber-400/25 bg-black/35 text-left shadow-[0_12px_32px_rgba(0,0,0,0.42)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300"
+          onClick={() => completedImages.length > 1 ? onOpenChooser() : onPreview(primaryImage)}
+          title={completedImages.length > 1 ? `点击选择「${name}」主图` : `预览「${name}」`}
+          aria-label={completedImages.length > 1 ? `选择${name}主图` : `预览${name}图片`}
+        >
+          <img
+            src={primaryImage.imageUrl}
+            alt={name}
+            className={`h-full w-full transition duration-300 group-hover/stack:brightness-90 ${objectClass}`}
+          />
+          {completedImages.length > 1 && (
+            <>
+              <div className="absolute bottom-2 right-2 rounded border border-amber-300/30 bg-black/75 px-2 py-1 text-[11px] font-medium text-amber-100 backdrop-blur-sm">
+                主图 · 共 {completedImages.length} 张
+              </div>
+              <div className="pointer-events-none absolute bottom-2 left-2 z-30 flex max-w-[70%] gap-1.5 opacity-0 transition-all duration-200 group-hover/stack:opacity-100">
+                {completedImages.map((image, index) => (
+                  <div
+                    key={`hover-preview-${image.imageId}`}
+                    className={`h-10 w-14 overflow-hidden rounded border bg-black/80 shadow-lg ${index === 0 ? 'border-amber-300' : 'border-white/30'}`}
+                  >
+                    <img src={image.imageUrl} alt="" className={`h-full w-full ${objectClass}`} />
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+          {primaryImage.isCustom && completedImages.length === 1 && (
+            <Badge className="absolute bottom-2 left-2 text-[10px]" variant="secondary">
+              自定义
+            </Badge>
+          )}
+        </button>
+
+        {isGenerating && (
+          <div className="pointer-events-none absolute left-2 top-2 z-30 flex max-w-[60%] items-center gap-1.5 rounded border border-amber-300/30 bg-black/75 px-2 py-1 text-[11px] text-amber-100 backdrop-blur-sm">
+            <Loader2 className="size-3 animate-spin" />
+            <span className="truncate">{generationStatus || '正在生成新图'}</span>
+          </div>
+        )}
+
+        <div className="absolute right-2 top-2 z-40 flex gap-1 rounded-md border border-amber-300/20 bg-black/75 p-1 opacity-100 shadow-lg backdrop-blur-sm transition-opacity sm:opacity-0 sm:group-hover/stack:opacity-100">
+          <Button
+            size="icon"
+            variant="secondary"
+            className="h-7 w-7 min-w-0 border-0 bg-transparent p-0 text-amber-50 hover:bg-amber-400/20"
+            title="预览主图"
+            aria-label={`预览${typeLabel}主图`}
+            onClick={() => onPreview(primaryImage)}
+          >
+            <Eye className="size-3.5" />
+          </Button>
+          {!isAssetsConfirmed && (
+            <Button
+              size="icon"
+              variant="secondary"
+              className="h-7 w-7 min-w-0 border-0 bg-transparent p-0 text-amber-50 hover:bg-amber-400/20"
+              title="以主图为参考生成新图"
+              aria-label={`以此${typeLabel}主图为参考生成新图`}
+              onClick={() => onGenerateFromImage(primaryImage)}
+            >
+              <Copy className="size-3.5" />
+            </Button>
+          )}
+          <Button
+            size="icon"
+            variant="secondary"
+            className="h-7 w-7 min-w-0 border-0 bg-transparent p-0 text-amber-50 hover:bg-amber-400/20"
+            title="下载主图"
+            aria-label={`下载${typeLabel}主图`}
+            onClick={() => onDownload(primaryImage)}
+          >
+            <Download className="size-3.5" />
+          </Button>
+          {!isAssetsConfirmed && (
+            <Button
+              size="icon"
+              variant="destructive"
+              className="h-7 w-7 min-w-0 border-0 bg-transparent p-0 text-red-200 hover:bg-red-500/20"
+              title="取消选中主图（图片仍在图片库中）"
+              aria-label={`移除${typeLabel}主图`}
+              onClick={() => onRemove(primaryImage)}
+            >
+              <Trash2 className="size-3.5" />
+            </Button>
+          )}
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -279,18 +594,33 @@ function buildCharacterAppearance(character: Partial<Character>): string {
   const gender = inferCharacterGender(name, character.gender);
   const age = inferCharacterAge(name, character.age);
   const personality = inferCharacterPersonality(name, character.personality)[0];
-  const body = gender === '女'
-    ? '身形匀称，姿态灵活，面部线条柔和但表情有辨识度'
-    : gender === '男'
-      ? '身材比例匀称，肩背有力，面部轮廓清晰'
-      : '身材比例自然，面部轮廓清晰，表情有辨识度';
-  const styling = gender === '女'
-    ? '服装以生活化或职业化搭配为主，颜色和材质随剧情阶段变化'
-    : gender === '男'
-      ? '服装以日常、商务或工作场景搭配为主，整体干净利落'
-      : '服装贴合人物身份和剧情场景，整体自然写实';
   const genderRole = gender === '男' || gender === '女' ? `${gender}性角色` : '角色';
-  return `${name}是${age}的${genderRole}，${personality}。${body}，眼神和神态能体现人物当下情绪。${styling}，适合真人短剧写实风格，可根据场景切换不同造型。`;
+  const facialStyle = gender === '女'
+    ? '发型轮廓自然清晰，面部线条柔和且有辨识度，眼神灵动，鼻唇比例协调'
+    : gender === '男'
+      ? '发型干净利落，面部轮廓清晰稳定，眉眼有辨识度，鼻唇比例自然'
+      : '发型与面部轮廓清晰稳定，固定五官具有辨识度，神态自然';
+  return `${name}是${age}的${genderRole}，${personality}。${facialStyle}，肤色均匀，皮肤清爽并保留自然纹理；正脸近景中的表情和眼神符合人物身份，固定面部辨识特征清晰稳定。`;
+}
+
+function buildCharacterBodyProfile(character: Partial<Character>): CharacterBodyProfile {
+  const gender = inferCharacterGender(character.name || '该人物', character.gender);
+  const defaults: CharacterBodyProfile = {
+    height: '',
+    weight: '',
+    bodyType: gender === '女'
+      ? '自然匀称，体型与年龄和身份协调'
+      : gender === '男'
+        ? '自然匀称，体格与年龄和身份协调'
+        : '自然比例，体型与年龄和身份协调',
+    shoulderWaist: gender === '男' ? '肩腰比例自然，骨架稳定' : '肩腰比例自然，骨架协调',
+    limbProportions: '四肢比例自然，符合人物年龄阶段',
+    posture: '体态自然，站姿符合人物身份与剧情状态',
+  };
+  return mergeCharacterBodyProfiles(
+    normalizeCharacterBodyProfile(character.bodyProfile, character.appearance),
+    defaults
+  );
 }
 
 function buildCharacterFaceFeatures(character: Partial<Character>): FaceFeatures {
@@ -317,6 +647,18 @@ function buildCharacterLook(character: Partial<Character>): CharacterLook {
     accessories: [],
     makeup: gender === '女' ? '自然淡妆' : gender === '男' ? '自然无妆或轻微修饰' : '自然妆造',
     mood: '自然',
+    changeType: '基础造型',
+    ageStage: character.age || '主要时期',
+    physicalState: '正常状态',
+    transformationState: '',
+    bodyProfile: buildCharacterBodyProfile(character),
+    bodyChanges: '',
+    episodeNumbers: [],
+    sceneNames: ['默认造型'],
+    referenceLookId: '',
+    referenceReason: '直接参考已确认的人物正脸身份基准图',
+    isBaseLook: true,
+    generationPriority: 1,
   };
 }
 
@@ -331,9 +673,16 @@ function normalizeCharacterVisualInfo(character: Character): Character {
   const originalGender = normalizeGenderValue(character.gender);
   const genderWasCorrected = Boolean(originalGender && originalGender !== '待定' && originalGender !== normalized.gender);
 
-  normalized.appearance = isUsefulText(character.appearance) && !genderWasCorrected && !characterTextContradictsGender(character.appearance, normalized.gender)
-    ? character.appearance
+  const faceOnlyAppearance = stripBodyDetailsFromAppearance(character.appearance);
+  normalized.appearance = isUsefulText(faceOnlyAppearance) && !genderWasCorrected && !characterTextContradictsGender(faceOnlyAppearance, normalized.gender)
+    ? faceOnlyAppearance
     : buildCharacterAppearance(normalized);
+
+  normalized.bodyProfile = buildCharacterBodyProfile({
+    ...normalized,
+    bodyProfile: character.bodyProfile,
+    appearance: character.appearance,
+  });
 
   const defaultFaceFeatures = buildCharacterFaceFeatures(normalized);
   normalized.faceFeatures = {
@@ -344,23 +693,21 @@ function normalizeCharacterVisualInfo(character: Character): Character {
     skinTone: !genderWasCorrected && isUsefulText(character.faceFeatures?.skinTone) ? character.faceFeatures.skinTone : defaultFaceFeatures.skinTone,
   };
 
-  normalized.looks = Array.isArray(character.looks) && character.looks.length > 0
-    ? character.looks.map((look, index) => {
-        const defaultLook = buildCharacterLook(normalized);
-        return {
-          ...defaultLook,
-          ...look,
-          id: look.id || `look-${index + 1}`,
-          scene: isUsefulText(look.scene) ? look.scene : defaultLook.scene,
-          description: isUsefulText(look.description) ? look.description : defaultLook.description,
-          costume: isUsefulText(look.costume) ? look.costume : defaultLook.costume,
-          hairstyle: isUsefulText(look.hairstyle) ? look.hairstyle : defaultLook.hairstyle,
-          accessories: Array.isArray(look.accessories) ? look.accessories.filter(isUsefulText) : [],
-          makeup: isUsefulText(look.makeup) ? look.makeup : defaultLook.makeup,
-          mood: isUsefulText(look.mood) ? look.mood : defaultLook.mood,
-        };
-      })
-    : [buildCharacterLook(normalized)];
+  const defaultLook = buildCharacterLook(normalized);
+  normalized.looks = inheritBodyProfileForLooks(
+    normalizeCharacterLooks(character.looks, defaultLook, normalized.age) as CharacterLook[],
+    normalized.bodyProfile
+  );
+
+  normalized.identityImageConfirmed = Boolean(
+    character.identityImageConfirmed && isUsefulText(character.confirmedFaceImageUrl)
+  );
+  normalized.confirmedFaceImageUrl = normalized.identityImageConfirmed
+    ? character.confirmedFaceImageUrl
+    : undefined;
+  normalized.identityConfirmedAt = normalized.identityImageConfirmed
+    ? character.identityConfirmedAt
+    : undefined;
 
   normalized.background = isUsefulText(character.background)
     ? character.background
@@ -382,6 +729,12 @@ function normalizeCharacterVisualInfo(character: Character): Character {
 interface Prop {
   id: number;
   name: string;
+  mainPropName?: string;
+  sourcePropName?: string;
+  isStateUnit?: boolean;
+  stateUnitId?: string;
+  stateSequence?: number;
+  totalStates?: number;
   type: string;
   importance: string;
   description: string;
@@ -389,7 +742,45 @@ interface Prop {
   owner: string;
   function: string;
   visualDescription: string;
+  stateLabel?: string;
+  referencePropName?: string;
+  referenceStateId?: string;
+  stateVisualChange?: string;
+  stateTransitionEvent?: string;
+  stateNarrativeFunction?: string;
+  stateEvidence?: string;
+  imageMode?: 'text-to-image' | 'image-to-image' | string;
+  episodeNumbers?: number[];
+  occurrences?: Array<{
+    episodeNumber?: number | null;
+    episodeLabel?: string;
+    sceneName?: string;
+    heading?: string;
+    stateLabel?: string;
+  }>;
+  stateVariants?: Array<{
+    id: string;
+    stateName: string;
+    scene: string;
+    stage: string;
+    description: string;
+    visualChange: string;
+    transitionEvent?: string;
+    narrativeFunction?: string;
+    evidence?: string;
+    referenceFromStateId: string;
+    imageMode: 'text-to-image' | 'image-to-image' | string;
+    episodeNumbers?: number[];
+    occurrences?: Array<{
+      episodeNumber?: number | null;
+      episodeLabel?: string;
+      sceneName?: string;
+      heading?: string;
+      stateLabel?: string;
+    }>;
+  }>;
   notes: string;
+  aliases?: string[];
 }
 
 interface Shot {
@@ -398,6 +789,7 @@ interface Shot {
   description: string;
   characters: Array<{
     name: string;
+    lookId?: string;
     dialogue: string;
     dialogueType?: string;
     reaction?: string;
@@ -501,6 +893,46 @@ interface ImageStoryboardSettings {
   lighting: ('自然光' | '暖色调' | '冷色调' | '电影感' | '戏剧光效' | '弱冷光' | '弱暖光' | '强冷光' | '强暖光' | '窗边光' | '逆光' | '氛围感' | '正面光' | '侧面光' | '轮廓光' | '顶光' | '底光' | '伦勃朗光' | '昏暗无光' | '硬光' | '远光' | '柔光' | '漫射光' | '氛围感光影' | '电影感光影' | '黄金光' | '丁达尔光' | '光斑' | '高对比光影' | '低保和柔和光' | '发丝光' | '渐变光影')[];  // 光影效果（可多选）
 }
 
+type CreationType = '仿真人' | '3D' | '动漫';
+type CreationRegion = '国内' | '国外';
+type CreationBackground = '近代' | '现代' | '古代';
+
+interface CreationBibleSettings {
+  creationType: CreationType | '';
+  subjectRegion: CreationRegion | '';
+  creationBackground: CreationBackground | '';
+  confirmed: boolean;
+}
+
+type CreationBiblePayload = Pick<
+  CreationBibleSettings,
+  'creationType' | 'subjectRegion' | 'creationBackground'
+>;
+
+const DEFAULT_CREATION_BIBLE: CreationBibleSettings = {
+  creationType: '',
+  subjectRegion: '',
+  creationBackground: '',
+  confirmed: false,
+};
+
+const CREATION_TYPE_OPTIONS: Array<{ value: CreationType; label: string; description: string }> = [
+  { value: '仿真人', label: '仿真人', description: '真人实拍质感，真实皮肤、材质和电影摄影' },
+  { value: '3D', label: '3D', description: 'CG 立体角色与空间，模型感和材质统一' },
+  { value: '动漫', label: '动漫', description: '动画镜头语言，线条、色块和造型更明确' },
+];
+
+const CREATION_REGION_OPTIONS: Array<{ value: CreationRegion; label: string; description: string }> = [
+  { value: '国内', label: '国内', description: '中国语境、中文生活空间、服饰和社会关系' },
+  { value: '国外', label: '国外', description: '海外语境、国际化空间、服饰和文化细节' },
+];
+
+const CREATION_BACKGROUND_OPTIONS: Array<{ value: CreationBackground; label: string; description: string }> = [
+  { value: '近代', label: '近代', description: '近代社会语境，服饰、建筑、交通和器物体现年代质感' },
+  { value: '现代', label: '现代', description: '现代生活语境，空间、服装、设备和社会细节贴近当代' },
+  { value: '古代', label: '古代', description: '古代历史语境，服饰、建筑、礼制和器物符合传统时代' },
+];
+
 // 故事版面板描述项
 interface VideoPromptItem {
   shotNumber: number;
@@ -532,11 +964,13 @@ interface ShotVideos {
   videos: VideoItem[];       // 最多3个
 }
 
-// 提示词组 - 3-4个镜头打包为一组（约15秒）
+// 提示词组 - 连续镜头按实际时长打包，单组不超过15秒
 interface PromptGroup {
   groupIndex: number;
   shotNumbers: number[];
-  combinedPrompt: string;      // 合并后的连冠故事版面板描述
+  totalDuration?: number;        // 本组镜头实际总时长（兼容旧项目时可缺省）
+  groupingStrategy?: string;     // 新分组使用 duration-14-15-v1
+  combinedPrompt: string;      // 合并后的连贯故事版面板描述
   storyboardImageUrl?: string; // 故事板图片URL
   storyboardImageKey?: string; // 故事板图片存储key
   isGeneratingStoryboard?: boolean;  // 是否正在生成故事板
@@ -562,7 +996,7 @@ interface ChapterStoryboard {
   promptsConfirmed: boolean;     // 故事版面板描述已确认
   shotPrompts: ShotPrompt[];     // 每个分镜的提示词预览
   videoPrompts?: VideoPromptItem[];  // 故事版面板描述列表（单个镜头）
-  promptGroups?: PromptGroup[];      // 3-4镜一组的提示词组（含故事板）
+  promptGroups?: PromptGroup[];      // 按连续镜头实际时长分组（含故事板）
   shotVideos?: ShotVideos[];     // 每个镜头的视频列表
 }
 interface AssetSingleImage {
@@ -572,10 +1006,13 @@ interface AssetSingleImage {
   isCustom?: boolean;
   isFromLibrary?: boolean; // 是否来自图片库
   originalName?: string; // 原始文件名
+  prompt?: string; // 图片生成时接口实际使用的提示词
+  promptSource?: 'actual' | 'rebuilt' | 'uploaded';
   isGenerating?: boolean;
   generatingStatus?: string;
   lookId?: string; // 新增：对应的造型ID（如：look-1, look-2）
   lookScene?: string; // 新增：对应的造型场景（如：初见、战斗）
+  isImg2Img?: boolean;
 }
 
 // 素材图片集合 - 每个素材可以有多张图片
@@ -587,9 +1024,168 @@ interface AssetImages {
   lookImages?: Record<string, AssetSingleImage[]>; // 新增：按造型ID存储图片（仅人物使用）
 }
 
+interface RestoredAssetImage {
+  name: string;
+  url: string;
+  timestamp: number;
+}
+
+function normalizeAssetIdentity(value: unknown): string {
+  return String(value || '')
+    .trim()
+    .toLocaleLowerCase()
+    .replace(/[\s_<>:"/\\|?*]+/g, '');
+}
+
+function getLinkedEpisodeNumbers(value: any): number[] {
+  const direct = Array.isArray(value?.episodeNumbers) ? value.episodeNumbers : [];
+  const occurrences = Array.isArray(value?.occurrences)
+    ? value.occurrences.map((item: any) => item?.episodeNumber)
+    : [];
+  return Array.from(new Set([...direct, ...occurrences]
+    .map(item => Number(item))
+    .filter(item => Number.isFinite(item) && item > 0)))
+    .sort((a, b) => a - b);
+}
+
+function getShotReferenceText(shot: Shot): string {
+  return [
+    shot.description,
+    shot.actionAndDialogue,
+    shot.actorBlocking,
+    shot.actionChange,
+    shot.scene?.location,
+    shot.scene?.time,
+    shot.scene?.atmosphere,
+    ...(shot.scene?.props || []),
+    ...(shot.characters || []).flatMap(character => [
+      character.name,
+      character.action,
+      character.expression,
+      character.performance,
+    ]),
+  ].filter(Boolean).join(' ');
+}
+
+function scoreLinkedName(query: string, labels: unknown[]): number {
+  const normalizedQuery = normalizeAssetIdentity(query);
+  if (!normalizedQuery) return 0;
+  return labels.reduce<number>((best, label) => {
+    const normalizedLabel = normalizeAssetIdentity(label);
+    if (!normalizedLabel) return best;
+    if (normalizedLabel === normalizedQuery) return Math.max(best, 120);
+    if (normalizedLabel.includes(normalizedQuery) || normalizedQuery.includes(normalizedLabel)) {
+      return Math.max(best, 75 - Math.min(Math.abs(normalizedLabel.length - normalizedQuery.length), 20));
+    }
+    return best;
+  }, 0);
+}
+
+function getSceneTimeBucket(value: unknown): 'day' | 'night' | '' {
+  const text = String(value || '');
+  if (/夜|晚|凌晨|黄昏|傍晚/.test(text)) return 'night';
+  if (/日|昼|白天|清晨|早晨|上午|中午|下午/.test(text)) return 'day';
+  return '';
+}
+
+function findSceneStateForShot(sceneItems: Scene[], shot: Shot, chapterNumber: number): Scene | undefined {
+  const location = shot.scene?.location || '';
+  const shotText = normalizeAssetIdentity(getShotReferenceText(shot));
+  const shotTimeBucket = getSceneTimeBucket(shot.scene?.time || shot.scene?.location);
+  return sceneItems
+    .map(scene => {
+      const nameScore = scoreLinkedName(location, [
+        scene.name,
+        scene.mainSceneName,
+        scene.physicalLocation,
+        getSceneMainLocation(scene),
+        ...(scene.aliases || []),
+      ]);
+      const episodes = getLinkedEpisodeNumbers(scene);
+      const episodeScore = episodes.includes(chapterNumber) ? 80 : episodes.length > 0 ? -25 : 0;
+      const sceneTimeBucket = getSceneTimeBucket([scene.timeOfDay, scene.stateLabel, scene.name].filter(Boolean).join(' '));
+      const timeScore = shotTimeBucket && sceneTimeBucket
+        ? (shotTimeBucket === sceneTimeBucket ? 25 : -20)
+        : 0;
+      const stateScore = [scene.stateLabel, scene.stateVisualDifference]
+        .filter(Boolean)
+        .some(value => shotText.includes(normalizeAssetIdentity(value))) ? 15 : 0;
+      return { scene, nameScore, score: nameScore + episodeScore + timeScore + stateScore };
+    })
+    .filter(candidate => candidate.nameScore > 0)
+    .sort((a, b) => b.score - a.score)[0]?.scene;
+}
+
+function findPropStateForShot(propItems: Prop[], propName: string, shot: Shot, chapterNumber: number): Prop | undefined {
+  const sceneLocation = normalizeAssetIdentity(shot.scene?.location || '');
+  const shotText = normalizeAssetIdentity(getShotReferenceText(shot));
+  return propItems
+    .map(prop => {
+      const nameScore = scoreLinkedName(propName, [prop.name, prop.mainPropName, prop.sourcePropName, ...(prop.aliases || [])]);
+      const episodes = getLinkedEpisodeNumbers(prop);
+      const episodeScore = episodes.includes(chapterNumber) ? 80 : episodes.length > 0 ? -25 : 0;
+      const sceneScore = (prop.appearanceScenes || []).some(scene => {
+        const normalizedScene = normalizeAssetIdentity(scene);
+        return normalizedScene && sceneLocation && (
+          normalizedScene.includes(sceneLocation) || sceneLocation.includes(normalizedScene)
+        );
+      }) ? 15 : 0;
+      const stateScore = [prop.stateLabel, prop.stateEvidence, prop.stateTransitionEvent]
+        .filter(Boolean)
+        .some(value => shotText.includes(normalizeAssetIdentity(value))) ? 15 : 0;
+      return { prop, nameScore, score: nameScore + episodeScore + sceneScore + stateScore };
+    })
+    .filter(candidate => candidate.nameScore > 0)
+    .sort((a, b) => b.score - a.score)[0]?.prop;
+}
+
+function findCharacterByShotName(characterItems: Character[], name: string): Character | undefined {
+  const identity = normalizeAssetIdentity(name);
+  return characterItems.find(character => (
+    normalizeAssetIdentity(character.name) === identity ||
+    (character.aliases || []).some(alias => normalizeAssetIdentity(alias) === identity)
+  ));
+}
+
+function findCharacterLookForShot(character: Character, shotCharacter: Shot['characters'][number], shot: Shot, chapterNumber: number): CharacterLook | undefined {
+  const looks = Array.isArray(character.looks) ? character.looks : [];
+  const explicitLookId = String(shotCharacter.lookId || '').trim();
+  const explicitLook = explicitLookId ? looks.find(look => String(look.id) === explicitLookId) : undefined;
+  if (explicitLook) return explicitLook;
+
+  const shotText = normalizeAssetIdentity(getShotReferenceText(shot));
+  const location = normalizeAssetIdentity(shot.scene?.location || '');
+  const rankedLooks = looks
+    .map(look => {
+      const episodes = Array.isArray(look.episodeNumbers) ? look.episodeNumbers : [];
+      const episodeScore = episodes.includes(chapterNumber) ? 90 : episodes.length > 0 ? -20 : 0;
+      const sceneScore = (look.sceneNames || []).some(sceneName => {
+        const normalizedScene = normalizeAssetIdentity(sceneName);
+        return normalizedScene && location && (
+          normalizedScene.includes(location) || location.includes(normalizedScene)
+        );
+      }) ? 35 : 0;
+      const stateScore = [look.ageStage, look.physicalState, look.transformationState, look.scene, look.stage]
+        .filter(Boolean)
+        .reduce((score, value) => score + (shotText.includes(normalizeAssetIdentity(value)) ? 18 : 0), 0);
+      const baseScore = look.isBaseLook ? 5 : 0;
+      return { look, score: episodeScore + sceneScore + stateScore + baseScore };
+    })
+    .sort((a, b) => b.score - a.score);
+  return rankedLooks[0]?.score > 0
+    ? rankedLooks[0].look
+    : (looks.find(look => look.isBaseLook) || looks[0]);
+}
+
 // 图片数量限制
-const MAX_IMAGES_PER_ASSET = 10;
+const MAX_IMAGES_PER_ASSET = 3;
+const CHARACTER_IMAGE_REQUEST_TIMEOUT_MS = 210_000;
 const BATCH_ASSET_IMAGE_CONCURRENCY = 10;
+const INITIAL_BATCH_ASSET_GENERATION_HISTORY = {
+  scene: false,
+  character: false,
+  prop: false,
+};
 
 function normalizeManfeiDuration(value: unknown): number {
   const parsed = Number(value);
@@ -660,20 +1256,57 @@ const LOGIN_REQUIRED_PROMPT = '请先登录账号再继续使用。新账号首�
 interface ExtractionStatus {
   scenes: 'pending' | 'loading' | 'success' | 'error' | 'batch_confirm';
   characters: 'pending' | 'loading' | 'success' | 'error' | 'batch_confirm';
+  voices: 'pending' | 'loading' | 'success' | 'error' | 'batch_confirm';
   props: 'pending' | 'loading' | 'success' | 'error' | 'batch_confirm';
   outline: 'pending' | 'loading' | 'success' | 'error' | 'batch_confirm';
 }
 
+interface ExtractionReviewState {
+  status: 'idle' | 'pending' | 'reviewing' | 'success' | 'error';
+  candidateCount: number;
+  mergedGroupCount: number;
+  removedCount: {
+    scenes: number;
+    characters: number;
+    props: number;
+  };
+  groups: Array<{
+    type: 'scene' | 'character' | 'prop';
+    canonicalName: string;
+    aliases: string[];
+    reason: string;
+  }>;
+  lifecycle?: {
+    requiredCount: number;
+    coveredBeforeRepair: number;
+    repairedByModel: number;
+    fallbackAdded: number;
+    unresolvedCount: number;
+    affectedCharacters: string[];
+  };
+  reviewedAt: number;
+  error?: string;
+}
+
+const INITIAL_EXTRACTION_REVIEW: ExtractionReviewState = {
+  status: 'idle',
+  candidateCount: 0,
+  mergedGroupCount: 0,
+  removedCount: { scenes: 0, characters: 0, props: 0 },
+  groups: [],
+  reviewedAt: 0,
+};
+
 export default function StoryboardGenerator() {
   // 持久化管理器
   const { clearAll, checkStorageHealth } = usePersistentStateManager();
-  
+
   // 当前激活的标签页（已持久化，刷新后回到之前的位置）
   const [activeTab, setActiveTab] = usePersistentState<string>('storyboard_active_tab', 'extraction');
   const [collapsedPromptChapters, setCollapsedPromptChapters] = usePersistentState<Record<string, boolean>>('storyboard_collapsed_prompt_chapters', {});
   const [collapsedStoryboardChapters, setCollapsedStoryboardChapters] = usePersistentState<Record<string, boolean>>('storyboard_collapsed_storyboard_chapters', {});
   const [collapsedStoryboardTotalChapters, setCollapsedStoryboardTotalChapters] = usePersistentState<Record<string, boolean>>('storyboard_collapsed_storyboard_total_chapters', {});
-  
+
   // 资产刷新触发器（清除数据后递增此值以刷新资产管理组件）
   const [assetRefreshTrigger, setAssetRefreshTrigger] = useState(0);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -833,7 +1466,7 @@ export default function StoryboardGenerator() {
       window.fetch = originalFetch;
     };
   }, [showLoginRequired]);
-  
+
   // 列表展开/折叠状态（场景、人物、道具）
   const [expandedSections, setExpandedSections] = useState<Record<string, boolean>>({
     scenes: false,
@@ -867,7 +1500,7 @@ export default function StoryboardGenerator() {
       return { ...prev, [key]: !currentValue };
     });
   };
-  
+
   // 文字分镜分批生成状态（每4集一批）
   interface BatchInfo {
     active: boolean;
@@ -881,25 +1514,202 @@ export default function StoryboardGenerator() {
     totalBatches: 0,
     completedBatches: 0,
   });
-  
+
   // 检测是否有被中断的分批生成任务
   useEffect(() => {
     if (batchInfo.active && batchInfo.completedBatches < batchInfo.totalBatches) {
       toast.info(`检测到未完成的文字分镜生成（已完成 ${batchInfo.completedBatches}/${batchInfo.totalBatches} 批），可点击「继续生成第 ${batchInfo.completedBatches + 1} 批」恢复`);
     }
   }, []); // 仅在挂载时检测
-  
+
   // 使用持久化的状态
   const [currentStep, setCurrentStep] = usePersistentState(STORAGE_KEYS.CURRENT_STEP, 0);
   const [uploadedFileName, setUploadedFileName] = usePersistentState<string | null>(STORAGE_KEYS.UPLOADED_FILE, null);
   const [fileContent, setFileContent] = usePersistentState(STORAGE_KEYS.FILE_CONTENT, '');
-  
-  // 四个并行提取结果
+  const [executionScript, setExecutionScript] = usePersistentState(STORAGE_KEYS.EXECUTION_SCRIPT, '');
+  const [executionScriptSourceSignature, setExecutionScriptSourceSignature] = usePersistentState(
+    STORAGE_KEYS.EXECUTION_SCRIPT_SOURCE_SIGNATURE,
+    ''
+  );
+  const normalizedExecutionScript = useMemo(
+    () => normalizeExecutionScriptText(executionScript),
+    [executionScript]
+  );
+  const [creationBible, setCreationBible] = usePersistentState<CreationBibleSettings>(
+    STORAGE_KEYS.CREATION_BIBLE,
+    DEFAULT_CREATION_BIBLE
+  );
+
+  // 五个并行提取结果
   const [scenesData, setScenesData] = usePersistentState<any>(STORAGE_KEYS.SCENES_DATA, null);
   const [charactersData, setCharactersData] = usePersistentState<any>(STORAGE_KEYS.CHARACTERS_DATA, null);
+  const [characterVoiceData, setCharacterVoiceData] = usePersistentState<CharacterVoiceExtraction | null>(
+    STORAGE_KEYS.CHARACTER_VOICE_DATA,
+    null
+  );
+  const [voiceLibrary, setVoiceLibrary] = usePersistentState<VoiceLibraryItem[]>(
+    STORAGE_KEYS.VOICE_LIBRARY,
+    []
+  );
+  const [voiceLibraryLoading, setVoiceLibraryLoading] = useState(false);
   const [propsData, setPropsData] = usePersistentState<any>(STORAGE_KEYS.PROPS_DATA, null);
   const [outline, setOutline] = usePersistentState<Outline | null>(STORAGE_KEYS.OUTLINE, null);
-  
+
+  useEffect(() => {
+    setVoiceLibrary(previous => {
+      const audioVoices = (previous || []).filter(item => item.source !== 'preset');
+      return audioVoices.length === (previous || []).length ? previous : audioVoices;
+    });
+  }, [setVoiceLibrary]);
+
+  useEffect(() => {
+    if (!characterVoiceData?.profiles?.some(profile => (
+      profile.variants.some(variant => variant.boundVoiceId?.startsWith('preset-'))
+    ))) return;
+
+    setCharacterVoiceData(previous => previous ? {
+      ...previous,
+      profiles: previous.profiles.map(profile => ({
+        ...profile,
+        variants: profile.variants.map(variant => variant.boundVoiceId?.startsWith('preset-')
+          ? { ...variant, boundVoiceId: undefined, boundAt: undefined }
+          : variant),
+      })),
+    } : previous);
+  }, [characterVoiceData, setCharacterVoiceData]);
+
+  const syncVoiceLibrary = useCallback(async (showError = false) => {
+    setVoiceLibraryLoading(true);
+    try {
+      const response = await fetch('/api/voice-library', {
+        cache: 'no-store',
+        headers: { 'X-Skip-Login-Prompt': '1' },
+      });
+      const result = await response.json();
+      if (response.status === 401) return;
+      if (!response.ok || !result.success || !Array.isArray(result.voices)) {
+        throw new Error(result.error || '读取音色库失败');
+      }
+      const externalVoices = (result.voices as VoiceLibraryItem[])
+        .filter(voice => voice?.source === 'builtin' || voice?.source === 'custom');
+      setVoiceLibrary(externalVoices);
+    } catch (error) {
+      console.error('同步音色库失败:', error);
+      if (showError) toast.error(error instanceof Error ? error.message : '同步音色库失败');
+    } finally {
+      setVoiceLibraryLoading(false);
+    }
+  }, [setVoiceLibrary]);
+
+  useEffect(() => {
+    void syncVoiceLibrary(false);
+    const handleWalletUpdated = () => void syncVoiceLibrary(false);
+    window.addEventListener('manfei:wallet-updated', handleWalletUpdated);
+    return () => window.removeEventListener('manfei:wallet-updated', handleWalletUpdated);
+  }, [syncVoiceLibrary]);
+
+  const uploadVoiceToLibrary = useCallback(async (input: VoiceUploadInput): Promise<boolean> => {
+    if (!(await requireLoginBeforePaidAction())) return false;
+
+    const formData = new FormData();
+    formData.append('file', input.file);
+    formData.append('name', input.name);
+    formData.append('language', input.language);
+    formData.append('category', input.category);
+    formData.append('gender', input.gender);
+    formData.append('ageRange', input.ageRange);
+    formData.append('description', input.description);
+
+    try {
+      const response = await fetch('/api/voice-library', { method: 'POST', body: formData });
+      const result = await response.json();
+      if (!response.ok || !result.success) throw new Error(result.error || '上传音色失败');
+      await syncVoiceLibrary(false);
+      toast.success(`音色“${result.voice?.name || input.name}”已保存到当前账号`);
+      return true;
+    } catch (error) {
+      console.error('上传音色失败:', error);
+      toast.error(error instanceof Error ? error.message : '上传音色失败');
+      return false;
+    }
+  }, [requireLoginBeforePaidAction, syncVoiceLibrary]);
+
+  const deleteVoiceFromLibrary = useCallback(async (voiceId: string): Promise<boolean> => {
+    if (!(await requireLoginBeforePaidAction())) return false;
+    try {
+      const response = await fetch(`/api/voice-library?id=${encodeURIComponent(voiceId)}`, { method: 'DELETE' });
+      const result = await response.json();
+      if (!response.ok || !result.success) throw new Error(result.error || '删除音色失败');
+
+      setVoiceLibrary(previous => previous.filter(voice => voice.id !== voiceId));
+      setCharacterVoiceData(previous => previous ? {
+        ...previous,
+        profiles: previous.profiles.map(profile => ({
+          ...profile,
+          variants: profile.variants.map(variant => variant.boundVoiceId === voiceId
+            ? { ...variant, boundVoiceId: undefined, boundAt: undefined }
+            : variant),
+        })),
+      } : previous);
+      toast.success('个人音色已删除，相关人物绑定已解除');
+      return true;
+    } catch (error) {
+      console.error('删除音色失败:', error);
+      toast.error(error instanceof Error ? error.message : '删除音色失败');
+      return false;
+    }
+  }, [requireLoginBeforePaidAction, setCharacterVoiceData, setVoiceLibrary]);
+
+  useEffect(() => {
+    const characters = (charactersData?.characters || []) as Character[];
+    if (!characterVoiceData?.profiles?.length || characters.length === 0) return;
+
+    setCharacterVoiceData(previous => {
+      if (!previous) return previous;
+      let changed = false;
+      const profiles = previous.profiles.map(profile => {
+        const profileNames = [profile.characterName, ...profile.aliases].map(normalizeVoiceCharacterName);
+        const character = characters.find(item => [item.name, ...(item.aliases || [])]
+          .map(normalizeVoiceCharacterName)
+          .some(name => profileNames.includes(name)));
+        if (!character || profile.characterId === character.id) return profile;
+        changed = true;
+        return {
+          ...profile,
+          characterId: character.id,
+          characterName: character.name,
+          aliases: Array.from(new Set([...profile.aliases, ...(character.aliases || [])]))
+            .filter(alias => normalizeVoiceCharacterName(alias) !== normalizeVoiceCharacterName(character.name)),
+        };
+      });
+      return changed ? { ...previous, profiles } : previous;
+    });
+  }, [characterVoiceData?.profiles?.length, charactersData?.characters, setCharacterVoiceData]);
+
+  const bindCharacterVoice = useCallback((profileId: string, variantId: string, voiceId: string) => {
+    if (!voiceLibrary.some(voice => voice.id === voiceId)) {
+      toast.error('所选音色不存在，请重新选择');
+      return;
+    }
+    setCharacterVoiceData(previous => {
+      if (!previous) return previous;
+      return {
+        ...previous,
+        profiles: previous.profiles.map(profile => profile.id !== profileId
+          ? profile
+          : {
+              ...profile,
+              variants: profile.variants.map(variant => variant.id !== variantId
+                ? variant
+                : { ...variant, boundVoiceId: voiceId, boundAt: Date.now() }
+              ),
+            }
+        ),
+      };
+    });
+    toast.success('音色已绑定，后续视频会按说话人物自动引用');
+  }, [setCharacterVoiceData, voiceLibrary]);
+
   // 大纲分批提取信息
   interface OutlineBatchInfo {
     currentBatch: number;
@@ -912,7 +1722,24 @@ export default function StoryboardGenerator() {
   }
   const [outlineBatchInfo, setOutlineBatchInfo] = usePersistentState<OutlineBatchInfo | null>(STORAGE_KEYS.OUTLINE_BATCH_INFO, null);
   const outlineAutoResumeRef = useRef(false);
-  
+
+  // 修复旧版本把上一集结尾台词、动作或转场标记保存成分集标题的数据。
+  useEffect(() => {
+    if (!outline?.chapters?.length) return;
+    const normalized = normalizeEpisodeChapterTitles(outline.chapters);
+    if (normalized.changed) {
+      setOutline({ ...outline, chapters: normalized.chapters });
+    }
+  }, [outline, setOutline]);
+
+  useEffect(() => {
+    if (!outlineBatchInfo?.allChapters?.length) return;
+    const normalized = normalizeEpisodeChapterTitles(outlineBatchInfo.allChapters);
+    if (normalized.changed) {
+      setOutlineBatchInfo({ ...outlineBatchInfo, allChapters: normalized.chapters });
+    }
+  }, [outlineBatchInfo, setOutlineBatchInfo]);
+
   // 场景分批提取信息
   interface SceneBatchInfo {
     currentBatch: number;
@@ -922,7 +1749,7 @@ export default function StoryboardGenerator() {
     allScenes: any[];  // 已提取的所有场景
   }
   const [sceneBatchInfo, setSceneBatchInfo] = usePersistentState<SceneBatchInfo | null>(STORAGE_KEYS.SCENE_BATCH_INFO, null);
-  
+
   // 人物分批提取信息
   interface CharacterBatchInfo {
     currentBatch: number;
@@ -932,29 +1759,43 @@ export default function StoryboardGenerator() {
     allCharacters: any[];  // 已提取的所有人物
   }
   const [characterBatchInfo, setCharacterBatchInfo] = usePersistentState<CharacterBatchInfo | null>(STORAGE_KEYS.CHARACTER_BATCH_INFO, null);
-  
+
   // 道具分批提取信息
   interface PropBatchInfo {
     currentBatch: number;
     totalBatches: number;
     hasMore: boolean;
     propMarkers: string[];  // 所有道具名称
+    propInventory?: any[];  // 大模型通读全文后建立的物品实体与状态总表
     allProps: any[];  // 已提取的所有道具
   }
   const [propBatchInfo, setPropBatchInfo] = usePersistentState<PropBatchInfo | null>(STORAGE_KEYS.PROP_BATCH_INFO, null);
-  
+  const [extractionReview, setExtractionReview] = usePersistentState<ExtractionReviewState>(
+    STORAGE_KEYS.EXTRACTION_REVIEW,
+    INITIAL_EXTRACTION_REVIEW
+  );
+  const assetExtractionChainRef = useRef({
+    scenes: false,
+    characters: false,
+    props: false,
+  });
+  const extractionReviewRequestedRef = useRef(false);
+  const extractionReviewRunningRef = useRef(false);
+
   // 提取状态
   const [extractionStatus, setExtractionStatus] = usePersistentState<ExtractionStatus>(
     STORAGE_KEYS.EXTRACTION_STATUS,
     {
       scenes: 'pending',
       characters: 'pending',
+      voices: 'pending',
       props: 'pending',
       outline: 'pending',
     }
   );
   const hasSceneExtractionResult = Array.isArray(scenesData?.scenes) && scenesData.scenes.length > 0;
   const hasCharacterExtractionResult = Array.isArray(charactersData?.characters) && charactersData.characters.length > 0;
+  const hasVoiceExtractionResult = Array.isArray(characterVoiceData?.profiles);
   const hasPropExtractionResult = Array.isArray(propsData?.props) && propsData.props.length > 0;
   const hasOutlineExtractionResult = Array.isArray(outline?.chapters) && outline.chapters.length > 0;
   const getEffectiveExtractionStatus = (
@@ -966,17 +1807,20 @@ export default function StoryboardGenerator() {
   const effectiveExtractionStatus: ExtractionStatus = {
     scenes: getEffectiveExtractionStatus(extractionStatus.scenes, hasSceneExtractionResult),
     characters: getEffectiveExtractionStatus(extractionStatus.characters, hasCharacterExtractionResult),
+    voices: getEffectiveExtractionStatus(extractionStatus.voices ?? 'pending', hasVoiceExtractionResult),
     props: getEffectiveExtractionStatus(extractionStatus.props, hasPropExtractionResult),
     outline: getEffectiveExtractionStatus(extractionStatus.outline, hasOutlineExtractionResult),
   };
   const hasExtractionStatusToShow =
     effectiveExtractionStatus.scenes !== 'pending' ||
     effectiveExtractionStatus.characters !== 'pending' ||
+    effectiveExtractionStatus.voices !== 'pending' ||
     effectiveExtractionStatus.props !== 'pending' ||
     effectiveExtractionStatus.outline !== 'pending';
   const isEffectiveExtractionSuccess =
     effectiveExtractionStatus.scenes === 'success' &&
     effectiveExtractionStatus.characters === 'success' &&
+    effectiveExtractionStatus.voices === 'success' &&
     effectiveExtractionStatus.props === 'success' &&
     effectiveExtractionStatus.outline === 'success';
 
@@ -993,6 +1837,10 @@ export default function StoryboardGenerator() {
         next.characters = 'success';
         changed = true;
       }
+      if ((prev.voices ?? 'pending') === 'pending' && hasVoiceExtractionResult) {
+        next.voices = 'success';
+        changed = true;
+      }
       if (prev.props === 'pending' && hasPropExtractionResult) {
         next.props = 'success';
         changed = true;
@@ -1007,17 +1855,18 @@ export default function StoryboardGenerator() {
   }, [
     hasSceneExtractionResult,
     hasCharacterExtractionResult,
+    hasVoiceExtractionResult,
     hasPropExtractionResult,
     hasOutlineExtractionResult,
     setExtractionStatus,
   ]);
-  
+
   // Token 使用统计
   const [tokenUsage, setTokenUsage] = usePersistentState<TokenUsage>(
     STORAGE_KEYS.TOKEN_USAGE,
     INITIAL_TOKEN_USAGE
   );
-  
+
   // 步骤确认状态
   const [stepConfirmed, setStepConfirmed] = usePersistentState<{
     upload: boolean;
@@ -1037,7 +1886,7 @@ export default function StoryboardGenerator() {
       videos: false,
     }
   );
-  
+
   const [selectedChapter, setSelectedChapter] = usePersistentState<Chapter | null>(STORAGE_KEYS.SELECTED_CHAPTER, null);
   const [storyboard, setStoryboard] = usePersistentState<Storyboard | null>(STORAGE_KEYS.STORYBOARD, null);
   const [imageStoryboards, setImageStoryboards] = usePersistentState<ImageStoryboard[]>(STORAGE_KEYS.IMAGE_STORYBOARDS, []);
@@ -1045,10 +1894,10 @@ export default function StoryboardGenerator() {
   const [videoResults, setVideoResults] = usePersistentState<VideoResult[]>(STORAGE_KEYS.VIDEO_RESULTS, []);
   const [videoTotalDuration, setVideoTotalDuration] = usePersistentState<number>(STORAGE_KEYS.VIDEO_TOTAL_DURATION, 0);
   const [progress, setProgress] = usePersistentState(STORAGE_KEYS.PROGRESS, 0);
-  
+
   // 视频格式选择
   const [videoRatio, setVideoRatio] = usePersistentState<'16:9' | '9:16'>(STORAGE_KEYS.VIDEO_RATIO, '9:16');
-  
+
   // 全局分镜提示词设置
   const [globalImageSettings, setGlobalImageSettings] = usePersistentState<ImageStoryboardSettings>(
     'globalImageSettings',
@@ -1058,30 +1907,37 @@ export default function StoryboardGenerator() {
       lighting: [],
     }
   );
-  
+
   // 正在生成提示词的章节编号列表（支持多章节并行）- 不持久化，页面刷新后重置
   const [generatingPromptsChapters, setGeneratingPromptsChapters] = useState<number[]>([]);
-  
+
   // 素材图片状态 - 转换为对象便于持久化
   const [assetImagesObj, setAssetImagesObj] = usePersistentState<Record<string, AssetImages>>(STORAGE_KEYS.ASSET_IMAGES, {});
-  
+  const [batchAssetGenerationHistory, setBatchAssetGenerationHistory] = usePersistentState<Record<'scene' | 'character' | 'prop', boolean>>(
+    STORAGE_KEYS.BATCH_ASSET_GENERATION_HISTORY,
+    INITIAL_BATCH_ASSET_GENERATION_HISTORY
+  );
+
   // 数据版本号 - 用于强制刷新旧数据
   const [dataVersion, setDataVersion] = usePersistentState<string>('storyboard_data_version', '5');
-  
+
   // 多章节分镜存储（新增）
   const [chapterStoryboards, setChapterStoryboards] = usePersistentState<Record<number, ChapterStoryboard>>(
     'storyboard_chapter_storyboards' as any,
     {}
   );
-  
+
   // 非持久化状态
   const [uploadedFile, setUploadedFile] = useState<File | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
+  const [isGeneratingExecutionScript, setIsGeneratingExecutionScript] = useState(false);
+  const [showExecutionScriptPreview, setShowExecutionScriptPreview] = useState(false);
+  const [showExecutionScriptSuccessDialog, setShowExecutionScriptSuccessDialog] = useState(false);
   const storyboardAbortControllerRef = useRef<AbortController | null>(null);
   const storyboardBatchCancelledRef = useRef(false);
   const [editingPrompt, setEditingPrompt] = useState<{ type: 'image' | 'video'; shotNumber: number; prompt: string; chapterNumber?: number; frameType?: 'start' | 'end' } | null>(null);
   const [regeneratingShot, setRegeneratingShot] = useState<number | null>(null);
-  
+
   // 人物描述编辑状态
   const [editingCharacterId, setEditingCharacterId] = useState<number | null>(null);
   const [editingCharacterAppearance, setEditingCharacterAppearance] = useState<string>('');
@@ -1100,15 +1956,45 @@ export default function StoryboardGenerator() {
     total: 0,
     currentName: '',
   });
-  
+  const [exportingAssetListType, setExportingAssetListType] = useState<'scene' | 'character' | 'prop' | null>(null);
+  const [assetPackageExportSuccess, setAssetPackageExportSuccess] = useState<{
+    typeLabel: string;
+    fileName: string;
+    workbookFileName: string;
+    rowCount: number;
+    imageCount: number;
+    originalImageCount: number;
+    failedImageCount: number;
+    savedToDownloads: boolean;
+    savedPath: string;
+  } | null>(null);
+  const batchAssetGenerationGuardRef = useRef(false);
+  const [batchRegenerationConfirmType, setBatchRegenerationConfirmType] = useState<'scene' | 'character' | 'prop' | null>(null);
+  const [assetImageLimitNotice, setAssetImageLimitNotice] = useState<{
+    type: 'scene' | 'character' | 'prop';
+    name: string;
+  } | null>(null);
+  const [assetImageChooserTarget, setAssetImageChooserTarget] = useState<{
+    assetId: string;
+    type: 'scene' | 'character' | 'prop';
+    name: string;
+  } | null>(null);
+  const [pendingCharacterFaceChange, setPendingCharacterFaceChange] = useState<{
+    assetId: string;
+    imageId: string;
+    characterName: string;
+    imageUrl: string;
+    affectedLookCount: number;
+  } | null>(null);
+
   // 场景描述编辑状态
   const [editingSceneId, setEditingSceneId] = useState<number | null>(null);
   const [editingSceneDescription, setEditingSceneDescription] = useState<string>('');
-  
+
   // 生成任务状态（支持并行生成）
   const [generationTasks, setGenerationTasks] = useState<GenerationTask[]>([]);
   const [showRestoreToast, setShowRestoreToast] = useState(false);
-  
+
   // 图片预览状态
   const [previewImage, setPreviewImage] = useState<{
     url: string;
@@ -1116,7 +2002,139 @@ export default function StoryboardGenerator() {
     type: string;
   } | null>(null);
   const [previewZoom, setPreviewZoom] = useState(1);
-  
+
+  const buildExecutionScriptSourceSignature = useCallback((content: string, fileName: string) => {
+    const head = content.slice(0, 160);
+    const tail = content.slice(-160);
+    return `${fileName || '剧本'}::${content.length}::${head}::${tail}`;
+  }, []);
+
+  const getCurrentFileName = useCallback(() => (
+    uploadedFile?.name || uploadedFileName || '剧本'
+  ), [uploadedFile, uploadedFileName]);
+
+  const getCurrentExecutionScriptSignature = useCallback(() => (
+    buildExecutionScriptSourceSignature(fileContent, getCurrentFileName())
+  ), [buildExecutionScriptSourceSignature, fileContent, getCurrentFileName]);
+
+  const hasCurrentExecutionScript = useCallback(() => (
+    !!normalizedExecutionScript.trim() &&
+    executionScriptSourceSignature === getCurrentExecutionScriptSignature()
+  ), [normalizedExecutionScript, executionScriptSourceSignature, getCurrentExecutionScriptSignature]);
+
+  const getExtractionSourceContent = useCallback(() => (
+    hasCurrentExecutionScript() ? normalizedExecutionScript : ''
+  ), [normalizedExecutionScript, hasCurrentExecutionScript]);
+
+  const hasConfirmedCreationBible = useCallback(() => (
+    creationBible.confirmed &&
+    !!creationBible.creationType &&
+    !!creationBible.subjectRegion &&
+    !!creationBible.creationBackground
+  ), [creationBible]);
+
+  const getCreationBiblePayload = useCallback(() => ({
+    creationType: creationBible.creationType,
+    subjectRegion: creationBible.subjectRegion,
+    creationBackground: creationBible.creationBackground,
+  }), [creationBible.creationBackground, creationBible.creationType, creationBible.subjectRegion]);
+
+  const playExecutionScriptSuccessSound = useCallback(() => {
+    if (typeof window === 'undefined') return;
+
+    try {
+      const AudioContextClass = window.AudioContext || (
+        window as typeof window & { webkitAudioContext?: typeof AudioContext }
+      ).webkitAudioContext;
+      if (!AudioContextClass) return;
+
+      const audioContext = new AudioContextClass();
+      const startAt = audioContext.currentTime;
+      const oscillator = audioContext.createOscillator();
+      const gain = audioContext.createGain();
+
+      oscillator.type = 'sine';
+      oscillator.frequency.setValueAtTime(880, startAt);
+      oscillator.frequency.exponentialRampToValueAtTime(1320, startAt + 0.16);
+      gain.gain.setValueAtTime(0.0001, startAt);
+      gain.gain.exponentialRampToValueAtTime(0.08, startAt + 0.03);
+      gain.gain.exponentialRampToValueAtTime(0.0001, startAt + 0.26);
+
+      oscillator.connect(gain);
+      gain.connect(audioContext.destination);
+      oscillator.start(startAt);
+      oscillator.stop(startAt + 0.28);
+      oscillator.onended = () => {
+        audioContext.close().catch(() => undefined);
+      };
+    } catch (error) {
+      console.warn('播放执行剧本完成提示音失败:', error);
+    }
+  }, []);
+
+  const ensureExecutionScript = useCallback(async (forceRegenerate = false): Promise<string | null> => {
+    if (!fileContent.trim()) {
+      toast.error('请先上传剧本文件');
+      return null;
+    }
+
+    if (!forceRegenerate && hasCurrentExecutionScript()) {
+      return normalizedExecutionScript;
+    }
+
+    if (!(await requireLoginBeforePaidAction())) return null;
+
+    setIsGeneratingExecutionScript(true);
+    const toastId = toast.loading(forceRegenerate ? '正在重新拉执行剧本...' : '正在拉执行剧本...');
+
+    try {
+      const response = await fetch('/api/generate-execution-script', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          content: fileContent,
+          fileName: getCurrentFileName(),
+        }),
+      });
+      const data = await response.json().catch(() => null);
+
+      if (!response.ok || !data?.success || !data.executionScript) {
+        throw new Error(data?.details || data?.error || '拉执行剧本失败');
+      }
+
+      const nextExecutionScript = normalizeExecutionScriptText(String(data.executionScript));
+      setExecutionScript(nextExecutionScript);
+      setExecutionScriptSourceSignature(getCurrentExecutionScriptSignature());
+      if (data.tokenUsage) {
+        setTokenUsage(prev => ({ ...prev, executionScript: data.tokenUsage }));
+      }
+
+      toast.dismiss(toastId);
+      toast.success(forceRegenerate ? '执行剧本已重新生成' : '执行剧本已生成');
+      playExecutionScriptSuccessSound();
+      setShowExecutionScriptSuccessDialog(true);
+      return nextExecutionScript;
+    } catch (error) {
+      console.error('拉执行剧本失败:', error);
+      toast.dismiss(toastId);
+      toast.error(getNetworkErrorMessage(error, '拉执行剧本'));
+      return null;
+    } finally {
+      setIsGeneratingExecutionScript(false);
+    }
+  }, [
+    normalizedExecutionScript,
+    fileContent,
+    getCurrentExecutionScriptSignature,
+    getCurrentFileName,
+    hasCurrentExecutionScript,
+    playExecutionScriptSuccessSound,
+    requireLoginBeforePaidAction,
+    setExecutionScript,
+    setExecutionScriptSourceSignature,
+    setTokenUsage,
+  ]);
+
   // 检查 localStorage 健康状态（仅开发环境）
   useEffect(() => {
     if (typeof window !== 'undefined' && process.env.NODE_ENV === 'development') {
@@ -1131,7 +2149,7 @@ export default function StoryboardGenerator() {
             配额使用: `${health.quotaUsed.toFixed(2)}%`,
             有效数据键数: health.keys.filter(k => k.hasData).length,
           });
-          
+
           if (health.storyboardKeys === 0) {
             console.warn('[数据持久化] ⚠️ 未找到任何分镜数据！刷新后数据可能丢失');
           }
@@ -1139,28 +2157,28 @@ export default function StoryboardGenerator() {
       }, 1000);
     }
   }, [checkStorageHealth]);
-  
+
   // 打开图片预览
   const openImagePreview = useCallback((url: string, name: string, type: string) => {
     setPreviewImage({ url, name, type });
     setPreviewZoom(1);
   }, []);
-  
+
   // 关闭图片预览
   const closeImagePreview = useCallback(() => {
     setPreviewImage(null);
     setPreviewZoom(1);
   }, []);
-  
+
   // 预览缩放控制
   const handlePreviewZoomIn = useCallback(() => {
     setPreviewZoom(prev => Math.min(prev + 0.25, 3));
   }, []);
-  
+
   const handlePreviewZoomOut = useCallback(() => {
     setPreviewZoom(prev => Math.max(prev - 0.25, 0.25));
   }, []);
-  
+
   // 键盘事件处理（预览）
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -1178,7 +2196,7 @@ export default function StoryboardGenerator() {
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [previewImage, closeImagePreview, handlePreviewZoomIn, handlePreviewZoomOut]);
-  
+
   // 图片库选择器状态
   const [imageLibraryOpen, setImageLibraryOpen] = useState(false);
   const [librarySelectTarget, setLibrarySelectTarget] = useState<{
@@ -1186,7 +2204,7 @@ export default function StoryboardGenerator() {
     id: string;
     name: string;
   } | null>(null);
-  
+
   // 安全的 API 响应处理函数
   const safeApiCall = useCallback(async (response: Response): Promise<any> => {
     if (!response.ok) {
@@ -1220,7 +2238,7 @@ export default function StoryboardGenerator() {
     }
     return response.json();
   }, []);
-  
+
   // 网络错误处理函数 - 提供更有用的错误信息
   const getNetworkErrorMessage = useCallback((error: unknown, operation: string): string => {
     // 检查是否是中止错误（超时）
@@ -1235,21 +2253,35 @@ export default function StoryboardGenerator() {
     }
     return `${operation}失败`;
   }, []);
-  
+
   // 打开图片库选择器
   const openImageLibrary = useCallback((type: 'scene' | 'character' | 'prop', id: number, name: string) => {
+    const assetId = `${type}-${name}`;
+    const currentCount = assetImagesObj[assetId]?.images?.length || 0;
+    if (currentCount >= MAX_IMAGES_PER_ASSET) {
+      setAssetImageLimitNotice({ type, name });
+      return;
+    }
     setLibrarySelectTarget({ type, id: String(id), name });
     setImageLibraryOpen(true);
-  }, []);
-  
+  }, [assetImagesObj]);
+
   // 从图片库选择图片后添加到素材
   const handleLibraryImageSelect = useCallback(async (imageUrl: string, imageName: string) => {
     if (!librarySelectTarget) return;
-    
+
     const { type, id, name } = librarySelectTarget;
     // 使用素材名称作为 assetId，确保唯一性（名称是唯一的）
     const assetId = `${type}-${name}`;
-    
+    const currentCount = assetImagesObj[assetId]?.images?.length || 0;
+
+    if (currentCount >= MAX_IMAGES_PER_ASSET) {
+      setImageLibraryOpen(false);
+      setLibrarySelectTarget(null);
+      setAssetImageLimitNotice({ type, name });
+      return;
+    }
+
     try {
       // 添加新图片
       const newImage = {
@@ -1259,14 +2291,14 @@ export default function StoryboardGenerator() {
         isFromLibrary: true,
         originalName: imageName,
       };
-      
+
       // 统一通过 setAssetImages 更新状态（会自动持久化）
       // 在回调中获取现有图片并合并
       setAssetImages(prev => {
         const existing = prev.get(assetId);
         const existingImages = existing?.images || [];
         const updatedImages = [...existingImages, newImage];
-        
+
         const newMap = new Map(prev);
         newMap.set(assetId, {
           assetId,
@@ -1276,14 +2308,14 @@ export default function StoryboardGenerator() {
         });
         return newMap;
       });
-      
+
       toast.success(`已从图片库添加图片到 ${name}`);
     } catch (error) {
       console.error('添加图片失败:', error);
       toast.error('添加图片失败');
     }
-  }, [librarySelectTarget]);
-  
+  }, [librarySelectTarget, assetImagesObj]);
+
   // 生成进度详情状态
   const [generationProgress, setGenerationProgress] = useState<{
     isGenerating: boolean;
@@ -1300,39 +2332,42 @@ export default function StoryboardGenerator() {
     message: '',
     completedItems: [],
   });
-  
+
   const fileInputRefs = useRef<{ [key: string]: HTMLInputElement | null }>({});
-  
+
   // Map 转换辅助函数
   const getAssetImagesMap = useCallback(() => {
     return new Map(Object.entries(assetImagesObj));
   }, [assetImagesObj]);
-  
+
   const setAssetImagesFromMap = useCallback((map: Map<string, AssetImages>) => {
     setAssetImagesObj(Object.fromEntries(map));
   }, [setAssetImagesObj]);
-  
+
   // 本地 Map 状态（用于操作），同步到持久化存储
   const [assetImages, setAssetImagesLocal] = useState<Map<string, AssetImages>>(new Map());
-  
+  // 生成反馈独立于持久化图片，避免无 URL 的临时占位被同步清理后界面失去进度提示。
+  const [assetGenerationStatuses, setAssetGenerationStatuses] = useState<Record<string, string>>({});
+  const activeAssetGenerationIdsRef = useRef<Set<string>>(new Set());
+
   // 使用 ref 追踪上一次的值，避免循环同步
   const lastSyncedRef = useRef<string>('');
   const hasInitializedRef = useRef(false); // 确保只初始化一次
-  
+
   // 从持久化存储恢复到本地 Map（仅在初始化时）
   // 注意：这里直接从 localStorage 读取，避免与 usePersistentState 的 useEffect 执行顺序问题
   useEffect(() => {
     // 已经初始化过就不再执行
     if (hasInitializedRef.current) return;
-    
+
     // 标记为已初始化
     hasInitializedRef.current = true;
-    
+
     // 直接从 localStorage 读取数据，确保获取最新值
     const CURRENT_DATA_VERSION = '7';
     let storedVersion: string | null = null;
     let storedAssetImages: Record<string, AssetImages> = {};
-    
+
     try {
       const versionItem = localStorage.getItem('storyboard_data_version');
       storedVersion = versionItem ? JSON.parse(versionItem) : null;
@@ -1341,13 +2376,13 @@ export default function StoryboardGenerator() {
     } catch (e) {
       console.error('[素材图片] 读取 localStorage 失败', e);
     }
-    
+
     // 检查数据版本，不同版本只做兼容处理不清除数据
     if (storedVersion !== CURRENT_DATA_VERSION) {
       console.log(`[素材图片] 数据版本 (${storedVersion || '无'} -> ${CURRENT_DATA_VERSION})，进行兼容处理`);
       setDataVersion(CURRENT_DATA_VERSION);
     }
-    
+
     // 无论版本是否匹配，只要 localStorage 中有素材图片数据就恢复
     if (Object.keys(storedAssetImages).length > 0) {
       hasInitializedRef.current = true;
@@ -1355,19 +2390,19 @@ export default function StoryboardGenerator() {
       // 只有当持久化数据与当前本地数据不同时才恢复
       if (lastSyncedRef.current !== objStr) {
         lastSyncedRef.current = objStr;
-        
+
         // 去重处理：确保每个素材中的 imageId 唯一
         // 同时清除 isGenerating 状态（防止卡在加载中）
         const deduplicatedObj: Record<string, AssetImages> = {};
-        
+
         for (const [key, value] of Object.entries(storedAssetImages)) {
           const asset = value as AssetImages;
-          
+
           // 去重 URL 并重新生成 imageId，确保唯一性
           const seenUrls = new Set<string>();
           const uniqueImages: typeof asset.images = [];
           let idx = 0;
-          
+
           for (const img of asset.images) {
             if (!seenUrls.has(img.imageUrl) && img.imageUrl) {
               seenUrls.add(img.imageUrl);
@@ -1383,13 +2418,13 @@ export default function StoryboardGenerator() {
               console.warn(`[素材图片] 跳过重复 URL: ${img.imageUrl}`);
             }
           }
-          
+
           deduplicatedObj[key] = {
             ...asset,
-            images: uniqueImages,
+            images: uniqueImages.slice(0, MAX_IMAGES_PER_ASSET),
           };
         }
-        
+
         setAssetImagesLocal(new Map(Object.entries(deduplicatedObj)));
         console.log('[素材图片] 从持久化存储恢复:', Object.keys(deduplicatedObj).length, '个素材');
       }
@@ -1427,6 +2462,39 @@ export default function StoryboardGenerator() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []); // 空依赖项，只在组件挂载时执行一次
 
+  // usePersistentState 会在账号状态恢复完成后异步更新对象；同步回本地 Map，
+  // 避免页面初次挂载时读取到空值后，后续恢复的图片仍无法显示。
+  useEffect(() => {
+    const persistedEntries = Object.entries(assetImagesObj || {});
+    if (persistedEntries.length === 0) return;
+
+    const deduplicatedObj: Record<string, AssetImages> = {};
+    for (const [key, asset] of persistedEntries) {
+      const seenUrls = new Set<string>();
+      const uniqueImages = (asset.images || []).flatMap((image, index) => {
+        if (!image.imageUrl || seenUrls.has(image.imageUrl)) return [];
+        seenUrls.add(image.imageUrl);
+        return [{
+          ...image,
+          imageId: image.imageId || `${key}-${index}`,
+          isGenerating: false,
+          generatingStatus: undefined,
+        }];
+      });
+      deduplicatedObj[key] = {
+        ...asset,
+        images: uniqueImages.slice(0, MAX_IMAGES_PER_ASSET),
+      };
+    }
+
+    const normalizedString = JSON.stringify(deduplicatedObj);
+    if (lastSyncedRef.current === normalizedString) return;
+
+    lastSyncedRef.current = normalizedString;
+    setAssetImagesLocal(new Map(Object.entries(deduplicatedObj)));
+    console.log('[素材图片] 账号持久化状态已同步到页面:', persistedEntries.length, '个素材');
+  }, [assetImagesObj]);
+
   useEffect(() => {
     if (!charactersData?.characters || !Array.isArray(charactersData.characters)) return;
 
@@ -1456,25 +2524,322 @@ export default function StoryboardGenerator() {
       console.log('[人物形象] 已补全缺失的人物形象字段');
     }
   }, [charactersData, characterBatchInfo, setCharactersData, setCharacterBatchInfo]);
-  
+
+  useEffect(() => {
+    const sourceProps = Array.isArray(propsData?.props) ? propsData.props : [];
+    const sourceBatchProps = Array.isArray(propBatchInfo?.allProps) ? propBatchInfo.allProps : [];
+    if (sourceProps.length === 0 && sourceBatchProps.length === 0) return;
+
+    const appendMissingInventoryProps = (rawProps: unknown[]) => {
+      const inventory = Array.isArray(propBatchInfo?.propInventory) ? propBatchInfo.propInventory : [];
+      if (inventory.length === 0) return rawProps;
+      const normalizeIdentity = (value: unknown) => String(value || '').replace(/\s+/g, '').toLocaleLowerCase();
+      const existingIdentities = new Set((rawProps as any[]).map(prop => (
+        normalizeIdentity(prop?.mainPropName || prop?.sourcePropName || prop?.name)
+      )));
+      const restoredProps = inventory.flatMap((item: any, index: number) => {
+        const name = String(item?.name || '').trim();
+        const identity = normalizeIdentity(name);
+        if (!name || existingIdentities.has(identity)) return [];
+        existingIdentities.add(identity);
+
+        const inventoryStates = Array.isArray(item?.states) ? item.states : [];
+        const stateVariants = inventoryStates.length > 0
+          ? inventoryStates.map((state: any, stateIndex: number) => {
+              const episodeNumber = Number.isFinite(Number(state?.episodeNumber)) ? Number(state.episodeNumber) : null;
+              const occurrences = Array.isArray(state?.occurrences) && state.occurrences.length > 0
+                ? state.occurrences
+                : (episodeNumber || state?.sceneName)
+                  ? [{
+                      episodeNumber,
+                      episodeLabel: state?.episodeLabel || (episodeNumber ? `第${episodeNumber}集` : '未标注集数'),
+                      sceneName: state?.sceneName || '',
+                      heading: state?.sceneName || '',
+                      stateLabel: state?.stateName || '基准状态',
+                    }]
+                  : [];
+              return {
+                id: `state-${stateIndex + 1}`,
+                stateName: state?.stateName || '基准状态',
+                scene: state?.sceneName || occurrences[0]?.sceneName || '',
+                stage: state?.episodeLabel || occurrences[0]?.episodeLabel || '',
+                description: state?.evidence || state?.visualChange || item?.visualSummary || '',
+                visualChange: stateIndex === 0 ? (state?.visualChange || '基准状态') : (state?.visualChange || ''),
+                transitionEvent: state?.transitionEvent || (stateIndex === 0 ? '基准状态' : ''),
+                narrativeFunction: state?.narrativeFunction || state?.storyFunction || '',
+                evidence: state?.evidence || '',
+                referenceFromStateId: stateIndex === 0 ? '' : `state-${stateIndex}`,
+                imageMode: stateIndex === 0 ? 'text-to-image' : 'image-to-image',
+                episodeNumbers: Array.from(new Set([
+                  ...(Array.isArray(state?.episodeNumbers) ? state.episodeNumbers : []),
+                  episodeNumber,
+                  ...occurrences.map((occurrence: any) => occurrence?.episodeNumber),
+                ].map(Number).filter(number => Number.isFinite(number) && number > 0))),
+                occurrences,
+              };
+            })
+          : [{
+              id: 'state-1',
+              stateName: '基准状态',
+              description: item?.visualSummary || item?.functionSummary || `${name}的基准外观`,
+              visualChange: '基准状态',
+              transitionEvent: '基准状态',
+              narrativeFunction: item?.functionSummary || '',
+              referenceFromStateId: '',
+              imageMode: 'text-to-image',
+              episodeNumbers: item?.episodeNumbers || [],
+              occurrences: [],
+            }];
+        const occurrences = stateVariants.flatMap((state: any) => state.occurrences || []);
+        return [{
+          id: 900000 + index,
+          name,
+          mainPropName: name,
+          type: item?.type || '普通道具',
+          importance: item?.type === '背景道具' ? '背景道具' : '普通道具',
+          description: item?.visualSummary || item?.functionSummary || `${name}的外观待补充`,
+          appearanceScenes: item?.appearanceScenes || [],
+          owner: item?.owner || '公共/场景',
+          function: item?.functionSummary || '按剧本场次使用',
+          visualDescription: item?.visualSummary || '',
+          stateLabel: stateVariants[0]?.stateName || '基准状态',
+          imageMode: 'text-to-image',
+          episodeNumbers: item?.episodeNumbers || [],
+          occurrences,
+          stateVariants,
+          notes: '由全文道具盘点记录自动补回',
+        }];
+      });
+      return [...rawProps, ...restoredProps];
+    };
+
+    const normalizePayload = (rawProps: unknown[]) => {
+      const props = expandPropStateUnits(appendMissingInventoryProps(rawProps)) as unknown as Prop[];
+      const totalMainProps = new Set(props.map(prop => prop.mainPropName || prop.name)).size;
+      return {
+        props,
+        totalProps: totalMainProps,
+        totalMainProps,
+        totalPropStates: props.length,
+      };
+    };
+
+    if (sourceProps.length > 0) {
+      const normalized = normalizePayload(sourceProps);
+      const currentSignature = JSON.stringify({
+        props: sourceProps,
+        totalProps: propsData?.totalProps,
+        totalMainProps: propsData?.totalMainProps,
+        totalPropStates: propsData?.totalPropStates,
+      });
+      if (currentSignature !== JSON.stringify(normalized)) {
+        setPropsData((previous: any) => ({ ...previous, ...normalized }));
+      }
+    }
+
+    if (sourceBatchProps.length > 0) {
+      const normalizedBatchProps = expandPropStateUnits(appendMissingInventoryProps(sourceBatchProps)) as unknown as Prop[];
+      if (JSON.stringify(sourceBatchProps) !== JSON.stringify(normalizedBatchProps)) {
+        setPropBatchInfo(previous => previous ? {
+          ...previous,
+          allProps: normalizedBatchProps,
+        } : previous);
+      }
+    }
+  }, [propsData, propBatchInfo, setPropsData, setPropBatchInfo]);
+
   // 本地 Map 变化时同步到持久化存储
   const setAssetImages = useCallback((updater: (prev: Map<string, AssetImages>) => Map<string, AssetImages>) => {
     setAssetImagesLocal(prev => {
-      const newMap = updater(prev);
+      const updatedMap = updater(prev);
+      const newMap = new Map<string, AssetImages>();
+      updatedMap.forEach((asset, key) => {
+        newMap.set(key, {
+          ...asset,
+          images: (asset.images || []).slice(0, MAX_IMAGES_PER_ASSET),
+        });
+      });
       const newObj = Object.fromEntries(newMap);
       const objStr = JSON.stringify(newObj);
-      
+
       // 只有当数据真正变化时才同步
       if (lastSyncedRef.current !== objStr) {
         lastSyncedRef.current = objStr;
         setAssetImagesObj(newObj);
         console.log('[素材图片] 保存到持久化存储:', Object.keys(newObj).length, '个素材');
       }
-      
+
       return newMap;
     });
   }, [setAssetImagesObj]);
-  
+
+  // 统一整理新旧场景数据：只保留真正需要单独制作的状态，并把重复卡片的图片迁移到保留状态。
+  useEffect(() => {
+    const sourceScenes = (sceneBatchInfo?.allScenes?.length ?? 0) > 0
+      ? sceneBatchInfo?.allScenes
+      : scenesData?.scenes;
+    if (!Array.isArray(sourceScenes) || sourceScenes.length === 0) return;
+
+    const normalized = normalizeSceneStateUnits(sourceScenes);
+    if (normalized.scenes.length === 0) return;
+
+    const sourceJson = JSON.stringify(sourceScenes);
+    const normalizedJson = JSON.stringify(normalized.scenes);
+    if (sourceJson === normalizedJson) return;
+
+    setScenesData((previous: any) => previous ? {
+      ...previous,
+      totalScenes: normalized.scenes.length,
+      totalMainScenes: Array.from(new Set(normalized.scenes.map(scene => getSceneMainLocation(scene)))).length,
+      scenes: normalized.scenes,
+    } : previous);
+
+    if (sceneBatchInfo?.allScenes) {
+      setSceneBatchInfo(previous => previous ? {
+        ...previous,
+        allScenes: normalized.scenes,
+      } : previous);
+    }
+
+    const aliasEntries = Object.entries(normalized.aliases).filter(([fromName, toName]) => (
+      fromName && toName && fromName !== toName
+    ));
+    if (aliasEntries.length > 0) {
+      setAssetImages(previous => {
+        const next = new Map(previous);
+        aliasEntries.forEach(([fromName, toName]) => {
+          const sourceKey = `scene-${fromName}`;
+          const targetKey = `scene-${toName}`;
+          const sourceAsset = next.get(sourceKey);
+          if (!sourceAsset) return;
+
+          const targetAsset = next.get(targetKey);
+          const seen = new Set<string>();
+          const mergedImages = [
+            ...(targetAsset?.images || []),
+            ...(sourceAsset.images || []),
+          ].filter(image => {
+            const identity = image.imageUrl || image.imageId;
+            if (!identity || seen.has(identity)) return false;
+            seen.add(identity);
+            return true;
+          }).slice(0, MAX_IMAGES_PER_ASSET).map((image, index) => ({
+            ...image,
+            imageId: `${targetKey}-${index}`,
+          }));
+
+          next.set(targetKey, {
+            ...(targetAsset || sourceAsset),
+            assetId: targetKey,
+            type: 'scene',
+            name: toName,
+            images: mergedImages,
+          });
+          next.delete(sourceKey);
+        });
+        return next;
+      });
+    }
+
+    console.log(`[场景状态整理] ${sourceScenes.length} 条识别结果整理为 ${normalized.scenes.length} 个有效制作状态`);
+  }, [
+    scenesData,
+    sceneBatchInfo,
+    setAssetImages,
+    setSceneBatchInfo,
+    setScenesData,
+  ]);
+
+  const selectPrimaryAssetImage = useCallback((
+    assetId: string,
+    imageId: string,
+    assetName: string,
+    assetType: 'scene' | 'character' | 'prop',
+    selectedImageUrl: string
+  ) => {
+    setAssetImages(prev => {
+      const asset = prev.get(assetId);
+      if (!asset) return prev;
+      const selectedImage = asset.images.find(image => image.imageId === imageId);
+      if (!selectedImage) return prev;
+
+      const next = new Map(prev);
+      next.set(assetId, {
+        ...asset,
+        images: [selectedImage, ...asset.images.filter(image => image.imageId !== imageId)],
+      });
+      return next;
+    });
+
+    if (assetType === 'character') {
+      const invalidateChangedIdentity = (characters: Character[]) => characters.map(character => {
+        if (character.name !== assetName || character.confirmedFaceImageUrl === selectedImageUrl) return character;
+        return {
+          ...character,
+          identityImageConfirmed: false,
+          confirmedFaceImageUrl: undefined,
+          identityConfirmedAt: undefined,
+          looks: character.looks?.map(look => (
+            look.imageUrl || look.fourViewImageUrl
+              ? {
+                  ...look,
+                  identityNeedsReview: Boolean(look.imageUrl),
+                  fourViewIdentityNeedsReview: Boolean(look.fourViewImageUrl),
+                }
+              : look
+          )),
+        };
+      });
+      setCharactersData((prev: any) => prev?.characters
+        ? { ...prev, characters: invalidateChangedIdentity(prev.characters) }
+        : prev);
+      setCharacterBatchInfo((prev: any) => prev?.allCharacters
+        ? { ...prev, allCharacters: invalidateChangedIdentity(prev.allCharacters) }
+        : prev);
+    }
+
+    setAssetImageChooserTarget(null);
+    toast.success(
+      assetType === 'character'
+        ? `已将所选图片设为「${assetName}」正脸主图；如身份基准未确认，请完成确认`
+        : `已将「${assetName}」所选图片设为主图`
+    );
+  }, [setAssetImages, setCharactersData, setCharacterBatchInfo]);
+
+  const requestPrimaryAssetImageSelection = useCallback((
+    assetId: string,
+    imageId: string,
+    assetName: string,
+    assetType: 'scene' | 'character' | 'prop',
+    selectedImageUrl: string
+  ) => {
+    if (assetType === 'character') {
+      const characterSource = charactersData?.characters?.length
+        ? charactersData.characters
+        : (characterBatchInfo?.allCharacters || []);
+      const character = characterSource.find((item: Character) => item.name === assetName);
+      if (
+        character?.identityImageConfirmed &&
+        character.confirmedFaceImageUrl &&
+        character.confirmedFaceImageUrl !== selectedImageUrl
+      ) {
+        setPendingCharacterFaceChange({
+          assetId,
+          imageId,
+          characterName: assetName,
+          imageUrl: selectedImageUrl,
+          affectedLookCount: (character.looks || []).filter((look: CharacterLook) => (
+            look.imageUrl || look.fourViewImageUrl
+          )).length,
+        });
+        setAssetImageChooserTarget(null);
+        return;
+      }
+    }
+
+    selectPrimaryAssetImage(assetId, imageId, assetName, assetType, selectedImageUrl);
+  }, [charactersData, characterBatchInfo, selectPrimaryAssetImage]);
+
   // 检测是否有恢复的数据
   useEffect(() => {
     if (fileContent && !showRestoreToast) {
@@ -1492,23 +2857,25 @@ export default function StoryboardGenerator() {
   // 自动修复 storyboardConfirmed 状态
   // 用于取消角色造型图片生成的 AbortController
   const lookAbortControllers = useRef<Map<string, AbortController>>(new Map());
+  const manuallyStoppedLookGenerations = useRef<Set<string>>(new Set());
 
   const getLookGenerationKey = (character: any, lookId: string) => {
     return `${character?.id ?? character?.name ?? 'unknown'}-${character?.name ?? 'unknown'}-${lookId}`;
   };
 
-  // 取消角色造型图片生成
+  // 仅停止当前页面等待；外部任务提交后无法在这里真正撤销
   const cancelLookGeneration = (character: any, lookId: string) => {
     const generationKey = getLookGenerationKey(character, lookId);
     // 先中止正在进行的请求
     const controller = lookAbortControllers.current.get(generationKey);
     if (controller) {
+      manuallyStoppedLookGenerations.current.add(generationKey);
       controller.abort();
       lookAbortControllers.current.delete(generationKey);
     }
     // 无论是否有 controller，都重置状态（防止点击时 controller 尚未注册的竞态）
     updateLookById(lookId, { isGenerating: false, generatingStatus: undefined }, character);
-    toast.info('已取消造型图片生成');
+    toast.warning('已停止在当前页面等待。外部生图任务可能仍会在后台完成并按成功结果扣点，请稍后到资产管理查看');
   };
 
   // 当章节成功生成分镜但 storyboardConfirmed 为 false 时自动修复
@@ -1516,15 +2883,15 @@ export default function StoryboardGenerator() {
   useEffect(() => {
     // 只在初始化时执行一次
     if (storyboardFixAppliedRef.current) return;
-    
+
     const chaptersToFix = Object.values(chapterStoryboards).filter(
       cs => cs.status === 'success' && cs.storyboard?.shots && cs.storyboard.shots.length > 0 && !cs.storyboardConfirmed
     );
-    
+
     if (chaptersToFix.length > 0) {
       storyboardFixAppliedRef.current = true;
       console.log(`[自动修复] 发现 ${chaptersToFix.length} 个章节的 storyboardConfirmed 状态需要修复`);
-      
+
       setChapterStoryboards(prev => {
         const updated = { ...prev };
         Object.keys(updated).forEach(key => {
@@ -1552,7 +2919,7 @@ export default function StoryboardGenerator() {
         method: 'POST',
       });
       const result = await response.json();
-      
+
       if (result.success) {
         const localDeleted = result.local?.totalDeleted ?? 0;
         const s3Deleted = result.s3?.totalDeleted ?? 0;
@@ -1569,8 +2936,13 @@ export default function StoryboardGenerator() {
     setCurrentStep(0);
     setUploadedFileName(null);
     setFileContent('');
+    setExecutionScript('');
+    setExecutionScriptSourceSignature('');
+    setCreationBible(DEFAULT_CREATION_BIBLE);
     setScenesData(null);
     setCharactersData(null);
+    setCharacterVoiceData(null);
+    setVoiceLibrary([]);
     setPropsData(null);
     setOutline(null);
     setSelectedChapter(null);
@@ -1583,6 +2955,7 @@ export default function StoryboardGenerator() {
     setVideoRatio('9:16');
     setAssetImagesObj({});
     setAssetImagesLocal(new Map());
+    setBatchAssetGenerationHistory({ ...INITIAL_BATCH_ASSET_GENERATION_HISTORY });
     setStepConfirmed({
       upload: false,
       extraction: false,
@@ -1594,31 +2967,30 @@ export default function StoryboardGenerator() {
     setExtractionStatus({
       scenes: 'pending',
       characters: 'pending',
+      voices: 'pending',
       props: 'pending',
       outline: 'pending',
     });
+    setExtractionReview(INITIAL_EXTRACTION_REVIEW);
+    extractionReviewRequestedRef.current = false;
+    extractionReviewRunningRef.current = false;
+    void syncVoiceLibrary(false);
     // 触发资产管理组件刷新
     setAssetRefreshTrigger(prev => prev + 1);
     toast.success('已清除所有数据，可以重新开始');
-  }, [clearAll, setCurrentStep, setUploadedFileName, setFileContent, setScenesData, 
-      setCharactersData, setPropsData, setOutline, setSelectedChapter, setStoryboard,
+  }, [clearAll, setCurrentStep, setUploadedFileName, setFileContent, setExecutionScript,
+      setExecutionScriptSourceSignature, setCreationBible, setScenesData,
+      setCharactersData, setCharacterVoiceData, setVoiceLibrary, setPropsData, setOutline, setSelectedChapter, setStoryboard,
       setImageStoryboards, setConnectingPrompts, setVideoResults, setVideoTotalDuration,
       setProgress, setVideoRatio, setAssetImagesObj, setStepConfirmed, setExtractionStatus,
-      requireLoginBeforePaidAction]);
-
-  const steps = [
-    { title: '上传文件', icon: Upload },
-    { title: '并行提取', icon: Sparkles },
-    { title: '生成分镜', icon: Film },
-    { title: '素材确认', icon: Package },
-    { title: '提示词确认', icon: FileText },
-    { title: '生成视频', icon: Video },
-  ];
+      setBatchAssetGenerationHistory, setExtractionReview,
+      requireLoginBeforePaidAction, syncVoiceLibrary]);
 
   // 导出项目
   const [isExporting, setIsExporting] = useState(false);
   const [isImporting, setIsImporting] = useState(false);
   const [exportingPromptChapter, setExportingPromptChapter] = useState<number | null>(null);
+  const [isExportingExecutionScript, setIsExportingExecutionScript] = useState(false);
 
   const getDownloadFilename = (contentDisposition: string | null, fallback: string) => {
     if (!contentDisposition) return fallback;
@@ -1660,14 +3032,20 @@ export default function StoryboardGenerator() {
     [STORAGE_KEYS.CURRENT_STEP]: currentStep,
     [STORAGE_KEYS.UPLOADED_FILE]: uploadedFileName,
     [STORAGE_KEYS.FILE_CONTENT]: fileContent,
+    [STORAGE_KEYS.EXECUTION_SCRIPT]: normalizedExecutionScript,
+    [STORAGE_KEYS.EXECUTION_SCRIPT_SOURCE_SIGNATURE]: executionScriptSourceSignature,
+    [STORAGE_KEYS.CREATION_BIBLE]: creationBible,
     [STORAGE_KEYS.SCENES_DATA]: scenesData,
     [STORAGE_KEYS.CHARACTERS_DATA]: charactersData,
+    [STORAGE_KEYS.CHARACTER_VOICE_DATA]: characterVoiceData,
+    [STORAGE_KEYS.VOICE_LIBRARY]: voiceLibrary,
     [STORAGE_KEYS.PROPS_DATA]: propsData,
     [STORAGE_KEYS.OUTLINE]: outline,
     [STORAGE_KEYS.OUTLINE_BATCH_INFO]: outlineBatchInfo,
     [STORAGE_KEYS.SCENE_BATCH_INFO]: sceneBatchInfo,
     [STORAGE_KEYS.CHARACTER_BATCH_INFO]: characterBatchInfo,
     [STORAGE_KEYS.PROP_BATCH_INFO]: propBatchInfo,
+    [STORAGE_KEYS.EXTRACTION_REVIEW]: extractionReview,
     [STORAGE_KEYS.EXTRACTION_STATUS]: extractionStatus,
     [STORAGE_KEYS.TOKEN_USAGE]: tokenUsage,
     [STORAGE_KEYS.STEP_CONFIRMED]: stepConfirmed,
@@ -1680,6 +3058,7 @@ export default function StoryboardGenerator() {
     [STORAGE_KEYS.PROGRESS]: progress,
     [STORAGE_KEYS.VIDEO_RATIO]: videoRatio,
     [STORAGE_KEYS.ASSET_IMAGES]: assetImagesObj,
+    [STORAGE_KEYS.BATCH_ASSET_GENERATION_HISTORY]: batchAssetGenerationHistory,
     [STORAGE_KEYS.CHAPTER_STORYBOARDS]: chapterStoryboards,
   });
 
@@ -1742,6 +3121,65 @@ export default function StoryboardGenerator() {
       toast.error(getNetworkErrorMessage(error, '导出本集提示词'));
     } finally {
       setExportingPromptChapter(null);
+    }
+  };
+
+  const handleExportExecutionScript = async () => {
+    if (!(await requireLoginBeforePaidAction())) return;
+
+    if (!hasCurrentExecutionScript()) {
+      toast.error('还没有可导出的执行剧本');
+      return;
+    }
+
+    setIsExportingExecutionScript(true);
+    const toastId = toast.loading('正在导出执行剧本 Word...');
+    try {
+      const response = await fetch('/api/export-execution-script-docx', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          storyTitle: outline?.title || uploadedFileName || getCurrentFileName(),
+          sourceFileName: getCurrentFileName(),
+          executionScript: normalizedExecutionScript,
+          saveToDownloads: false,
+        }),
+      });
+
+      if (!response.ok) {
+        const data = await response.json().catch(() => null);
+        throw new Error(data?.error || `导出失败：${response.status}`);
+      }
+
+      const contentType = response.headers.get('Content-Type') || '';
+      if (contentType.includes('application/json')) {
+        const data = await response.json();
+        if (!data?.success) {
+          throw new Error(data?.error || '导出失败');
+        }
+
+        toast.dismiss(toastId);
+        toast.success(`执行剧本已保存到下载目录：${data.filename}`);
+        if (data.filePath) {
+          navigator.clipboard.writeText(data.filePath).catch(() => undefined);
+          toast.info(`文件路径已复制：${data.filePath}`);
+        }
+        return;
+      }
+
+      const blob = await response.blob();
+      if (blob.size === 0) throw new Error('导出文件为空，请重新尝试');
+      const fallbackName = `${outline?.title || uploadedFileName || '执行剧本'}_执行剧本.docx`;
+      const filename = getDownloadFilename(response.headers.get('Content-Disposition'), fallbackName);
+      downloadBlob(blob, filename);
+      toast.dismiss(toastId);
+      toast.success(`执行剧本 Word 已导出：${filename}`);
+    } catch (error) {
+      console.error('导出执行剧本失败:', error);
+      toast.dismiss(toastId);
+      toast.error(getNetworkErrorMessage(error, '导出执行剧本'));
+    } finally {
+      setIsExportingExecutionScript(false);
     }
   };
 
@@ -1833,14 +3271,20 @@ export default function StoryboardGenerator() {
           currentStep: STORAGE_KEYS.CURRENT_STEP,
           uploadedFileName: STORAGE_KEYS.UPLOADED_FILE,
           fileContent: STORAGE_KEYS.FILE_CONTENT,
+          executionScript: STORAGE_KEYS.EXECUTION_SCRIPT,
+          executionScriptSourceSignature: STORAGE_KEYS.EXECUTION_SCRIPT_SOURCE_SIGNATURE,
+          creationBible: STORAGE_KEYS.CREATION_BIBLE,
           scenesData: STORAGE_KEYS.SCENES_DATA,
           charactersData: STORAGE_KEYS.CHARACTERS_DATA,
+          characterVoiceData: STORAGE_KEYS.CHARACTER_VOICE_DATA,
+          voiceLibrary: STORAGE_KEYS.VOICE_LIBRARY,
           propsData: STORAGE_KEYS.PROPS_DATA,
           outline: STORAGE_KEYS.OUTLINE,
           outlineBatchInfo: STORAGE_KEYS.OUTLINE_BATCH_INFO,
           sceneBatchInfo: STORAGE_KEYS.SCENE_BATCH_INFO,
           characterBatchInfo: STORAGE_KEYS.CHARACTER_BATCH_INFO,
           propBatchInfo: STORAGE_KEYS.PROP_BATCH_INFO,
+          extractionReview: STORAGE_KEYS.EXTRACTION_REVIEW,
           extractionStatus: STORAGE_KEYS.EXTRACTION_STATUS,
           tokenUsage: STORAGE_KEYS.TOKEN_USAGE,
           stepConfirmed: STORAGE_KEYS.STEP_CONFIRMED,
@@ -1853,6 +3297,7 @@ export default function StoryboardGenerator() {
           progress: STORAGE_KEYS.PROGRESS,
           videoRatio: STORAGE_KEYS.VIDEO_RATIO,
           assetImagesObj: STORAGE_KEYS.ASSET_IMAGES,
+          batchAssetGenerationHistory: STORAGE_KEYS.BATCH_ASSET_GENERATION_HISTORY,
           chapterStoryboards: STORAGE_KEYS.CHAPTER_STORYBOARDS,
         };
 
@@ -1908,7 +3353,7 @@ export default function StoryboardGenerator() {
         // 检查是否已配置
         const response = await fetch('/api/assets-config');
         const data = await response.json();
-        
+
         if (data.success && !data.assetsExist) {
           // 自动初始化
           await fetch('/api/assets-config', { method: 'PUT' });
@@ -1918,81 +3363,199 @@ export default function StoryboardGenerator() {
         console.error('初始化资产文件夹失败:', error);
       }
     };
-    
+
     initAssetsFolder();
   }, []);
-  
-  // 标记是否已执行恢复
-  const hasRestoredRef = useRef(false);
 
-  // 从本地恢复资产图片 - 只在首次加载且没有持久化数据时从服务器恢复
+  // 不同类型的提取数据可能分时恢复；按已知素材名称签名分别增量同步。
+  const assetRestoreSignatureRef = useRef('');
+
+  // 从本地资产文件夹恢复图片，并按素材名称重新关联到场景/人物/道具卡片。
   useEffect(() => {
-    // 已经恢复过就不再执行
-    if (hasRestoredRef.current) return;
-    // 如果已有持久化的选中状态，不需要从服务器恢复
-    if (Object.keys(assetImagesObj).length > 0) {
-      console.log('[素材图片] 已有持久化的选中状态，跳过服务器恢复');
-      hasRestoredRef.current = true;
-      return;
-    }
-    // 确保有提取数据才执行恢复（这样才能正确匹配名称）
-    if (!scenesData && !charactersData && !propsData) return;
-    
-    hasRestoredRef.current = true;
-    
+    const knownAssets: Record<'scene' | 'character' | 'prop', any[]> = {
+      scene: [
+        ...(scenesData?.scenes || []),
+        ...(sceneBatchInfo?.allScenes || []),
+      ],
+      character: [
+        ...(charactersData?.characters || []),
+        ...(characterBatchInfo?.allCharacters || []),
+      ],
+      prop: [
+        ...(propsData?.props || []),
+        ...(propBatchInfo?.allProps || []),
+      ],
+    };
+    const restoreSignature = (['scene', 'character', 'prop'] as const)
+      .map(type => {
+        const identities = knownAssets[type]
+          .map(item => normalizeAssetIdentity(item?.name))
+          .filter(Boolean);
+        return `${type}:${Array.from(new Set(identities)).sort().join('|')}`;
+      })
+      .join('::');
+
+    if (!Object.values(knownAssets).some(items => items.length > 0)) return;
+    if (assetRestoreSignatureRef.current === restoreSignature) return;
+    assetRestoreSignatureRef.current = restoreSignature;
+
     const restoreAssets = async () => {
       try {
-        console.log('[素材图片] 无持久化数据，从服务器恢复图片库...');
+        console.log('[素材图片] 正在从账号资产目录增量同步图片库...');
         const response = await fetch('/api/assets-restore?type=all');
         const data = await response.json();
-        
+
         if (data.success && data.assetImages) {
-          // 这里只是同步图片库信息，不自动添加到选中列表
-          // 用户需要通过"从图片库选择"来添加图片
-          console.log('[素材图片] 图片库同步完成，共', 
-            Object.values(data.assetImages).flat().length, '张图片');
+          const knownNameMaps = Object.fromEntries(
+            (['scene', 'character', 'prop'] as const).map(type => {
+              const nameMap = new Map<string, string>();
+              knownAssets[type].forEach(item => {
+                if (!item?.name) return;
+                const normalized = normalizeAssetIdentity(item.name);
+                if (normalized && !nameMap.has(`asset:${normalized}`)) nameMap.set(`asset:${normalized}`, item.name);
+                if (type === 'scene') {
+                  const stateIdentity = normalizeSceneMarkerIdentity(item.name);
+                  if (stateIdentity && !nameMap.has(`state:${stateIdentity}`)) {
+                    nameMap.set(`state:${stateIdentity}`, item.name);
+                  }
+                  if (!item.referenceSceneName && item.imageMode !== 'image-to-image') {
+                    const locationIdentity = normalizeSceneLocationIdentity(item.name);
+                    if (locationIdentity && !nameMap.has(`location:${locationIdentity}`)) {
+                      nameMap.set(`location:${locationIdentity}`, item.name);
+                    }
+                  }
+                }
+              });
+              return [type, nameMap];
+            })
+          ) as Record<'scene' | 'character' | 'prop', Map<string, string>>;
+
+          const restoredMatches: Array<{
+            type: 'scene' | 'character' | 'prop';
+            assetName: string;
+            file: RestoredAssetImage;
+            index: number;
+          }> = [];
+
+          (['scene', 'character', 'prop'] as const).forEach(type => {
+            const files = Array.isArray(data.assetImages[type])
+              ? data.assetImages[type] as RestoredAssetImage[]
+              : [];
+            files.forEach((file, index) => {
+              if (!file?.url || !file?.name) return;
+              const assetName = knownNameMaps[type].get(`asset:${normalizeAssetIdentity(file.name)}`)
+                || (type === 'scene'
+                  ? knownNameMaps.scene.get(`state:${normalizeSceneMarkerIdentity(file.name)}`)
+                    || knownNameMaps.scene.get(`location:${normalizeSceneLocationIdentity(file.name)}`)
+                  : undefined);
+              if (assetName) restoredMatches.push({ type, assetName, file, index });
+            });
+          });
+
+          if (restoredMatches.length > 0) {
+            setAssetImages(prev => {
+              const next = new Map(prev);
+              restoredMatches.forEach(({ type, assetName, file, index }) => {
+                const assetId = `${type}-${assetName}`;
+                const existing = next.get(assetId);
+                const existingImages = existing?.images || [];
+                if (existingImages.some(image => image.imageUrl === file.url)) return;
+
+                const restoredImage: AssetSingleImage = {
+                  imageId: `restored-${type}-${file.timestamp || Date.now()}-${index}`,
+                  imageUrl: file.url,
+                  isCustom: false,
+                  isFromLibrary: true,
+                  originalName: file.name,
+                  isGenerating: false,
+                };
+                next.set(assetId, {
+                  assetId,
+                  type,
+                  name: assetName,
+                  images: [...existingImages, restoredImage].slice(0, MAX_IMAGES_PER_ASSET),
+                });
+              });
+              return next;
+            });
+          }
+
+          console.log('[素材图片] 图片库同步完成，共',
+            Object.values(data.assetImages as Record<string, RestoredAssetImage[]>).flat().length,
+            '张图片，自动关联', restoredMatches.length, '张');
         }
       } catch (error) {
         console.error('恢复图片库失败:', error);
+        assetRestoreSignatureRef.current = '';
       }
     };
-    
+
     restoreAssets();
-  }, [assetImagesObj, scenesData, charactersData, propsData]);
+  }, [
+    scenesData,
+    charactersData,
+    propsData,
+    sceneBatchInfo,
+    characterBatchInfo,
+    propBatchInfo,
+    setAssetImages,
+  ]);
 
   // 单独重试某个提取
-  const retryExtraction = async (type: 'scenes' | 'characters' | 'props' | 'outline') => {
+  const retryExtraction = async (type: 'scenes' | 'characters' | 'voices' | 'props' | 'outline') => {
     if (!fileContent) {
       toast.error('请先上传文件');
       return;
     }
     if (!(await requireLoginBeforePaidAction())) return;
-    
+
+    if (type === 'scenes' || type === 'characters' || type === 'props') {
+      extractionReviewRequestedRef.current = true;
+      setExtractionReview({
+        ...INITIAL_EXTRACTION_REVIEW,
+        status: 'pending',
+      });
+    }
+
     setExtractionStatus(prev => ({ ...prev, [type]: 'loading' }));
+    const extractionContent = getExtractionSourceContent();
+    if (!extractionContent) {
+      setExtractionStatus(prev => ({ ...prev, [type]: 'pending' }));
+      toast.error('执行剧本未就绪，请先重新拉取执行剧本再提取');
+      return;
+    }
 
     if (type === 'outline') {
       setOutlineBatchInfo(null);
       setOutline(null);
-      await extractOutlineBatch(fileContent, uploadedFile?.name || uploadedFileName || '剧本', 1, null, [], undefined, true);
+      await extractOutlineBatch(extractionContent, getCurrentFileName(), 1, null, [], undefined, true);
       return;
     }
-    
+
     try {
-      const endpoint = `/api/extract-${type}`;
+      const endpoint = type === 'voices' ? '/api/extract-character-voices' : `/api/extract-${type}`;
       // 场景和人物提取需要传递 batch 参数
-      const body: any = { content: fileContent, fileName: uploadedFile?.name || uploadedFileName };
+      const body: any = {
+        content: extractionContent,
+        fileName: getCurrentFileName(),
+        sourceType: 'execution-script',
+      };
       if (type === 'scenes' || type === 'characters' || type === 'props') {
         body.batch = 1;
+        body.creationBible = getCreationBiblePayload();
       }
-      
+      if (type === 'voices') {
+        body.characters = charactersData?.characters || characterBatchInfo?.allCharacters || [];
+      }
+
       const response = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       });
-      
+
       const data = await response.json();
-      
+
       if (data.success) {
         switch (type) {
           case 'scenes':
@@ -2010,8 +3573,15 @@ export default function StoryboardGenerator() {
                 scenes: data.data.scenes,
               });
               if (data.batchInfo.hasMore) {
-                setExtractionStatus(prev => ({ ...prev, scenes: 'batch_confirm' as any }));
-                toast.info(`已提取第 ${data.batchInfo.currentBatch}/${data.batchInfo.totalBatches} 批场景，请确认后继续`);
+                setExtractionStatus(prev => ({ ...prev, scenes: 'loading' }));
+                await continueSceneExtraction({
+                  currentBatch: data.batchInfo.currentBatch,
+                  totalBatches: data.batchInfo.totalBatches,
+                  hasMore: data.batchInfo.hasMore,
+                  sceneMarkers: data.batchInfo.sceneMarkers || [],
+                  allScenes: data.data.scenes || [],
+                });
+                return;
               } else {
                 setExtractionStatus(prev => ({ ...prev, scenes: 'success' }));
               }
@@ -2035,12 +3605,24 @@ export default function StoryboardGenerator() {
                 characters: data.data.characters,
               });
               if (data.batchInfo.hasMore) {
-                setExtractionStatus(prev => ({ ...prev, characters: 'batch_confirm' as any }));
-                toast.info(`已提取第 ${data.batchInfo.currentBatch}/${data.batchInfo.totalBatches} 批人物，请确认后继续`);
-                return; // 不执行后面的success状态设置
+                setExtractionStatus(prev => ({ ...prev, characters: 'loading' }));
+                await continueCharacterExtraction({
+                  currentBatch: data.batchInfo.currentBatch,
+                  totalBatches: data.batchInfo.totalBatches,
+                  hasMore: data.batchInfo.hasMore,
+                  characterMarkers: data.batchInfo.characterMarkers || [],
+                  allCharacters: data.data.characters || [],
+                });
+                return;
               }
             } else {
               setCharactersData(data.data);
+            }
+            break;
+          case 'voices':
+            setCharacterVoiceData(data.data);
+            if (data.tokenUsage) {
+              setTokenUsage(prev => ({ ...prev, extractVoices: data.tokenUsage }));
             }
             break;
           case 'props':
@@ -2051,6 +3633,7 @@ export default function StoryboardGenerator() {
                 totalBatches: data.batchInfo.totalBatches,
                 hasMore: data.batchInfo.hasMore,
                 propMarkers: data.batchInfo.propMarkers || [],
+                propInventory: data.batchInfo.propInventory || [],
                 allProps: data.data.props || [],
               });
               setPropsData({
@@ -2058,9 +3641,16 @@ export default function StoryboardGenerator() {
                 props: data.data.props,
               });
               if (data.batchInfo.hasMore) {
-                setExtractionStatus(prev => ({ ...prev, props: 'batch_confirm' as any }));
-                toast.info(`已提取第 ${data.batchInfo.currentBatch}/${data.batchInfo.totalBatches} 批道具，请确认后继续`);
-                return; // 不执行后面的success状态设置
+                setExtractionStatus(prev => ({ ...prev, props: 'loading' }));
+                await continuePropExtraction({
+                  currentBatch: data.batchInfo.currentBatch,
+                  totalBatches: data.batchInfo.totalBatches,
+                  hasMore: data.batchInfo.hasMore,
+                  propMarkers: data.batchInfo.propMarkers || [],
+                  propInventory: data.batchInfo.propInventory || [],
+                  allProps: data.data.props || [],
+                });
+                return;
               }
             } else {
               setPropsData(data.data);
@@ -2068,14 +3658,14 @@ export default function StoryboardGenerator() {
             break;
         }
         setExtractionStatus(prev => ({ ...prev, [type]: 'success' }));
-        toast.success(`${type === 'scenes' ? '场景' : type === 'characters' ? '人物' : type === 'props' ? '道具' : '大纲'}提取成功`);
+        toast.success(`${type === 'scenes' ? '场景' : type === 'characters' ? '人物' : type === 'voices' ? '人物音色' : type === 'props' ? '道具' : '大纲'}提取成功`);
       } else {
         setExtractionStatus(prev => ({ ...prev, [type]: 'error' }));
-        toast.error(`${type === 'scenes' ? '场景' : type === 'characters' ? '人物' : type === 'props' ? '道具' : '大纲'}提取失败`);
+        toast.error(`${type === 'scenes' ? '场景' : type === 'characters' ? '人物' : type === 'voices' ? '人物音色' : type === 'props' ? '道具' : '大纲'}提取失败`);
       }
     } catch (error) {
       setExtractionStatus(prev => ({ ...prev, [type]: 'error' }));
-      toast.error(getNetworkErrorMessage(error, `提取${type === 'scenes' ? '场景' : type === 'characters' ? '人物' : type === 'props' ? '道具' : '大纲'}`));
+      toast.error(getNetworkErrorMessage(error, `提取${type === 'scenes' ? '场景' : type === 'characters' ? '人物' : type === 'voices' ? '人物音色' : type === 'props' ? '道具' : '大纲'}`));
     }
   };
 
@@ -2086,12 +3676,25 @@ export default function StoryboardGenerator() {
       return;
     }
     if (!(await requireLoginBeforePaidAction())) return;
-    
+    extractionReviewRequestedRef.current = true;
+    setExtractionReview({
+      ...INITIAL_EXTRACTION_REVIEW,
+      status: 'pending',
+    });
+
+    const extractionContent = getExtractionSourceContent();
+    if (!extractionContent) {
+      toast.error('执行剧本未就绪，请先重新拉取执行剧本再提取');
+      return;
+    }
     toast.info('正在重新提取所有内容...');
-    
+    const fileName = getCurrentFileName();
+    const creationBiblePayload = getCreationBiblePayload();
+
     setExtractionStatus({
       scenes: 'loading',
       characters: 'loading',
+      voices: 'loading',
       props: 'loading',
       outline: 'loading',
     });
@@ -2101,23 +3704,52 @@ export default function StoryboardGenerator() {
     setSceneBatchInfo(null);
     setCharacterBatchInfo(null);
     setPropBatchInfo(null);
+    setCharacterVoiceData(null);
 
-    // 并行调用场景、人物、道具 API，大纲单独分批处理
-    const [scenesResult, charactersResult, propsResult] = await Promise.allSettled([
+    // 并行调用场景、人物、人物音色、道具 API，大纲单独分批处理
+    const [scenesResult, charactersResult, voicesResult, propsResult] = await Promise.allSettled([
       fetch('/api/extract-scenes', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ content: fileContent, fileName: uploadedFile?.name || uploadedFileName, batch: 1 }),
+        body: JSON.stringify({
+          content: extractionContent,
+          fileName,
+          batch: 1,
+          creationBible: creationBiblePayload,
+          sourceType: 'execution-script',
+        }),
       }),
       fetch('/api/extract-characters', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ content: fileContent, fileName: uploadedFile?.name || uploadedFileName, batch: 1 }),
+        body: JSON.stringify({
+          content: extractionContent,
+          fileName,
+          batch: 1,
+          creationBible: creationBiblePayload,
+          sourceType: 'execution-script',
+        }),
+      }),
+      fetch('/api/extract-character-voices', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          content: extractionContent,
+          fileName,
+          characters: charactersData?.characters || [],
+          sourceType: 'execution-script',
+        }),
       }),
       fetch('/api/extract-props', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ content: fileContent, fileName: uploadedFile?.name || uploadedFileName, batch: 1 }),
+        body: JSON.stringify({
+          content: extractionContent,
+          fileName,
+          batch: 1,
+          creationBible: creationBiblePayload,
+          sourceType: 'execution-script',
+        }),
       }),
     ]);
 
@@ -2139,10 +3771,16 @@ export default function StoryboardGenerator() {
             totalScenes: data.batchInfo.sceneMarkers?.length || data.data.scenes?.length,
             scenes: data.data.scenes,
           });
-          
+
           if (data.batchInfo.hasMore) {
-            setExtractionStatus(prev => ({ ...prev, scenes: 'batch_confirm' as any }));
-            toast.info(`已提取第 ${data.batchInfo.currentBatch}/${data.batchInfo.totalBatches} 批场景，请确认后继续`);
+            setExtractionStatus(prev => ({ ...prev, scenes: 'loading' }));
+            void continueSceneExtraction({
+              currentBatch: data.batchInfo.currentBatch,
+              totalBatches: data.batchInfo.totalBatches,
+              hasMore: data.batchInfo.hasMore,
+              sceneMarkers: data.batchInfo.sceneMarkers || [],
+              allScenes: data.data.scenes || [],
+            });
           } else {
             setExtractionStatus(prev => ({ ...prev, scenes: 'success' }));
           }
@@ -2178,10 +3816,16 @@ export default function StoryboardGenerator() {
             totalCharacters: data.batchInfo.characterMarkers?.length || data.data.characters?.length,
             characters: data.data.characters,
           });
-          
+
           if (data.batchInfo.hasMore) {
-            setExtractionStatus(prev => ({ ...prev, characters: 'batch_confirm' as any }));
-            toast.info(`已提取第 ${data.batchInfo.currentBatch}/${data.batchInfo.totalBatches} 批人物，请确认后继续`);
+            setExtractionStatus(prev => ({ ...prev, characters: 'loading' }));
+            void continueCharacterExtraction({
+              currentBatch: data.batchInfo.currentBatch,
+              totalBatches: data.batchInfo.totalBatches,
+              hasMore: data.batchInfo.hasMore,
+              characterMarkers: data.batchInfo.characterMarkers || [],
+              allCharacters: data.data.characters || [],
+            });
           } else {
             setExtractionStatus(prev => ({ ...prev, characters: 'success' }));
           }
@@ -2199,6 +3843,22 @@ export default function StoryboardGenerator() {
       setExtractionStatus(prev => ({ ...prev, characters: 'error' }));
     }
 
+    // 处理人物音色结果
+    if (voicesResult.status === 'fulfilled') {
+      const data = await voicesResult.value.json();
+      if (data.success) {
+        setCharacterVoiceData(data.data);
+        setExtractionStatus(prev => ({ ...prev, voices: 'success' }));
+        if (data.tokenUsage) {
+          setTokenUsage(prev => ({ ...prev, extractVoices: data.tokenUsage }));
+        }
+      } else {
+        setExtractionStatus(prev => ({ ...prev, voices: 'error' }));
+      }
+    } else {
+      setExtractionStatus(prev => ({ ...prev, voices: 'error' }));
+    }
+
     // 处理道具结果
     if (propsResult.status === 'fulfilled') {
       const data = await propsResult.value.json();
@@ -2211,16 +3871,24 @@ export default function StoryboardGenerator() {
             totalBatches: data.batchInfo.totalBatches,
             hasMore: data.batchInfo.hasMore,
             propMarkers: data.batchInfo.propMarkers || [],
+            propInventory: data.batchInfo.propInventory || [],
             allProps: data.data.props || [],
           });
           setPropsData({
             totalProps: data.batchInfo.propMarkers?.length || data.data.props?.length,
             props: data.data.props,
           });
-          
+
           if (data.batchInfo.hasMore) {
-            setExtractionStatus(prev => ({ ...prev, props: 'batch_confirm' as any }));
-            toast.info(`已提取第 ${data.batchInfo.currentBatch}/${data.batchInfo.totalBatches} 批道具，请确认后继续`);
+            setExtractionStatus(prev => ({ ...prev, props: 'loading' }));
+            void continuePropExtraction({
+              currentBatch: data.batchInfo.currentBatch,
+              totalBatches: data.batchInfo.totalBatches,
+              hasMore: data.batchInfo.hasMore,
+              propMarkers: data.batchInfo.propMarkers || [],
+              propInventory: data.batchInfo.propInventory || [],
+              allProps: data.data.props || [],
+            });
           } else {
             setExtractionStatus(prev => ({ ...prev, props: 'success' }));
           }
@@ -2239,14 +3907,14 @@ export default function StoryboardGenerator() {
     }
 
     // 提取第一批大纲
-    await extractOutlineBatch(fileContent, uploadedFile?.name || uploadedFileName || '剧本', 1, null, []);
+    await extractOutlineBatch(extractionContent, fileName, 1, null, []);
   };
 
   // 提取大纲的一批章节
   const extractOutlineBatch = async (
-    content: string, 
-    fileName: string, 
-    batch: number, 
+    content: string,
+    fileName: string,
+    batch: number,
     basicInfo: { title: string; summary: string } | null,
     existingChapters: Chapter[],
     episodeMarkers?: Array<{ number: number; marker: string }> | number[],
@@ -2258,20 +3926,24 @@ export default function StoryboardGenerator() {
       const response = await fetch('/api/extract-outline', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 
-          content, 
-          fileName, 
+        body: JSON.stringify({
+          content,
+          fileName,
           batch,
+          sourceType: 'execution-script',
           episodeMarkers: episodeMarkers || outlineBatchInfo?.episodeMarkers,  // 传递集数数组
           basicInfo: basicInfo || outlineBatchInfo?.basicInfo,
         }),
       });
-      
+
       const data = await response.json();
-      
+
       if (data.success) {
         // 合并章节，并去除重复的 chapterNumber
-        const combinedChapters = [...existingChapters, ...data.outline.chapters];
+        const combinedChapters = [...existingChapters, ...data.outline.chapters].map((chapter: Chapter) => ({
+          ...chapter,
+          title: getCanonicalEpisodeTitle(chapter.chapterNumber),
+        }));
         const uniqueChapters = combinedChapters.reduce((acc: Chapter[], chapter: Chapter) => {
           if (!acc.find(c => c.chapterNumber === chapter.chapterNumber)) {
             acc.push(chapter);
@@ -2279,7 +3951,7 @@ export default function StoryboardGenerator() {
           return acc;
         }, []);
         const newChapters = uniqueChapters;
-        
+
         const nextOutlineBatchInfo = {
           currentBatch: data.batchInfo.currentBatch,
           totalBatches: data.batchInfo.totalBatches,
@@ -2289,7 +3961,7 @@ export default function StoryboardGenerator() {
           allChapters: newChapters,
           episodeMarkers: data.batchInfo.episodeMarkers || outlineBatchInfo?.episodeMarkers || [],
         };
-        
+
         // 更新批次信息，保存 episodeMarkers
         setOutlineBatchInfo(nextOutlineBatchInfo);
 
@@ -2331,7 +4003,7 @@ export default function StoryboardGenerator() {
           } else {
             // 状态设为 'batch_confirm' 表示等待确认
             setExtractionStatus(prev => ({ ...prev, outline: 'batch_confirm' as any }));
-            toast.info(`已提取第 ${data.batchInfo.currentBatch}/${data.batchInfo.totalBatches} 批章节，请确认后继续`);
+            toast.info(`已提取第 ${data.batchInfo.currentBatch}/${data.batchInfo.totalBatches} 批分集，请确认后继续`);
           }
         }
       } else {
@@ -2346,6 +4018,7 @@ export default function StoryboardGenerator() {
 
   useEffect(() => {
     if (outlineAutoResumeRef.current || !fileContent || !outline) return;
+    if (!hasConfirmedCreationBible()) return;
 
     const expectedChapters = outlineBatchInfo?.totalEpisodes || outline.totalChapters || 0;
     const extractedChapters = Math.max(
@@ -2359,7 +4032,7 @@ export default function StoryboardGenerator() {
       setCurrentStep(1);
       setProgress(25);
       setExtractionStatus(prev => ({ ...prev, outline: 'loading' }));
-      toast.info(`检测到大纲只提取了 ${extractedChapters}/${expectedChapters} 章，正在自动补齐剩余章节...`);
+      toast.info(`检测到大纲只提取了 ${extractedChapters}/${expectedChapters} 集，正在自动补齐剩余分集...`);
 
       const startBatch = outlineBatchInfo?.hasMore
         ? outlineBatchInfo.currentBatch + 1
@@ -2369,8 +4042,8 @@ export default function StoryboardGenerator() {
         : outline.chapters || [];
 
       void extractOutlineBatch(
-        fileContent,
-        uploadedFile?.name || uploadedFileName || '剧本',
+        getExtractionSourceContent(),
+        getCurrentFileName(),
         startBatch,
         outlineBatchInfo?.basicInfo || null,
         outlineBatchInfo?.hasMore ? existingChapters : [],
@@ -2379,67 +4052,72 @@ export default function StoryboardGenerator() {
       );
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [fileContent, uploadedFileName, outline, outlineBatchInfo]);
+  }, [fileContent, uploadedFileName, outline, outlineBatchInfo, getCurrentFileName, getExtractionSourceContent]);
 
   // 继续提取下一批场景
-  const continueSceneExtraction = async () => {
-    if (!fileContent || !sceneBatchInfo) {
+  const continueSceneExtraction = async (
+    batchState: SceneBatchInfo | null = sceneBatchInfo,
+    isContinuation = false
+  ) => {
+    if (!fileContent || !batchState) {
       toast.error('无法继续提取场景');
       return;
     }
-    if (!(await requireLoginBeforePaidAction())) return;
-    
-    const nextBatch = sceneBatchInfo.currentBatch + 1;
-    
-    // 先更新批次信息为"正在提取"状态
-    setSceneBatchInfo({
-      ...sceneBatchInfo,
-      currentBatch: nextBatch,
-    });
-    
+    if (!isContinuation) {
+      if (assetExtractionChainRef.current.scenes) return;
+      assetExtractionChainRef.current.scenes = true;
+    }
+    if (!(await requireLoginBeforePaidAction())) {
+      if (!isContinuation) assetExtractionChainRef.current.scenes = false;
+      return;
+    }
+
+    const nextBatch = batchState.currentBatch + 1;
     setExtractionStatus(prev => ({ ...prev, scenes: 'loading' }));
-    toast.info(`正在提取第 ${nextBatch}/${sceneBatchInfo.totalBatches} 批场景...`);
-    
+
     try {
       const response = await fetch('/api/extract-scenes', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          content: fileContent,
-          fileName: uploadedFile?.name || uploadedFileName || '剧本',
+          content: getExtractionSourceContent(),
+          fileName: getCurrentFileName(),
           batch: nextBatch,
-          sceneMarkers: sceneBatchInfo.sceneMarkers,
+          sceneMarkers: batchState.sceneMarkers,
+          creationBible: getCreationBiblePayload(),
+          sourceType: 'execution-script',
         }),
       });
-      
+
       const data = await response.json();
-      
+
       if (data.success) {
-        const newScenes = [...sceneBatchInfo.allScenes, ...data.data.scenes];
-        
-        setSceneBatchInfo({
+        const newScenes = [...batchState.allScenes, ...data.data.scenes];
+        const nextBatchState: SceneBatchInfo = {
           currentBatch: data.batchInfo.currentBatch,
           totalBatches: data.batchInfo.totalBatches,
           hasMore: data.batchInfo.hasMore,
           sceneMarkers: data.batchInfo.sceneMarkers,
           allScenes: newScenes,
-        });
-        
+        };
+
+        setSceneBatchInfo(nextBatchState);
+
         setScenesData({
           totalScenes: newScenes.length,
           scenes: newScenes,
         });
-        
-        if (!data.batchInfo.hasMore) {
-          setExtractionStatus(prev => ({ ...prev, scenes: 'success' }));
-          toast.success('场景提取完成');
-        } else {
-          setExtractionStatus(prev => ({ ...prev, scenes: 'batch_confirm' }));
-          toast.info(`已提取第 ${data.batchInfo.currentBatch}/${data.batchInfo.totalBatches} 批场景，请确认后继续`);
-        }
-        
+
         if (data.tokenUsage) {
           setTokenUsage(prev => ({ ...prev, extractScenes: data.tokenUsage }));
+        }
+
+        if (!data.batchInfo.hasMore) {
+          setExtractionStatus(prev => ({ ...prev, scenes: 'success' }));
+          toast.success(`场景已全部提取完成，正在整理有效制作状态`);
+        } else {
+          setExtractionStatus(prev => ({ ...prev, scenes: 'loading' }));
+          await continueSceneExtraction(nextBatchState, true);
         }
       } else {
         setExtractionStatus(prev => ({ ...prev, scenes: 'error' }));
@@ -2448,68 +4126,75 @@ export default function StoryboardGenerator() {
     } catch (error) {
       setExtractionStatus(prev => ({ ...prev, scenes: 'error' }));
       toast.error(getNetworkErrorMessage(error, '提取场景'));
+    } finally {
+      if (!isContinuation) assetExtractionChainRef.current.scenes = false;
     }
   };
 
   // 继续提取下一批人物
-  const continueCharacterExtraction = async () => {
-    if (!fileContent || !characterBatchInfo) {
+  const continueCharacterExtraction = async (
+    batchState: CharacterBatchInfo | null = characterBatchInfo,
+    isContinuation = false
+  ) => {
+    if (!fileContent || !batchState) {
       toast.error('无法继续提取人物');
       return;
     }
-    if (!(await requireLoginBeforePaidAction())) return;
-    
-    const nextBatch = characterBatchInfo.currentBatch + 1;
-    
-    // 先更新批次信息为"正在提取"状态
-    setCharacterBatchInfo({
-      ...characterBatchInfo,
-      currentBatch: nextBatch,
-    });
-    
+    if (!isContinuation) {
+      if (assetExtractionChainRef.current.characters) return;
+      assetExtractionChainRef.current.characters = true;
+    }
+    if (!(await requireLoginBeforePaidAction())) {
+      if (!isContinuation) assetExtractionChainRef.current.characters = false;
+      return;
+    }
+
+    const nextBatch = batchState.currentBatch + 1;
     setExtractionStatus(prev => ({ ...prev, characters: 'loading' }));
-    toast.info(`正在提取第 ${nextBatch}/${characterBatchInfo.totalBatches} 批人物...`);
-    
+
     try {
       const response = await fetch('/api/extract-characters', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          content: fileContent,
-          fileName: uploadedFile?.name || uploadedFileName || '剧本',
+          content: getExtractionSourceContent(),
+          fileName: getCurrentFileName(),
           batch: nextBatch,
-          characterMarkers: characterBatchInfo.characterMarkers,
+          characterMarkers: batchState.characterMarkers,
+          creationBible: getCreationBiblePayload(),
+          sourceType: 'execution-script',
         }),
       });
-      
+
       const data = await response.json();
-      
+
       if (data.success) {
-        const newCharacters = [...characterBatchInfo.allCharacters, ...data.data.characters];
-        
-        setCharacterBatchInfo({
+        const newCharacters = [...batchState.allCharacters, ...data.data.characters];
+        const nextBatchState: CharacterBatchInfo = {
           currentBatch: data.batchInfo.currentBatch,
           totalBatches: data.batchInfo.totalBatches,
           hasMore: data.batchInfo.hasMore,
           characterMarkers: data.batchInfo.characterMarkers,
           allCharacters: newCharacters,
-        });
-        
+        };
+
+        setCharacterBatchInfo(nextBatchState);
+
         setCharactersData({
           totalCharacters: newCharacters.length,
           characters: newCharacters,
         });
-        
-        if (!data.batchInfo.hasMore) {
-          setExtractionStatus(prev => ({ ...prev, characters: 'success' }));
-          toast.success('人物提取完成');
-        } else {
-          setExtractionStatus(prev => ({ ...prev, characters: 'batch_confirm' }));
-          toast.info(`已提取第 ${data.batchInfo.currentBatch}/${data.batchInfo.totalBatches} 批人物，请确认后继续`);
-        }
-        
+
         if (data.tokenUsage) {
           setTokenUsage(prev => ({ ...prev, extractCharacters: data.tokenUsage }));
+        }
+
+        if (!data.batchInfo.hasMore) {
+          setExtractionStatus(prev => ({ ...prev, characters: 'success' }));
+          toast.success(`人物已全部提取完成，共 ${newCharacters.length} 人`);
+        } else {
+          setExtractionStatus(prev => ({ ...prev, characters: 'loading' }));
+          await continueCharacterExtraction(nextBatchState, true);
         }
       } else {
         setExtractionStatus(prev => ({ ...prev, characters: 'error' }));
@@ -2518,68 +4203,80 @@ export default function StoryboardGenerator() {
     } catch (error) {
       setExtractionStatus(prev => ({ ...prev, characters: 'error' }));
       toast.error(getNetworkErrorMessage(error, '提取人物'));
+    } finally {
+      if (!isContinuation) assetExtractionChainRef.current.characters = false;
     }
   };
 
   // 继续提取下一批道具
-  const continuePropExtraction = async () => {
-    if (!fileContent || !propBatchInfo) {
+  const continuePropExtraction = async (
+    batchState: PropBatchInfo | null = propBatchInfo,
+    isContinuation = false
+  ) => {
+    if (!fileContent || !batchState) {
       toast.error('无法继续提取道具');
       return;
     }
-    if (!(await requireLoginBeforePaidAction())) return;
-    
-    const nextBatch = propBatchInfo.currentBatch + 1;
-    
-    // 先更新批次信息为"正在提取"状态
-    setPropBatchInfo({
-      ...propBatchInfo,
-      currentBatch: nextBatch,
-    });
-    
+    if (!isContinuation) {
+      if (assetExtractionChainRef.current.props) return;
+      assetExtractionChainRef.current.props = true;
+    }
+    if (!(await requireLoginBeforePaidAction())) {
+      if (!isContinuation) assetExtractionChainRef.current.props = false;
+      return;
+    }
+
+    const nextBatch = batchState.currentBatch + 1;
     setExtractionStatus(prev => ({ ...prev, props: 'loading' }));
-    toast.info(`正在提取第 ${nextBatch}/${propBatchInfo.totalBatches} 批道具...`);
-    
+
     try {
       const response = await fetch('/api/extract-props', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          content: fileContent,
-          fileName: uploadedFile?.name || uploadedFileName || '剧本',
+          content: getExtractionSourceContent(),
+          fileName: getCurrentFileName(),
           batch: nextBatch,
-          propMarkers: propBatchInfo.propMarkers,
+          propMarkers: batchState.propMarkers,
+          propInventory: batchState.propInventory || [],
+          creationBible: getCreationBiblePayload(),
+          sourceType: 'execution-script',
         }),
       });
-      
+
       const data = await response.json();
-      
+
       if (data.success) {
-        const newProps = [...propBatchInfo.allProps, ...data.data.props];
-        
-        setPropBatchInfo({
+        const newProps = [...batchState.allProps, ...data.data.props];
+        const mainPropCount = new Set(newProps.map((prop: Prop) => prop.mainPropName || prop.name)).size;
+        const nextBatchState: PropBatchInfo = {
           currentBatch: data.batchInfo.currentBatch,
           totalBatches: data.batchInfo.totalBatches,
           hasMore: data.batchInfo.hasMore,
           propMarkers: data.batchInfo.propMarkers,
+          propInventory: data.batchInfo.propInventory || batchState.propInventory || [],
           allProps: newProps,
-        });
-        
+        };
+
+        setPropBatchInfo(nextBatchState);
+
         setPropsData({
-          totalProps: newProps.length,
+          totalProps: mainPropCount,
+          totalMainProps: mainPropCount,
+          totalPropStates: newProps.length,
           props: newProps,
         });
-        
-        if (!data.batchInfo.hasMore) {
-          setExtractionStatus(prev => ({ ...prev, props: 'success' }));
-          toast.success('道具提取完成');
-        } else {
-          setExtractionStatus(prev => ({ ...prev, props: 'batch_confirm' }));
-          toast.info(`已提取第 ${data.batchInfo.currentBatch}/${data.batchInfo.totalBatches} 批道具，请确认后继续`);
-        }
-        
+
         if (data.tokenUsage) {
           setTokenUsage(prev => ({ ...prev, extractProps: data.tokenUsage }));
+        }
+
+        if (!data.batchInfo.hasMore) {
+          setExtractionStatus(prev => ({ ...prev, props: 'success' }));
+          toast.success(`道具已全部提取完成，共 ${mainPropCount} 个物品、${newProps.length} 个制作状态`);
+        } else {
+          setExtractionStatus(prev => ({ ...prev, props: 'loading' }));
+          await continuePropExtraction(nextBatchState, true);
         }
       } else {
         setExtractionStatus(prev => ({ ...prev, props: 'error' }));
@@ -2588,8 +4285,298 @@ export default function StoryboardGenerator() {
     } catch (error) {
       setExtractionStatus(prev => ({ ...prev, props: 'error' }));
       toast.error(getNetworkErrorMessage(error, '提取道具'));
+    } finally {
+      if (!isContinuation) assetExtractionChainRef.current.props = false;
     }
   };
+
+  const migrateReviewedAssetAliases = useCallback((aliases: {
+    scenes?: Record<string, string>;
+    characters?: Record<string, string>;
+    props?: Record<string, string>;
+  }) => {
+    const aliasGroups = [
+      ['scene', aliases.scenes || {}],
+      ['character', aliases.characters || {}],
+      ['prop', aliases.props || {}],
+    ] as const;
+    if (!aliasGroups.some(([, entries]) => Object.keys(entries).length > 0)) return;
+
+    setAssetImages(previous => {
+      const next = new Map(previous);
+      aliasGroups.forEach(([type, entries]) => {
+        Object.entries(entries).forEach(([fromName, toName]) => {
+          if (!fromName || !toName || fromName === toName) return;
+          const sourceKey = `${type}-${fromName}`;
+          const targetKey = `${type}-${toName}`;
+          const sourceAsset = next.get(sourceKey);
+          if (!sourceAsset) return;
+          const targetAsset = next.get(targetKey);
+          const seen = new Set<string>();
+          const images = [
+            ...(targetAsset?.images || []),
+            ...(sourceAsset.images || []),
+          ].filter(image => {
+            const identity = image.imageUrl || image.imageId;
+            if (!identity || seen.has(identity)) return false;
+            seen.add(identity);
+            return true;
+          }).slice(0, MAX_IMAGES_PER_ASSET).map((image, index) => ({
+            ...image,
+            imageId: `${targetKey}-${index}`,
+          }));
+          next.set(targetKey, {
+            ...(targetAsset || sourceAsset),
+            assetId: targetKey,
+            type,
+            name: toName,
+            images,
+          });
+          next.delete(sourceKey);
+        });
+      });
+      return next;
+    });
+  }, [setAssetImages]);
+
+  const runExtractionQualityReview = useCallback(async (manual = false) => {
+    if (extractionReviewRunningRef.current) return;
+    if (!fileContent) {
+      toast.error('缺少原剧本，无法进行全文复核');
+      return;
+    }
+    if (!(await requireLoginBeforePaidAction())) return;
+
+    const scenes = ((sceneBatchInfo?.allScenes?.length ?? 0) > 0
+      ? sceneBatchInfo?.allScenes
+      : scenesData?.scenes) || [];
+    const characters = ((characterBatchInfo?.allCharacters?.length ?? 0) > 0
+      ? characterBatchInfo?.allCharacters
+      : charactersData?.characters) || [];
+    const props = ((propBatchInfo?.allProps?.length ?? 0) > 0
+      ? propBatchInfo?.allProps
+      : propsData?.props) || [];
+    if (scenes.length === 0 || characters.length === 0 || props.length === 0) {
+      if (manual) toast.error('请先完成人物、场景和道具提取');
+      return;
+    }
+    const reviewContent = getExtractionSourceContent();
+    if (!reviewContent) {
+      toast.error('执行剧本未就绪，已停止质量核验；请先重新拉取执行剧本');
+      return;
+    }
+
+    extractionReviewRunningRef.current = true;
+    extractionReviewRequestedRef.current = false;
+    setExtractionReview(previous => ({
+      ...previous,
+      status: 'reviewing',
+      error: undefined,
+    }));
+    const toastId = toast.loading('正在通读原剧本，核验重复项与人物造型时间线...');
+
+    try {
+      const response = await fetch('/api/review-extractions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          content: reviewContent,
+          sourceType: 'execution-script',
+          scenes,
+          characters,
+          props,
+        }),
+      });
+      const result = await response.json().catch(() => null);
+      if (!response.ok || !result?.success) {
+        throw new Error(result?.details || result?.error || '提取结果复核失败');
+      }
+
+      const reviewedScenes = Array.isArray(result.data?.scenes) ? result.data.scenes : scenes;
+      const reviewedCharacters = Array.isArray(result.data?.characters) ? result.data.characters : characters;
+      const reviewedProps = Array.isArray(result.data?.props) ? result.data.props : props;
+
+      setScenesData((previous: any) => ({
+        ...(previous || {}),
+        totalScenes: reviewedScenes.length,
+        totalMainScenes: result.data?.totalMainScenes ?? new Set(reviewedScenes.map((scene: Scene) => getSceneMainLocation(scene))).size,
+        scenes: reviewedScenes,
+        qualityReview: result.review,
+      }));
+      setSceneBatchInfo(previous => previous ? {
+        ...previous,
+        currentBatch: previous.totalBatches,
+        hasMore: false,
+        sceneMarkers: Array.from(new Set<string>(reviewedScenes.map((scene: Scene) => getSceneMainLocation(scene))))
+          .filter((name): name is string => Boolean(name)),
+        allScenes: reviewedScenes,
+      } : previous);
+
+      setCharactersData((previous: any) => ({
+        ...(previous || {}),
+        totalCharacters: reviewedCharacters.length,
+        characters: reviewedCharacters,
+        qualityReview: result.review,
+      }));
+      setCharacterBatchInfo(previous => previous ? {
+        ...previous,
+        currentBatch: previous.totalBatches,
+        hasMore: false,
+        characterMarkers: reviewedCharacters.map((character: Character) => character.name),
+        allCharacters: reviewedCharacters,
+      } : previous);
+
+      const totalMainProps = result.data?.totalMainProps ?? new Set(
+        reviewedProps.map((prop: Prop) => prop.mainPropName || prop.name)
+      ).size;
+      setPropsData((previous: any) => ({
+        ...(previous || {}),
+        totalProps: totalMainProps,
+        totalMainProps,
+        totalPropStates: reviewedProps.length,
+        props: reviewedProps,
+        qualityReview: result.review,
+      }));
+      setPropBatchInfo(previous => previous ? {
+        ...previous,
+        currentBatch: previous.totalBatches,
+        hasMore: false,
+        propMarkers: Array.from(new Set(reviewedProps.map((prop: Prop) => prop.mainPropName || prop.name))),
+        propInventory: [],
+        allProps: reviewedProps,
+      } : previous);
+
+      migrateReviewedAssetAliases(result.aliases || {});
+      const nextReview: ExtractionReviewState = {
+        status: 'success',
+        candidateCount: Number(result.review?.candidateCount || 0),
+        mergedGroupCount: Number(result.review?.mergedGroupCount || 0),
+        removedCount: {
+          scenes: Number(result.review?.removedCount?.scenes || 0),
+          characters: Number(result.review?.removedCount?.characters || 0),
+          props: Number(result.review?.removedCount?.props || 0),
+        },
+        groups: Array.isArray(result.review?.groups) ? result.review.groups : [],
+        lifecycle: result.review?.lifecycle ? {
+          requiredCount: Number(result.review.lifecycle.requiredCount || 0),
+          coveredBeforeRepair: Number(result.review.lifecycle.coveredBeforeRepair || 0),
+          repairedByModel: Number(result.review.lifecycle.repairedByModel || 0),
+          fallbackAdded: Number(result.review.lifecycle.fallbackAdded || 0),
+          unresolvedCount: Number(result.review.lifecycle.unresolvedCount || 0),
+          affectedCharacters: Array.isArray(result.review.lifecycle.affectedCharacters)
+            ? result.review.lifecycle.affectedCharacters.filter(Boolean)
+            : [],
+        } : undefined,
+        reviewedAt: Number(result.review?.reviewedAt || Date.now()),
+      };
+      setExtractionReview(nextReview);
+      toast.dismiss(toastId);
+      const lifecycleAdded = (nextReview.lifecycle?.repairedByModel || 0) + (nextReview.lifecycle?.fallbackAdded || 0);
+      const reviewDescription = [
+        nextReview.mergedGroupCount > 0
+          ? `合并 ${nextReview.mergedGroupCount} 组重复项（场景 ${nextReview.removedCount.scenes}、人物 ${nextReview.removedCount.characters}、道具 ${nextReview.removedCount.props}）`
+          : '未发现可确认的重复项',
+        lifecycleAdded > 0
+          ? `补齐 ${lifecycleAdded} 项人物时期/状态造型`
+          : `人物造型时间线已覆盖 ${nextReview.lifecycle?.requiredCount || 0} 项明确证据`,
+        (nextReview.lifecycle?.unresolvedCount || 0) > 0
+          ? `仍有 ${nextReview.lifecycle?.unresolvedCount} 项需人工复核`
+          : '',
+      ].filter(Boolean).join('；');
+      toast.success('全文质量核验完成', {
+        description: reviewDescription,
+        duration: 9000,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '提取结果复核失败';
+      console.error('[全文提取复核] 失败:', error);
+      setExtractionReview(previous => ({
+        ...previous,
+        status: 'error',
+        error: message,
+      }));
+      toast.dismiss(toastId);
+      toast.error(message);
+    } finally {
+      extractionReviewRunningRef.current = false;
+    }
+  }, [
+    fileContent,
+    sceneBatchInfo,
+    characterBatchInfo,
+    propBatchInfo,
+    scenesData,
+    charactersData,
+    propsData,
+    getExtractionSourceContent,
+    requireLoginBeforePaidAction,
+    migrateReviewedAssetAliases,
+    setScenesData,
+    setSceneBatchInfo,
+    setCharactersData,
+    setCharacterBatchInfo,
+    setPropsData,
+    setPropBatchInfo,
+    setExtractionReview,
+  ]);
+
+  useEffect(() => {
+    if (!extractionReviewRequestedRef.current || extractionReviewRunningRef.current) return;
+    const allAssetExtractionsFinished =
+      extractionStatus.scenes === 'success' &&
+      extractionStatus.characters === 'success' &&
+      extractionStatus.props === 'success' &&
+      !sceneBatchInfo?.hasMore &&
+      !characterBatchInfo?.hasMore &&
+      !propBatchInfo?.hasMore;
+    if (!allAssetExtractionsFinished) return;
+    void runExtractionQualityReview(false);
+  }, [
+    extractionStatus.scenes,
+    extractionStatus.characters,
+    extractionStatus.props,
+    sceneBatchInfo?.hasMore,
+    characterBatchInfo?.hasMore,
+    propBatchInfo?.hasMore,
+    runExtractionQualityReview,
+  ]);
+
+  // 旧版本若停在“等待下一批”，升级后自动接着完成，无需用户再次确认。
+  useEffect(() => {
+    if (!fileContent || !hasCurrentExecutionScript() || !hasConfirmedCreationBible()) return;
+
+    if (
+      sceneBatchInfo?.hasMore &&
+      (extractionStatus.scenes === 'loading' || extractionStatus.scenes === 'batch_confirm') &&
+      !assetExtractionChainRef.current.scenes
+    ) {
+      void continueSceneExtraction(sceneBatchInfo);
+    }
+    if (
+      characterBatchInfo?.hasMore &&
+      (extractionStatus.characters === 'loading' || extractionStatus.characters === 'batch_confirm') &&
+      !assetExtractionChainRef.current.characters
+    ) {
+      void continueCharacterExtraction(characterBatchInfo);
+    }
+    if (
+      propBatchInfo?.hasMore &&
+      (extractionStatus.props === 'loading' || extractionStatus.props === 'batch_confirm') &&
+      !assetExtractionChainRef.current.props
+    ) {
+      void continuePropExtraction(propBatchInfo);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    fileContent,
+    sceneBatchInfo,
+    characterBatchInfo,
+    propBatchInfo,
+    extractionStatus.scenes,
+    extractionStatus.characters,
+    extractionStatus.props,
+    hasCurrentExecutionScript,
+  ]);
 
   // 继续提取下一批大纲
   const continueOutlineExtraction = async () => {
@@ -2598,39 +4585,50 @@ export default function StoryboardGenerator() {
       return;
     }
     if (!(await requireLoginBeforePaidAction())) return;
-    
+
     const nextBatch = outlineBatchInfo.currentBatch + 1;
-    
+
     // 先更新批次信息为"正在提取"状态，确保进度条显示正确
     setOutlineBatchInfo({
       ...outlineBatchInfo,
       currentBatch: nextBatch, // 更新为正在提取的批次
     });
-    
+
     setExtractionStatus(prev => ({ ...prev, outline: 'loading' }));
-    toast.info(`正在提取第 ${nextBatch}/${outlineBatchInfo.totalBatches} 批章节...`);
-    
+    toast.info(`正在提取第 ${nextBatch}/${outlineBatchInfo.totalBatches} 批分集...`);
+
     await extractOutlineBatch(
-      fileContent, 
-      uploadedFile?.name || uploadedFileName || '剧本', 
+      getExtractionSourceContent(),
+      getCurrentFileName(),
       nextBatch,
       outlineBatchInfo.basicInfo,
       outlineBatchInfo.allChapters
     );
   };
 
-  // 并行提取四个维度
-  const extractAllParallel = async (content: string, fileName: string) => {
+  // 并行提取五个维度
+  const extractAllParallel = async (
+    content: string,
+    fileName: string,
+    bible: CreationBiblePayload = getCreationBiblePayload()
+  ) => {
     if (!(await requireLoginBeforePaidAction())) return;
+    extractionReviewRequestedRef.current = true;
+    setExtractionReview({
+      ...INITIAL_EXTRACTION_REVIEW,
+      status: 'pending',
+    });
+    const creationBiblePayload = bible;
 
     setCurrentStep(1);
     setProgress(20);
-    toast.info('正在并行提取场景、人物、道具和大纲，较长剧本可能需要几分钟...');
-    
+    toast.info('正在并行提取场景、人物、人物音色、道具和大纲，较长剧本可能需要几分钟...');
+
     // 初始化状态
     setExtractionStatus({
       scenes: 'loading',
       characters: 'loading',
+      voices: 'loading',
       props: 'loading',
       outline: 'loading',
     });
@@ -2640,6 +4638,7 @@ export default function StoryboardGenerator() {
     setSceneBatchInfo(null);
     setCharacterBatchInfo(null);
     setPropBatchInfo(null);
+    setCharacterVoiceData(null);
 
     const parseExtractionResponse = async (response: Response, label: string) => {
       const data = await response.json().catch(() => null);
@@ -2654,7 +4653,13 @@ export default function StoryboardGenerator() {
         const response = await fetch('/api/extract-scenes', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ content, fileName, batch: 1 }),
+          body: JSON.stringify({
+            content,
+            fileName,
+            batch: 1,
+            creationBible: creationBiblePayload,
+            sourceType: 'execution-script',
+          }),
         });
         const data = await parseExtractionResponse(response, '场景');
         // 检查是否有分批信息
@@ -2671,10 +4676,16 @@ export default function StoryboardGenerator() {
             totalScenes: data.batchInfo.sceneMarkers?.length || data.data.scenes?.length,
             scenes: data.data.scenes,
           });
-          
+
           if (data.batchInfo.hasMore) {
-            setExtractionStatus(prev => ({ ...prev, scenes: 'batch_confirm' as any }));
-            toast.info(`已提取第 ${data.batchInfo.currentBatch}/${data.batchInfo.totalBatches} 批场景，请确认后继续`);
+            setExtractionStatus(prev => ({ ...prev, scenes: 'loading' }));
+            await continueSceneExtraction({
+              currentBatch: data.batchInfo.currentBatch,
+              totalBatches: data.batchInfo.totalBatches,
+              hasMore: data.batchInfo.hasMore,
+              sceneMarkers: data.batchInfo.sceneMarkers || [],
+              allScenes: data.data.scenes || [],
+            });
           } else {
             setExtractionStatus(prev => ({ ...prev, scenes: 'success' }));
           }
@@ -2696,7 +4707,13 @@ export default function StoryboardGenerator() {
         const response = await fetch('/api/extract-characters', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ content, fileName, batch: 1 }),
+          body: JSON.stringify({
+            content,
+            fileName,
+            batch: 1,
+            creationBible: creationBiblePayload,
+            sourceType: 'execution-script',
+          }),
         });
         const data = await parseExtractionResponse(response, '人物');
         // 检查是否有分批信息
@@ -2713,10 +4730,16 @@ export default function StoryboardGenerator() {
             totalCharacters: data.batchInfo.characterMarkers?.length || data.data.characters?.length,
             characters: data.data.characters,
           });
-          
+
           if (data.batchInfo.hasMore) {
-            setExtractionStatus(prev => ({ ...prev, characters: 'batch_confirm' as any }));
-            toast.info(`已提取第 ${data.batchInfo.currentBatch}/${data.batchInfo.totalBatches} 批人物，请确认后继续`);
+            setExtractionStatus(prev => ({ ...prev, characters: 'loading' }));
+            await continueCharacterExtraction({
+              currentBatch: data.batchInfo.currentBatch,
+              totalBatches: data.batchInfo.totalBatches,
+              hasMore: data.batchInfo.hasMore,
+              characterMarkers: data.batchInfo.characterMarkers || [],
+              allCharacters: data.data.characters || [],
+            });
           } else {
             setExtractionStatus(prev => ({ ...prev, characters: 'success' }));
           }
@@ -2733,12 +4756,43 @@ export default function StoryboardGenerator() {
       }
     };
 
+    const runVoicesExtraction = async () => {
+      try {
+        const response = await fetch('/api/extract-character-voices', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            content,
+            fileName,
+            characters: charactersData?.characters || [],
+            sourceType: 'execution-script',
+          }),
+        });
+        const data = await parseExtractionResponse(response, '人物音色');
+        setCharacterVoiceData(data.data);
+        setExtractionStatus(prev => ({ ...prev, voices: 'success' }));
+        if (data.tokenUsage) {
+          setTokenUsage(prev => ({ ...prev, extractVoices: data.tokenUsage }));
+        }
+        if (data.data?.warning) toast.warning(data.data.warning);
+      } catch (error) {
+        setExtractionStatus(prev => ({ ...prev, voices: 'error' }));
+        toast.error(getNetworkErrorMessage(error, '提取人物音色'));
+      }
+    };
+
     const runPropsExtraction = async () => {
       try {
         const response = await fetch('/api/extract-props', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ content, fileName, batch: 1 }),
+          body: JSON.stringify({
+            content,
+            fileName,
+            batch: 1,
+            creationBible: creationBiblePayload,
+            sourceType: 'execution-script',
+          }),
         });
         const data = await parseExtractionResponse(response, '道具');
         // 检查是否有分批信息
@@ -2749,16 +4803,24 @@ export default function StoryboardGenerator() {
             totalBatches: data.batchInfo.totalBatches,
             hasMore: data.batchInfo.hasMore,
             propMarkers: data.batchInfo.propMarkers || [],
+            propInventory: data.batchInfo.propInventory || [],
             allProps: data.data.props || [],
           });
           setPropsData({
             totalProps: data.batchInfo.propMarkers?.length || data.data.props?.length,
             props: data.data.props,
           });
-          
+
           if (data.batchInfo.hasMore) {
-            setExtractionStatus(prev => ({ ...prev, props: 'batch_confirm' as any }));
-            toast.info(`已提取第 ${data.batchInfo.currentBatch}/${data.batchInfo.totalBatches} 批道具，请确认后继续`);
+            setExtractionStatus(prev => ({ ...prev, props: 'loading' }));
+            await continuePropExtraction({
+              currentBatch: data.batchInfo.currentBatch,
+              totalBatches: data.batchInfo.totalBatches,
+              hasMore: data.batchInfo.hasMore,
+              propMarkers: data.batchInfo.propMarkers || [],
+              propInventory: data.batchInfo.propInventory || [],
+              allProps: data.data.props || [],
+            });
           } else {
             setExtractionStatus(prev => ({ ...prev, props: 'success' }));
           }
@@ -2778,6 +4840,7 @@ export default function StoryboardGenerator() {
     await Promise.allSettled([
       runScenesExtraction(),
       runCharactersExtraction(),
+      runVoicesExtraction(),
       runPropsExtraction(),
       extractOutlineBatch(content, fileName, 1, null, []),
     ]);
@@ -2794,31 +4857,31 @@ export default function StoryboardGenerator() {
           storyboardConfirmed: true,
         }
       };
-      
+
       // 检查是否所有章节都确认了分镜
       const allChapters = Object.values(updated);
       const allConfirmed = allChapters.every(cs => cs.storyboardConfirmed);
-      
+
       // 更新进度：只要确认了分镜就前进到素材确认步骤
       setCurrentStep(3);
       setProgress(50);
-      
+
       // 如果所有章节都确认了分镜，更新全局确认状态
       if (allConfirmed && allChapters.length > 0) {
         setStepConfirmed(prevState => ({ ...prevState, storyboard: true }));
         // 跳转到素材确认标签页
         setActiveTab('assets');
       }
-      
+
       return updated;
     });
     setCollapsedStoryboardChapters(prev => ({ ...prev, [collapsedKey]: true }));
-    toast.success(`第 ${chapterNumber} 章文字分镜已确认`);
+    toast.success(`第 ${chapterNumber} 集文字分镜已确认`);
   };
 
   // 生成单个分镜的提示词（前端预览用，与后端API保持一致）
   const buildShotPrompt = (
-    shot: Shot, 
+    shot: Shot,
     imageSettings?: ImageStoryboardSettings,
     hasSceneReference?: boolean,
     frameType: 'start' | 'end' = 'start'  // 帧类型：首帧或尾帧
@@ -2885,22 +4948,22 @@ export default function StoryboardGenerator() {
     if (shot.characters && shot.characters.length > 0) {
       shot.characters.forEach((char) => {
         const charDesc = [];
-        
+
         // 人物姓名
         if (char.name) charDesc.push(`人物：${char.name}`);
         if (char.position) charDesc.push(`站位：${char.position}`);
-        
+
         // 对白（重要：原句保留）
         if (char.dialogue) {
           const dialogueType = char.dialogueType || '对白';
           charDesc.push(`${dialogueType}："${char.dialogue}"`);
         }
-        
+
         // 反应（重要：情绪反应）
         if (char.reaction) {
           charDesc.push(`反应：${char.reaction}`);
         }
-        
+
         // 表演（重要：具体动作和神态）
         if (char.performance) {
           if (frameType === 'start') {
@@ -2909,7 +4972,7 @@ export default function StoryboardGenerator() {
             charDesc.push(`表演结束：完成${char.performance}`);
           }
         }
-        
+
         // 动作
         if (char.action) {
           if (frameType === 'start') {
@@ -2918,7 +4981,7 @@ export default function StoryboardGenerator() {
             charDesc.push(`动作结束：完成${char.action}`);
           }
         }
-        
+
         // 表情
         if (char.expression) {
           if (frameType === 'start') {
@@ -2930,7 +4993,7 @@ export default function StoryboardGenerator() {
         if (char.facialAction) {
           charDesc.push(`脸部动作：${char.facialAction}`);
         }
-        
+
         // 手势
         if (char.gesture) {
           charDesc.push(`手势：${char.gesture}`);
@@ -2938,7 +5001,7 @@ export default function StoryboardGenerator() {
         if (char.actionChange) {
           charDesc.push(`动作变化：${char.actionChange}`);
         }
-        
+
         parts.push(charDesc.join('，'));
       });
     }
@@ -3009,7 +5072,7 @@ export default function StoryboardGenerator() {
       // 生成首帧和尾帧两个提示词
       const promptStart = buildShotPrompt(shot, imageSettings, undefined, 'start');
       const promptEnd = buildShotPrompt(shot, imageSettings, undefined, 'end');
-      
+
       return {
         shotNumber: shot.shotNumber,
         shotType: shot.shotType,
@@ -3031,7 +5094,7 @@ export default function StoryboardGenerator() {
       [chapterNumber]: {
         ...prev[chapterNumber],
         shotPrompts: (prev[chapterNumber].shotPrompts || []).map(sp =>
-          sp.shotNumber === shotNumber 
+          sp.shotNumber === shotNumber
             ? frameType === 'start'
               ? { ...sp, prompt: newPrompt, promptStart: newPrompt }
               : { ...sp, promptEnd: newPrompt }
@@ -3045,10 +5108,10 @@ export default function StoryboardGenerator() {
   const confirmChapterAssets = (chapterNumber: number) => {
     setChapterStoryboards(prev => {
       const cs = prev[chapterNumber];
-      
+
       // 生成提示词预览（使用全局封面设置）
       const shotPrompts = generateShotPromptsPreview(cs.storyboard, globalImageSettings);
-      
+
       const updated = {
         ...prev,
         [chapterNumber]: {
@@ -3057,27 +5120,27 @@ export default function StoryboardGenerator() {
           shotPrompts,
         }
       };
-      
+
       // 检查是否所有已确认文字分镜的章节都确认了素材
       const allStoryboardConfirmed = Object.values(updated).filter(cs => cs.storyboardConfirmed);
       const allAssetsConfirmed = allStoryboardConfirmed.every(cs => cs.assetsConfirmed);
-      
+
       // 只要确认了素材就前进到提示词确认步骤
       setCurrentStep(4);
       setProgress(65);
-      
+
       // 如果所有章节素材都已确认，更新步骤确认状态
       if (allAssetsConfirmed && allStoryboardConfirmed.length > 0) {
         setStepConfirmed(prev => ({ ...prev, assets: true }));
         setProgress(70);
       }
-      
+
       // 跳转到提示词标签页
       setActiveTab('prompts');
-      
+
       return updated;
     });
-    toast.success(`第 ${chapterNumber} 章素材已确认，请前往提示词标签页生成提示词`);
+    toast.success(`第 ${chapterNumber} 集素材已确认，请前往提示词标签页生成提示词`);
   };
 
   // 获取有效的视频比例（用于视频生成 API）
@@ -3100,7 +5163,7 @@ export default function StoryboardGenerator() {
       ...settings,
     };
     setGlobalImageSettings(newSettings);
-    
+
     // 同步更新所有章节的提示词预览
     setChapterStoryboards(prev => {
       const updated = { ...prev };
@@ -3118,102 +5181,146 @@ export default function StoryboardGenerator() {
   };
 
   // 获取章节关联的素材（人物、场景、道具）
+  const getCurrentCharacterItems = (): Character[] => (
+    (charactersData?.characters && charactersData.characters.length > 0)
+      ? charactersData.characters
+      : (characterBatchInfo?.allCharacters || [])
+  );
+
+  const getCurrentSceneItems = (): Scene[] => (
+    ((sceneBatchInfo?.allScenes?.length ?? 0) > 0)
+      ? (sceneBatchInfo?.allScenes || [])
+      : (scenesData?.scenes || [])
+  );
+
+  const getCurrentPropItems = (): Prop[] => (
+    ((propBatchInfo?.allProps?.length ?? 0) > 0)
+      ? (propBatchInfo?.allProps || [])
+      : (propsData?.props || [])
+  );
+
+  const getShotCharacterReference = (shot: Shot, characterName: string, chapterNumber: number) => {
+    const character = findCharacterByShotName(getCurrentCharacterItems(), characterName);
+    const shotCharacter = shot.characters?.find(item => normalizeAssetIdentity(item.name) === normalizeAssetIdentity(characterName));
+    const look = character && shotCharacter
+      ? findCharacterLookForShot(character, shotCharacter, shot, chapterNumber)
+      : undefined;
+    const lookImageUrl = look?.imageUrl?.trim() || '';
+    const faceImageUrl = character?.confirmedFaceImageUrl?.trim()
+      || getAssetImages('character', characterName, characterName)?.images.find(image => image.imageUrl && !image.isGenerating)?.imageUrl
+      || '';
+    return {
+      character,
+      look,
+      lookId: look?.id,
+      variantImageUrl: look ? lookImageUrl : faceImageUrl,
+      imageUrl: lookImageUrl || faceImageUrl,
+      label: look ? `${characterName} · ${look.scene || look.ageStage || look.id}` : characterName,
+    };
+  };
+
+  const getShotSceneReference = (shot: Shot, chapterNumber: number) => {
+    const scene = findSceneStateForShot(getCurrentSceneItems(), shot, chapterNumber);
+    const variantImageUrl = scene
+      ? getAssetImages('scene', scene.name, scene.name)?.images.find(image => image.imageUrl && !image.isGenerating)?.imageUrl || ''
+      : '';
+    const fallbackImageUrl = scene?.referenceSceneName
+      ? getAssetImages('scene', scene.referenceSceneName, scene.referenceSceneName)?.images.find(image => image.imageUrl && !image.isGenerating)?.imageUrl || ''
+      : '';
+    return {
+      scene,
+      variantImageUrl,
+      imageUrl: variantImageUrl || fallbackImageUrl,
+    };
+  };
+
+  const getShotPropReference = (shot: Shot, propName: string, chapterNumber: number) => {
+    const prop = findPropStateForShot(getCurrentPropItems(), propName, shot, chapterNumber);
+    const variantImageUrl = prop
+      ? getAssetImages('prop', prop.name, prop.name)?.images.find(image => image.imageUrl && !image.isGenerating)?.imageUrl || ''
+      : '';
+    const fallbackImageUrl = prop?.referencePropName
+      ? getAssetImages('prop', prop.referencePropName, prop.referencePropName)?.images.find(image => image.imageUrl && !image.isGenerating)?.imageUrl || ''
+      : '';
+    return {
+      prop,
+      variantImageUrl,
+      imageUrl: variantImageUrl || fallbackImageUrl,
+    };
+  };
+
   /** 获取当前提示词组涉及的人物/场景/道具图（只取提示词中提到的） */
   const getGroupAssetImages = (cs: ChapterStoryboard, pg: PromptGroup) => {
     const groupShots = pg.shotNumbers.map(sn =>
       cs.storyboard?.shots.find(s => s.shotNumber === sn)
     ).filter(Boolean) as Shot[];
+    const urls: string[] = [];
+    const seen = new Set<string>();
+    const addUrl = (url?: string) => {
+      const value = String(url || '').trim();
+      if (!value || seen.has(value) || urls.length >= 9) return;
+      seen.add(value);
+      urls.push(value);
+    };
 
-    // 提取本组涉及的所有名称
-    const charNames = new Set(groupShots.flatMap(s => (s.characters || []).map(c => c.name).filter(Boolean)));
-    const sceneNames = new Set(groupShots.map(s => s.scene?.location).filter(Boolean));
-    const propNames = new Set(groupShots.flatMap(s => s.scene?.props || []));
+    groupShots.forEach(shot => {
+      (shot.characters || []).forEach(character => {
+        addUrl(getShotCharacterReference(shot, character.name, cs.chapterNumber).imageUrl);
+      });
+    });
+    groupShots.forEach(shot => {
+      const sceneReference = getShotSceneReference(shot, cs.chapterNumber);
+      addUrl(sceneReference.imageUrl);
+    });
+    groupShots.forEach(shot => {
+      (shot.scene?.props || []).forEach(propName => {
+        addUrl(getShotPropReference(shot, propName, cs.chapterNumber).imageUrl);
+      });
+    });
 
-    const all = getChapterAssetImages(cs.chapterNumber);
-    return all
-      .filter(a => {
-        if (a.type === 'character') return charNames.has(a.name);
-        if (a.type === 'scene') return sceneNames.has(a.name);
-        if (a.type === 'prop') return propNames.has(a.name);
-        return false;
-      })
-      .flatMap(a => a.images.map(i => i.imageUrl));
+    return urls;
   };
 
   const getChapterRelatedAssets = (chapterNumber: number) => {
     const cs = chapterStoryboards[chapterNumber];
     if (!cs?.storyboard?.shots) return { characters: [], scenes: [], props: [] };
 
-    const characterNames = new Set<string>();
-    const sceneNames = new Set<string>();
-    const propNames = new Set<string>();
+    const charactersByName = new Map<string, any>();
+    const scenesByName = new Map<string, any>();
+    const propsByName = new Map<string, any>();
 
-    cs.storyboard.shots.forEach(shot => {
-      // 提取人物
-      if (shot.characters) {
-        shot.characters.forEach((char: any) => {
-          if (char.name) characterNames.add(char.name);
-        });
-      }
-      // 提取场景
+    cs.storyboard.shots.forEach((shot, shotIndex) => {
+      (shot.characters || []).forEach((shotCharacter, characterIndex) => {
+        const character = findCharacterByShotName(getCurrentCharacterItems(), shotCharacter.name) || {
+          id: `char-from-shot-${shotIndex}-${characterIndex}`,
+          name: shotCharacter.name,
+          role: '角色',
+        };
+        charactersByName.set(normalizeAssetIdentity(character.name), character);
+      });
+
       if (shot.scene?.location) {
-        sceneNames.add(shot.scene.location);
+        const scene = findSceneStateForShot(getCurrentSceneItems(), shot, chapterNumber) || {
+          id: `scene-from-shot-${shotIndex}`,
+          name: shot.scene.location,
+          type: '场景',
+        };
+        scenesByName.set(normalizeAssetIdentity(scene.name), scene);
       }
-      // 提取道具
-      if (shot.scene?.props) {
-        shot.scene.props.forEach((prop: string) => propNames.add(prop));
-      }
+
+      (shot.scene?.props || []).forEach((propName, propIndex) => {
+        const prop = findPropStateForShot(getCurrentPropItems(), propName, shot, chapterNumber) || {
+          id: `prop-from-shot-${shotIndex}-${propIndex}`,
+          name: propName,
+          type: '道具',
+        };
+        propsByName.set(normalizeAssetIdentity(prop.name), prop);
+      });
     });
 
-    // 调试日志
-    console.log('[getChapterRelatedAssets] 分镜中提取的名称:', {
-      characterNames: Array.from(characterNames),
-      sceneNames: Array.from(sceneNames),
-      propNames: Array.from(propNames),
-    });
-    console.log('[getChapterRelatedAssets] 提取数据状态:', {
-      hasCharactersData: !!charactersData?.characters,
-      charactersCount: charactersData?.characters?.length || 0,
-      hasScenesData: !!scenesData?.scenes,
-      scenesCount: scenesData?.scenes?.length || 0,
-      hasPropsData: !!propsData?.props,
-      propsCount: propsData?.props?.length || 0,
-    });
-
-    // 从提取的数据中找到对应的素材详情
-    // 如果提取数据为空，则直接从分镜中创建基础素材信息
-    let characters, scenes, props;
-    
-    if (charactersData?.characters?.length) {
-      characters = charactersData.characters.filter((c: any) => characterNames.has(c.name));
-    } else {
-      // 如果没有提取数据，直接从分镜创建
-      characters = Array.from(characterNames).map((name, idx) => ({
-        id: `char-from-shot-${idx}`,
-        name,
-        role: '角色',
-      }));
-    }
-    
-    if (scenesData?.scenes?.length) {
-      scenes = scenesData.scenes.filter((s: any) => sceneNames.has(s.name));
-    } else {
-      scenes = Array.from(sceneNames).map((name, idx) => ({
-        id: `scene-from-shot-${idx}`,
-        name,
-        type: '场景',
-      }));
-    }
-    
-    if (propsData?.props?.length) {
-      props = propsData.props.filter((p: any) => propNames.has(p.name));
-    } else {
-      props = Array.from(propNames).map((name, idx) => ({
-        id: `prop-from-shot-${idx}`,
-        name,
-        type: '道具',
-      }));
-    }
+    const characters = Array.from(charactersByName.values());
+    const scenes = Array.from(scenesByName.values());
+    const props = Array.from(propsByName.values());
 
     console.log('[getChapterRelatedAssets] 匹配结果:', {
       characters: characters.length,
@@ -3226,71 +5333,183 @@ export default function StoryboardGenerator() {
 
   // 获取章节关联的素材图片（用于视频生成）
   const getChapterAssetImages = (chapterNumber: number): AssetImages[] => {
-    const relatedAssets = getChapterRelatedAssets(chapterNumber);
+    const cs = chapterStoryboards[chapterNumber];
+    if (!cs?.storyboard?.shots) return [];
     const result: AssetImages[] = [];
-    
-    // 收集人物图片（使用名称作为 key，确保唯一性）
-    relatedAssets.characters.forEach((char: any) => {
-      const assetData = getAssetImages('character', char.name, char.name);
-      if (assetData && assetData.images.length > 0) {
-        result.push(assetData);
+    const seen = new Set<string>();
+    const addAsset = (asset?: AssetImages) => {
+      if (!asset || asset.images.length === 0 || seen.has(asset.assetId)) return;
+      seen.add(asset.assetId);
+      result.push(asset);
+    };
+    const addSyntheticImage = (type: AssetImages['type'], name: string, imageUrl: string, suffix: string) => {
+      if (!imageUrl) return;
+      const assetId = `${type}-${name}-${suffix}`;
+      addAsset({
+        assetId,
+        type,
+        name,
+        images: [{ imageId: assetId, imageUrl, isGenerating: false }],
+      });
+    };
+
+    cs.storyboard.shots.forEach(shot => {
+      const sceneReference = getShotSceneReference(shot, chapterNumber);
+      if (sceneReference.scene) {
+        const sceneAsset = getAssetImages('scene', sceneReference.scene.name, sceneReference.scene.name)
+          || (sceneReference.scene.referenceSceneName
+            ? getAssetImages('scene', sceneReference.scene.referenceSceneName, sceneReference.scene.referenceSceneName)
+            : undefined);
+        addAsset(sceneAsset);
       }
+
+      (shot.characters || []).forEach(shotCharacter => {
+        const reference = getShotCharacterReference(shot, shotCharacter.name, chapterNumber);
+        if (reference.look?.imageUrl) {
+          addSyntheticImage('character', shotCharacter.name, reference.look.imageUrl, `look-${reference.look.id}`);
+        } else {
+          addAsset(getAssetImages('character', shotCharacter.name, shotCharacter.name));
+        }
+      });
+
+      (shot.scene?.props || []).forEach(propName => {
+        const reference = getShotPropReference(shot, propName, chapterNumber);
+        if (reference.prop) {
+          const propAsset = getAssetImages('prop', reference.prop.name, reference.prop.name)
+            || (reference.prop.referencePropName
+              ? getAssetImages('prop', reference.prop.referencePropName, reference.prop.referencePropName)
+              : undefined);
+          addAsset(propAsset);
+        }
+      });
     });
-    
-    // 收集场景图片（使用名称作为 key，确保唯一性）
-    relatedAssets.scenes.forEach((scene: any) => {
-      const assetData = getAssetImages('scene', scene.name, scene.name);
-      if (assetData && assetData.images.length > 0) {
-        result.push(assetData);
-      }
-    });
-    
-    // 收集道具图片（使用名称作为 key，确保唯一性）
-    relatedAssets.props.forEach((prop: any) => {
-      const assetData = getAssetImages('prop', prop.name, prop.name);
-      if (assetData && assetData.images.length > 0) {
-        result.push(assetData);
-      }
-    });
-    
+
     console.log(`[getChapterAssetImages] 章节${chapterNumber}获取到 ${result.length} 个素材的图片`);
     return result;
   };
 
-  // 将 videoPrompts 分组为 3-4 镜一组的提示词组（约15秒/组）
+  type ChapterAssetReference = {
+    type: 'character' | 'scene' | 'prop';
+    entityName: string;
+    label: string;
+    imageUrl: string;
+    episodeNumber: number;
+    variantId?: string;
+  };
+
+  const getChapterAssetReferences = (cs: ChapterStoryboard): ChapterAssetReference[] => {
+    const references = new Map<string, ChapterAssetReference>();
+    const addReference = (reference: ChapterAssetReference) => {
+      const key = `${reference.type}:${normalizeAssetIdentity(reference.entityName)}:${reference.variantId || normalizeAssetIdentity(reference.label)}`;
+      const existing = references.get(key);
+      if (!existing || (!existing.imageUrl && reference.imageUrl)) references.set(key, reference);
+    };
+
+    (cs.storyboard?.shots || []).forEach(shot => {
+      (shot.characters || []).forEach(shotCharacter => {
+        const reference = getShotCharacterReference(shot, shotCharacter.name, cs.chapterNumber);
+        addReference({
+          type: 'character',
+          entityName: shotCharacter.name,
+          label: reference.label,
+          imageUrl: reference.variantImageUrl,
+          episodeNumber: cs.chapterNumber,
+          variantId: reference.lookId,
+        });
+      });
+
+      if (shot.scene?.location) {
+        const reference = getShotSceneReference(shot, cs.chapterNumber);
+        addReference({
+          type: 'scene',
+          entityName: reference.scene?.name || shot.scene.location,
+          label: reference.scene?.name || shot.scene.location,
+          imageUrl: reference.variantImageUrl,
+          episodeNumber: cs.chapterNumber,
+        });
+      }
+
+      (shot.scene?.props || []).forEach(propName => {
+        const reference = getShotPropReference(shot, propName, cs.chapterNumber);
+        addReference({
+          type: 'prop',
+          entityName: reference.prop?.name || propName,
+          label: reference.prop?.name || propName,
+          imageUrl: reference.variantImageUrl,
+          episodeNumber: cs.chapterNumber,
+        });
+      });
+    });
+
+    return Array.from(references.values());
+  };
+
+  // 按原镜头顺序累计实际时长：以14-15秒为目标，且单组绝不超过15秒。
   const groupShotsIntoPromptGroups = (
     videoPrompts: VideoPromptItem[],
     shots: Shot[]
   ): PromptGroup[] => {
-    const groups: PromptGroup[] = [];
-    const GROUP_SIZE = 4;
+    const shotByNumber = new Map(shots.map(shot => [shot.shotNumber, shot]));
+    const shotOrder = new Map(shots.map((shot, index) => [shot.shotNumber, index]));
+    const orderedPrompts = videoPrompts
+      .map((item, inputIndex) => ({ item, inputIndex }))
+      .sort((left, right) => {
+        const leftOrder = shotOrder.get(left.item.shotNumber) ?? Number.MAX_SAFE_INTEGER;
+        const rightOrder = shotOrder.get(right.item.shotNumber) ?? Number.MAX_SAFE_INTEGER;
+        return leftOrder - rightOrder || left.inputIndex - right.inputIndex;
+      })
+      .map(entry => entry.item);
 
-    for (let i = 0; i < videoPrompts.length; i += GROUP_SIZE) {
-      const groupItems = videoPrompts.slice(i, i + GROUP_SIZE);
-      const groupShots = groupItems.map(item => 
-        shots.find(s => s.shotNumber === item.shotNumber)
-      ).filter(Boolean) as Shot[];
-      
-      const shotNumbers = groupItems.map(item => item.shotNumber);
-      const combinedPrompt = groupItems.map((item, idx) => {
+    const durationGroups = groupContiguousItemsByDuration(
+      orderedPrompts,
+      item => item.duration ?? shotByNumber.get(item.shotNumber)?.duration,
+    );
+
+    const groups = durationGroups.map((durationGroup, groupIndex): PromptGroup => {
+      const shotNumbers = durationGroup.entries.map(entry => entry.item.shotNumber);
+      const combinedPrompt = durationGroup.entries.map((entry, idx) => {
+        const item = entry.item;
         const prevTransition = idx > 0 ? '【衔接上一镜】过渡至\n' : '';
-        return `${prevTransition}【镜头${item.shotNumber}】${item.videoPrompt}`;
+        return `${prevTransition}【镜头${item.shotNumber} · ${formatStoryboardDurationSeconds(entry.duration)}秒】${item.videoPrompt}`;
       }).join('\n\n');
-      
-      const totalDuration = groupItems.reduce((sum, item) => sum + (item.duration || 4), 0);
-      
-      groups.push({
-        groupIndex: groups.length + 1,
+
+      return {
+        groupIndex: groupIndex + 1,
         shotNumbers,
-        combinedPrompt: `【第${groups.length + 1}组 - ${totalDuration}秒连冠段落】\n${combinedPrompt}`,
+        totalDuration: durationGroup.totalDuration,
+        groupingStrategy: STORYBOARD_DURATION_GROUPING_STRATEGY,
+        combinedPrompt: `【第${groupIndex + 1}组 · ${formatStoryboardDurationSeconds(durationGroup.totalDuration)}秒连贯段落】\n${combinedPrompt}`,
         isGeneratingStoryboard: false,
         isEditing: false,
-      });
+      };
+    });
+
+    console.log(
+      `[groupShotsIntoPromptGroups] 将 ${videoPrompts.length} 个分镜按实际时长分为 ${groups.length} 组：`,
+      groups.map(group => `${formatStoryboardDurationSeconds(group.totalDuration || 0)}秒`).join(' / '),
+    );
+    return groups;
+  };
+
+  const getPromptGroupDurationSeconds = (cs: ChapterStoryboard, pg: PromptGroup): number => {
+    if (typeof pg.totalDuration === 'number' && Number.isFinite(pg.totalDuration) && pg.totalDuration > 0) {
+      return Math.round(pg.totalDuration * 10) / 10;
     }
 
-    console.log(`[groupShotsIntoPromptGroups] 将 ${videoPrompts.length} 个分镜分为 ${groups.length} 组`);
-    return groups;
-  }
+    const promptByShotNumber = new Map(
+      (cs.videoPrompts || []).map(prompt => [prompt.shotNumber, prompt]),
+    );
+    const storyboardShotByNumber = new Map(
+      (cs.storyboard?.shots || []).map(shot => [shot.shotNumber, shot]),
+    );
+
+    return sumStoryboardDurations(
+      pg.shotNumbers.map(shotNumber => (
+        promptByShotNumber.get(shotNumber)?.duration
+        ?? storyboardShotByNumber.get(shotNumber)?.duration
+      )),
+    );
+  };
 
   const getPromptGroupVideoKey = (pg: PromptGroup) => -Math.abs(pg.groupIndex || pg.shotNumbers[0] || 1);
 
@@ -3392,6 +5611,7 @@ export default function StoryboardGenerator() {
     promptText: string,
     shots: Shot[],
     storyboardImageUrl?: string,
+    chapterNumber = 0,
   ): VideoReferenceSelection => {
     const knownCharacters = getAllKnownAssetNames('character');
     const knownScenes = getAllKnownAssetNames('scene');
@@ -3439,20 +5659,46 @@ export default function StoryboardGenerator() {
       seen.add(displayUrl);
       selected.push({ type, name, url: displayUrl });
     };
-    const addAsset = (type: 'scene' | 'character' | 'prop', name?: string) => {
-      if (!name) return;
-      addImage(type, name, getFirstUsableAssetImage(getAssetImages(type, name, name)));
+    const findShotForCharacter = (name: string) => shots.find(shot => (
+      (shot.characters || []).some(character => normalizeAssetIdentity(character.name) === normalizeAssetIdentity(name))
+    ));
+    const findShotForScene = (name: string) => shots.find(shot => (
+      scoreLinkedName(name, [shot.scene?.location]) > 0
+    ));
+    const findShotForProp = (name: string) => shots.find(shot => (
+      (shot.scene?.props || []).some(propName => scoreLinkedName(name, [propName]) > 0)
+    ));
+    const addCharacter = (name: string) => {
+      const shot = findShotForCharacter(name);
+      if (!shot) {
+        addImage('character', name, getFirstUsableAssetImage(getAssetImages('character', name, name)));
+        return;
+      }
+      const reference = getShotCharacterReference(shot, name, chapterNumber);
+      addImage('character', reference.label, reference.imageUrl);
+    };
+    const addScene = (name: string) => {
+      const shot = findShotForScene(name);
+      const reference = shot ? getShotSceneReference(shot, chapterNumber) : undefined;
+      const referenceName = reference?.scene?.name || name;
+      addImage('scene', referenceName, reference?.imageUrl || getFirstUsableAssetImage(getAssetImages('scene', name, name)));
+    };
+    const addProp = (name: string) => {
+      const shot = findShotForProp(name);
+      const reference = shot ? getShotPropReference(shot, name, chapterNumber) : undefined;
+      const referenceName = reference?.prop?.name || name;
+      addImage('prop', referenceName, reference?.imageUrl || getFirstUsableAssetImage(getAssetImages('prop', name, name)));
     };
 
     if (storyboardImageUrl) {
       addImage('storyboard', '故事板总控图', storyboardImageUrl);
     }
 
-    entities.characters.slice(0, 3).forEach(name => addAsset('character', name));
-    entities.scenes.slice(0, 2).forEach(name => addAsset('scene', name));
-    entities.characters.slice(3).forEach(name => addAsset('character', name));
-    entities.props.forEach(name => addAsset('prop', name));
-    entities.scenes.slice(2).forEach(name => addAsset('scene', name));
+    entities.characters.slice(0, 3).forEach(addCharacter);
+    entities.scenes.slice(0, 2).forEach(addScene);
+    entities.characters.slice(3).forEach(addCharacter);
+    entities.props.forEach(addProp);
+    entities.scenes.slice(2).forEach(addScene);
 
     return {
       images: selected,
@@ -3477,7 +5723,7 @@ export default function StoryboardGenerator() {
       ]),
     ].join('\n');
 
-    return getVideoReferenceSelection(entitySearchText, groupShots, pg.storyboardImageUrl);
+    return getVideoReferenceSelection(entitySearchText, groupShots, pg.storyboardImageUrl, cs.chapterNumber);
   };
 
   const buildVideoReferenceManifest = (selection: VideoReferenceSelection) => {
@@ -3514,6 +5760,13 @@ export default function StoryboardGenerator() {
     referenceSelection: VideoReferenceSelection,
   ) => {
     const groupShots = getPromptGroupShots(cs, pg);
+    const voiceResolution = resolveVideoVoiceAssignments(
+      groupShots,
+      cs.chapterNumber,
+      characterVoiceData,
+      voiceLibrary,
+    );
+    const groupDuration = getPromptGroupDurationSeconds(cs, pg);
     const storyboardPrompt = pg.storyboardPromptText || pg.combinedPrompt || '';
     const shotLines = groupShots.map(shot => {
       const characterText = (shot.characters || []).map(char => {
@@ -3523,14 +5776,15 @@ export default function StoryboardGenerator() {
     }).join('\n');
 
     return [
-      `请生成第${cs.chapterNumber}集第${pg.groupIndex}组连续视频，时长约15秒。`,
+      `请生成第${cs.chapterNumber}集第${pg.groupIndex}组连续视频，本组${pg.shotNumbers.length}个连续镜头的实际总时长为${formatStoryboardDurationSeconds(groupDuration)}秒，成片时长按本组实际总时长执行。`,
       buildVideoReferenceManifest(referenceSelection),
       `核心参考：优先严格参考本组故事版总控图的角色形象、场景空间、人物站位、镜头顺序和画面构图。`,
       `本次会提供${referenceSelection.images.length}张参考图。提示词中出现的全部人物、场景、道具都必须参与对应镜头，不能因为没有独立参考图而遗漏。`,
       `【本组故事版提示词】\n${storyboardPrompt}`,
       `【本组镜头内容】\n${shotLines}`,
+      voiceResolution.instruction,
       `要求：画面连续、动作自然、人物表情和肢体动作要有变化；保持原剧情，台词必须与文字分镜/原剧本逐字一致，不出现字幕、水印、乱码文字，不新增无关人物。`,
-    ].join('\n\n');
+    ].filter(Boolean).join('\n\n');
   };
 
   const getSingleShotVideoPayload = (
@@ -3548,25 +5802,33 @@ export default function StoryboardGenerator() {
       shot.scene?.location || '',
       (shot.scene?.props || []).join('、'),
     ].join('\n');
-    const referenceSelection = getVideoReferenceSelection(entitySearchText, [shot], shotStoryboardImage);
+    const referenceSelection = getVideoReferenceSelection(entitySearchText, [shot], shotStoryboardImage, cs.chapterNumber);
+    const voiceResolution = resolveVideoVoiceAssignments(
+      [shot],
+      cs.chapterNumber,
+      characterVoiceData,
+      voiceLibrary,
+    );
 
     return {
       prompt: [
         buildVideoReferenceManifest(referenceSelection),
         `【镜头生成提示词】\n${promptText}`,
+        voiceResolution.instruction,
         '提示词中出现的全部人物、场景、道具都必须参与画面，严格对应参考图，不得遗漏或自行替换。',
-      ].join('\n\n'),
+      ].filter(Boolean).join('\n\n'),
       imageUrls: referenceSelection.images.map(item => item.url),
       referenceSelection,
+      voiceResolution,
     };
   };
 
   // 删除存储中的图片文件
   const deleteStoredImages = async (imageKeys: string[], imageUrls: string[], folder?: string) => {
     if (imageKeys.length === 0 && imageUrls.length === 0) return;
-    
+
     console.log(`[deleteStoredImages] 删除 ${imageKeys.length} 个图片文件`);
-    
+
     // 批量删除，最多并发 5 个
     const batchSize = 5;
     for (let i = 0; i < imageKeys.length; i += batchSize) {
@@ -3584,7 +5846,7 @@ export default function StoryboardGenerator() {
         }
       }));
     }
-    
+
     // 删除通过 URL 访问的文件
     for (let i = 0; i < imageUrls.length; i += batchSize) {
       const batch = imageUrls.slice(i, i + batchSize);
@@ -3607,7 +5869,7 @@ export default function StoryboardGenerator() {
   const cleanupStoryboardImages = async () => {
     const imageKeys: string[] = [];
     const imageUrls: string[] = [];
-    
+
     // 收集单章节模式的分镜图片
     imageStoryboards.forEach(item => {
       if (item.imageKey) imageKeys.push(item.imageKey);
@@ -3620,7 +5882,7 @@ export default function StoryboardGenerator() {
         imageUrls.push(item.imageUrlEndFrame);
       }
     });
-    
+
     // 收集多章节模式的分镜图片
     Object.values(chapterStoryboards).forEach(cs => {
       cs.imageStoryboards?.forEach(item => {
@@ -3634,14 +5896,14 @@ export default function StoryboardGenerator() {
         }
       });
     });
-    
+
     // 收集视频结果中的图片
     videoResults.forEach(v => {
       if (v.lastFrameUrl) {
         imageUrls.push(v.lastFrameUrl);
       }
     });
-    
+
     if (imageKeys.length > 0 || imageUrls.length > 0) {
       console.log(`[cleanupStoryboardImages] 清理 ${imageKeys.length} 个图片key, ${imageUrls.length} 个图片URL`);
       await deleteStoredImages(imageKeys, imageUrls, '分镜图片');
@@ -3652,7 +5914,7 @@ export default function StoryboardGenerator() {
   const cleanupAssetImages = async () => {
     const imageKeys: string[] = [];
     const imageUrls: string[] = [];
-    
+
     assetImages.forEach((asset) => {
       asset.images.forEach(img => {
         if (img.imageKey) imageKeys.push(img.imageKey);
@@ -3661,7 +5923,7 @@ export default function StoryboardGenerator() {
         }
       });
     });
-    
+
     if (imageKeys.length > 0 || imageUrls.length > 0) {
       console.log(`[cleanupAssetImages] 清理 ${imageKeys.length} 个素材图片key`);
       await deleteStoredImages(imageKeys, imageUrls);
@@ -3672,6 +5934,8 @@ export default function StoryboardGenerator() {
   const confirmStep = async (step: 'upload' | 'extraction' | 'storyboard' | 'assets' | 'prompts' | 'videos') => {
     if (step === 'upload' && fileContent) {
       if (!(await requireLoginBeforePaidAction())) return;
+      const preparedScript = await ensureExecutionScript();
+      if (!preparedScript) return;
     }
 
     if (step === 'extraction') {
@@ -3684,6 +5948,7 @@ export default function StoryboardGenerator() {
       const isExtractionComplete =
         effectiveExtractionStatus.scenes === 'success' &&
         effectiveExtractionStatus.characters === 'success' &&
+        effectiveExtractionStatus.voices === 'success' &&
         effectiveExtractionStatus.props === 'success' &&
         effectiveExtractionStatus.outline === 'success' &&
         isOutlineComplete;
@@ -3694,8 +5959,8 @@ export default function StoryboardGenerator() {
           setExtractionStatus(prev => ({ ...prev, outline: 'loading' }));
           toast.info(`大纲还没提取完：${extractedChapters}/${expectedChapters} 章，正在继续补齐...`);
           void extractOutlineBatch(
-            fileContent,
-            uploadedFile?.name || uploadedFileName || '剧本',
+            getExtractionSourceContent(),
+            getCurrentFileName(),
             outlineBatchInfo?.hasMore ? outlineBatchInfo.currentBatch + 1 : 1,
             outlineBatchInfo?.basicInfo || null,
             outlineBatchInfo?.hasMore ? (outlineBatchInfo.allChapters || outline?.chapters || []) : [],
@@ -3710,21 +5975,19 @@ export default function StoryboardGenerator() {
     }
 
     setStepConfirmed(prev => ({ ...prev, [step]: true }));
-    
+
     // 根据步骤设置进度和进入下一步
     // 步骤索引: 0上传 1提取 2分镜 3素材 4提示词 5视频
     switch (step) {
       case 'upload':
         setCurrentStep(1);
         setProgress(15);
-        if (fileContent) {
-          void extractAllParallel(fileContent, uploadedFile?.name || uploadedFileName || '剧本');
-        }
+        toast.info('执行剧本已就绪，请确认创作圣经后开始提取');
         break;
       case 'extraction':
         setCurrentStep(2);
         setProgress(30);
-        toast.info('请选择章节生成分镜');
+        toast.info('请选择分集生成分镜');
         break;
       case 'storyboard': {
         // 分镜确认后进入素材确认步骤
@@ -3751,7 +6014,7 @@ export default function StoryboardGenerator() {
         setCollapsedStoryboardChapters(prev => ({ ...prev, ...confirmedStoryboardChapterKeys }));
         setCurrentStep(3);
         setProgress(50);
-        toast.info('请确认章节素材图片是否正确');
+        toast.info('请确认本集素材图片是否正确');
         break;
       }
       case 'assets':
@@ -3779,7 +6042,7 @@ export default function StoryboardGenerator() {
   const revertToStep = async (step: 'upload' | 'extraction' | 'storyboard' | 'assets' | 'prompts' | 'videos') => {
     const stepOrder = ['upload', 'extraction', 'storyboard', 'assets', 'prompts', 'videos'] as const;
     const stepIndex = stepOrder.indexOf(step);
-    
+
     // 重置该步骤及之后所有步骤的确认状态
     setStepConfirmed(prev => {
       const newState = { ...prev };
@@ -3788,7 +6051,7 @@ export default function StoryboardGenerator() {
       }
       return newState;
     });
-    
+
     // 根据步骤清空相关数据并重置状态
     // 步骤索引: 0上传 1提取 2分镜 3素材 4提示词 5视频
     switch (step) {
@@ -3798,9 +6061,15 @@ export default function StoryboardGenerator() {
         await cleanupAssetImages();
         setUploadedFile(null);
         setFileContent('');
+        setExecutionScript('');
+        setExecutionScriptSourceSignature('');
+        setCreationBible(DEFAULT_CREATION_BIBLE);
         setScenesData(null);
         setCharactersData(null);
+        setCharacterVoiceData(null);
         setPropsData(null);
+        setExtractionReview(INITIAL_EXTRACTION_REVIEW);
+        extractionReviewRequestedRef.current = false;
         setOutline(null);
         setSelectedChapter(null);
         setStoryboard(null);
@@ -3809,6 +6078,7 @@ export default function StoryboardGenerator() {
         setVideoResults([]);
         setVideoTotalDuration(0);
         setAssetImages(() => new Map());
+        setBatchAssetGenerationHistory({ ...INITIAL_BATCH_ASSET_GENERATION_HISTORY });
         setChapterStoryboards({});
         setCurrentStep(0);
         setProgress(0);
@@ -3821,6 +6091,8 @@ export default function StoryboardGenerator() {
         setScenesData(null);
         setCharactersData(null);
         setPropsData(null);
+        setExtractionReview(INITIAL_EXTRACTION_REVIEW);
+        extractionReviewRequestedRef.current = false;
         setOutline(null);
         setSelectedChapter(null);
         setStoryboard(null);
@@ -3829,12 +6101,17 @@ export default function StoryboardGenerator() {
         setVideoResults([]);
         setVideoTotalDuration(0);
         setAssetImages(() => new Map());
+        setBatchAssetGenerationHistory({ ...INITIAL_BATCH_ASSET_GENERATION_HISTORY });
         setChapterStoryboards({});
         setCurrentStep(1);
         setProgress(15);
         toast.info('已撤回，将重新提取内容');
-        if (fileContent && uploadedFile) {
-          extractAllParallel(fileContent, uploadedFile.name);
+        if (fileContent) {
+          if (hasConfirmedCreationBible()) {
+            extractAllParallel(getExtractionSourceContent(), getCurrentFileName(), getCreationBiblePayload());
+          } else {
+            toast.info('请先确认创作圣经后再重新提取内容');
+          }
         }
         break;
       case 'storyboard':
@@ -3849,7 +6126,7 @@ export default function StoryboardGenerator() {
         setChapterStoryboards({});
         setCurrentStep(2);
         setProgress(30);
-        toast.info('已撤回，请重新选择章节');
+        toast.info('已撤回，请重新选择分集');
         break;
       case 'assets':
         // 重新确认素材 - 删除分镜图片
@@ -3926,51 +6203,79 @@ export default function StoryboardGenerator() {
 
     setIsProcessing(true);
     setProgress(10);
-    
+
     try {
       setUploadedFile(file);
-      
+
       const formData = new FormData();
       formData.append('file', file);
-      
+
       const uploadResponse = await fetch('/api/upload', {
         method: 'POST',
         body: formData,
       });
-      
+
       const uploadData = await uploadResponse.json();
-      
+
       if (uploadData.success) {
         const content = uploadData.content;
         setFileContent(content);
         setUploadedFileName(file.name); // 持久化文件名
+        setExecutionScript('');
+        setExecutionScriptSourceSignature('');
+        setCreationBible(DEFAULT_CREATION_BIBLE);
+        setScenesData(null);
+        setCharactersData(null);
+        setPropsData(null);
+        setOutline(null);
+        setOutlineBatchInfo(null);
+        setSceneBatchInfo(null);
+        setCharacterBatchInfo(null);
+        setPropBatchInfo(null);
+        setExtractionReview(INITIAL_EXTRACTION_REVIEW);
+        extractionReviewRequestedRef.current = false;
+        setBatchAssetGenerationHistory({ ...INITIAL_BATCH_ASSET_GENERATION_HISTORY });
+        setStepConfirmed(prev => ({ ...prev, upload: false, extraction: false }));
+        setExtractionStatus({
+          scenes: 'pending',
+          characters: 'pending',
+          voices: 'pending',
+          props: 'pending',
+          outline: 'pending',
+        });
         toast.success(`文件上传成功 (${uploadData.fileType}格式)，请确认后继续`);
-        
+
         // 上传完成，等待用户确认后再提取
         setProgress(10);
       } else {
         // 处理特定错误类型
         const errorMsg = uploadData.error || '上传失败';
         const suggestion = uploadData.suggestion || '';
-        
+
         if (uploadData.error === '文档解析服务暂时不可用') {
           toast.error(`${errorMsg}\n${suggestion}`, { duration: 6000 });
         } else {
           toast.error(`${errorMsg}${suggestion ? `\n${suggestion}` : ''}`);
         }
-        
+
         // 重置状态
         setUploadedFile(null);
         setFileContent('');
+        setExecutionScript('');
+        setExecutionScriptSourceSignature('');
+        setCreationBible(DEFAULT_CREATION_BIBLE);
         setProgress(0);
       }
     } catch (error) {
       console.error('文件上传失败:', error);
       toast.error(getNetworkErrorMessage(error, '上传文件'));
-      
+
       // 重置状态
       setUploadedFile(null);
       setFileContent('');
+      setExecutionScript('');
+      setExecutionScriptSourceSignature('');
+      setCreationBible(DEFAULT_CREATION_BIBLE);
       setProgress(0);
     } finally {
       setIsProcessing(false);
@@ -3984,7 +6289,7 @@ export default function StoryboardGenerator() {
     setIsProcessing(true);
     setProgress(50);
     setSelectedChapter(chapter);
-    
+
     try {
       // 合并提取的数据到章节内容中
       const enhancedChapter = {
@@ -4000,16 +6305,18 @@ export default function StoryboardGenerator() {
         body: JSON.stringify({
           chapterContent: chapter.content,
           chapterTitle: chapter.title,
+          chapterNumber: chapter.chapterNumber,
           characters: chapter.characters,
           scenes: chapter.scenes,
           scenesData,
           charactersData,
           propsData,
+          creationBible: getCreationBiblePayload(),
         }),
       });
-      
+
       const data = await response.json();
-      
+
       if (data.success) {
         setStoryboard(data.storyboard);
         if (data.tokenUsage) {
@@ -4018,7 +6325,7 @@ export default function StoryboardGenerator() {
         toast.success('分镜脚本生成成功，请确认后继续');
         setProgress(45);
         setCurrentStep(2);
-        
+
         // 分镜生成完成，等待用户确认后再生成图片
       } else {
         throw new Error(data.error);
@@ -4040,7 +6347,7 @@ export default function StoryboardGenerator() {
     setIsProcessing(false);
     setGenerationTasks(prev => prev.map(task =>
       task.type === 'storyboard' && (task.status === 'generating' || task.status === 'pending')
-        ? { ...task, status: 'error', error: '已手动停止，可继续生成未完成章节', endTime: Date.now(), message: `第 ${task.chapterNumber} 章已停止` }
+        ? { ...task, status: 'error', error: '已手动停止，可继续生成未完成分集', endTime: Date.now(), message: `第 ${task.chapterNumber} 集已停止` }
         : task
     ));
     setChapterStoryboards(prev => {
@@ -4058,7 +6365,7 @@ export default function StoryboardGenerator() {
       });
       return next;
     });
-    toast.info('已停止文字分镜生成，可点击继续生成未完成章节');
+    toast.info('已停止文字分镜生成，可点击继续生成未完成分集');
   };
 
   // 生成单个章节的文字分镜（用于并行生成）- SSE流式版本，支持逐行显示
@@ -4074,7 +6381,7 @@ export default function StoryboardGenerator() {
     console.log(`[生成分镜] content长度: ${chapter.content?.length || 0}`);
     console.log(`[生成分镜] content前100字:`, chapter.content?.substring(0, 100));
     console.log(`[生成分镜] 完整章节对象:`, chapter);
-    
+
     // 添加任务
     setGenerationTasks(prev => [...prev, {
       taskId,
@@ -4084,7 +6391,7 @@ export default function StoryboardGenerator() {
       status: 'generating',
       progress: 0,
       total: 1,
-      message: `正在生成第 ${chapter.chapterNumber} 章分镜...`,
+      message: `正在生成第 ${chapter.chapterNumber} 集分镜...`,
       startTime: Date.now(),
     }]);
 
@@ -4102,12 +6409,14 @@ export default function StoryboardGenerator() {
         body: JSON.stringify({
           chapterContent: chapter.content,
           chapterTitle: chapter.title,
+          chapterNumber: chapter.chapterNumber,
           chapterSummary: chapter.summary,  // 添加 summary 作为后备
           characters: chapter.characters,
           scenes: chapter.scenes,
           scenesData,
           charactersData,
           propsData,
+          creationBible: getCreationBiblePayload(),
         }),
       });
 
@@ -4134,12 +6443,12 @@ export default function StoryboardGenerator() {
 
         if (json.type === 'start') {
           // 更新任务进度
-          setGenerationTasks(prev => prev.map(t => 
-            t.taskId === taskId 
-              ? { ...t, total: json.targetShotCount, message: `第 ${chapter.chapterNumber} 章开始生成分镜 (目标${json.targetShotCount}个)...` }
+          setGenerationTasks(prev => prev.map(t =>
+            t.taskId === taskId
+              ? { ...t, total: json.targetShotCount, message: `第 ${chapter.chapterNumber} 集开始生成分镜 (目标${json.targetShotCount}个)...` }
               : t
           ));
-          
+
           // 初始化章节分镜状态
           setChapterStoryboards(prev => ({
             ...prev,
@@ -4161,18 +6470,18 @@ export default function StoryboardGenerator() {
               videoPrompts: [],
             }
           }));
-          
+
         } else if (json.type === 'shot') {
           // 收到单个分镜，实时追加显示
           shots.push(json.shot);
-          
+
           // 更新任务进度
-          setGenerationTasks(prev => prev.map(t => 
-            t.taskId === taskId 
-              ? { ...t, progress: json.progress / 100, message: `第 ${chapter.chapterNumber} 章分镜生成中 (${json.shotNumber}/${json.total})...` }
+          setGenerationTasks(prev => prev.map(t =>
+            t.taskId === taskId
+              ? { ...t, progress: json.progress / 100, message: `第 ${chapter.chapterNumber} 集分镜生成中 (${json.shotNumber}/${json.total})...` }
               : t
           ));
-          
+
           // 实时更新章节分镜 - 逐行显示效果
           setChapterStoryboards(prev => {
             const existing = prev[chapter.chapterNumber];
@@ -4196,13 +6505,13 @@ export default function StoryboardGenerator() {
               }
             };
           });
-          
+
         } else if (json.type === 'complete') {
           // 更新token统计
           if (json.tokenUsage) {
             setTokenUsage(prev => ({ ...prev, generateStoryboard: json.tokenUsage }));
           }
-          
+
         } else if (json.type === 'error') {
           throw new Error(json.error || '服务端生成失败');
         }
@@ -4250,12 +6559,12 @@ export default function StoryboardGenerator() {
 
       if (shots.length > 0) {
         // 更新任务状态
-        setGenerationTasks(prev => prev.map(t => 
-          t.taskId === taskId 
-            ? { ...t, status: 'success', progress: 1, endTime: Date.now(), message: `第 ${chapter.chapterNumber} 章分镜生成完成 (${shots.length}个)` }
+        setGenerationTasks(prev => prev.map(t =>
+          t.taskId === taskId
+            ? { ...t, status: 'success', progress: 1, endTime: Date.now(), message: `第 ${chapter.chapterNumber} 集分镜生成完成 (${shots.length}个)` }
             : t
         ));
-        
+
         // 最终更新章节分镜状态
         setChapterStoryboards(prev => ({
           ...prev,
@@ -4269,7 +6578,7 @@ export default function StoryboardGenerator() {
             }
           }
         }));
-        
+
         return { chapter, storyboard: { chapterTitle: chapterTitleResult, shots, totalShots: shots.length } };
       } else {
         throw new Error('未获取到分镜数据');
@@ -4277,18 +6586,18 @@ export default function StoryboardGenerator() {
     } catch (error: any) {
       const isAbort = error?.name === 'AbortError' || controller.signal.aborted || storyboardBatchCancelledRef.current;
       // 更新任务状态
-      setGenerationTasks(prev => prev.map(t => 
-        t.taskId === taskId 
+      setGenerationTasks(prev => prev.map(t =>
+        t.taskId === taskId
           ? {
               ...t,
               status: 'error',
               error: isAbort ? '已停止生成，可稍后继续' : (error?.message || '生成失败'),
               endTime: Date.now(),
-              message: isAbort ? `第 ${chapter.chapterNumber} 章已停止` : `第 ${chapter.chapterNumber} 章分镜生成失败`,
+              message: isAbort ? `第 ${chapter.chapterNumber} 集已停止` : `第 ${chapter.chapterNumber} 集分镜生成失败`,
             }
           : t
       ));
-      
+
       // 更新章节状态为失败
       setChapterStoryboards(prev => ({
         ...prev,
@@ -4299,7 +6608,7 @@ export default function StoryboardGenerator() {
           storyboard: null,
         }
       }));
-      
+
       return { chapter, storyboard: null, error: isAbort ? '已停止生成' : error?.message };
     } finally {
       if (storyboardAbortControllerRef.current === controller) {
@@ -4312,10 +6621,10 @@ export default function StoryboardGenerator() {
   const regenerateSingleStoryboard = async (chapterNumber: number) => {
     if (!outline?.chapters) return;
     if (!(await requireLoginBeforePaidAction())) return;
-    
+
     const chapter = outline.chapters.find(c => c.chapterNumber === chapterNumber);
     if (!chapter) {
-      toast.error('未找到该章节');
+      toast.error('未找到该分集');
       return;
     }
 
@@ -4338,26 +6647,26 @@ export default function StoryboardGenerator() {
     }));
 
     // 清除相关的生成任务
-    setGenerationTasks(prev => prev.filter(t => 
+    setGenerationTasks(prev => prev.filter(t =>
       !(t.type === 'storyboard' && t.chapterNumber === chapterNumber)
     ));
 
-    toast.info(`开始重新生成第 ${chapterNumber} 章分镜...`);
+    toast.info(`开始重新生成第 ${chapterNumber} 集分镜...`);
 
     // 调用生成函数
     const result = await generateSingleStoryboard(chapter);
-    
+
     if (result.storyboard) {
-      toast.success(`第 ${chapterNumber} 章分镜重新生成成功`);
+      toast.success(`第 ${chapterNumber} 集分镜重新生成成功`);
     } else {
-      toast.error(`第 ${chapterNumber} 章分镜重新生成失败: ${result.error}`);
+      toast.error(`第 ${chapterNumber} 集分镜重新生成失败: ${result.error}`);
     }
   };
 
   // 一键生成所有章节的文字分镜（每4集一批，分批生成）
   const generateAllStoryboards = async () => {
     if (!outline?.chapters || outline.chapters.length === 0) {
-      toast.error('没有章节可生成分镜');
+      toast.error('没有分集可生成分镜');
       return;
     }
     if (!(await requireLoginBeforePaidAction())) return;
@@ -4377,7 +6686,7 @@ export default function StoryboardGenerator() {
     );
 
     if (successfulChapterNumbers.size >= chapters.length) {
-      toast.success(`全部 ${chapters.length} 个章节分镜已生成，无需重复生成`);
+      toast.success(`全部 ${chapters.length} 集分镜已生成，无需重复生成`);
       setBatchInfo({ active: false, batchSize: BATCH_SIZE, totalBatches: 0, completedBatches: 0 });
       setStepConfirmed(prev => ({ ...prev, storyboard: true }));
       setCurrentStep(2);
@@ -4415,15 +6724,15 @@ export default function StoryboardGenerator() {
 
     setIsProcessing(true);
     setGenerationTasks(prev => prev.filter(t => t.status === 'generating' || t.status === 'pending').slice(-8));
-    
+
     const startIdx = resumeBatch * BATCH_SIZE;
     const endIdx = Math.min(startIdx + BATCH_SIZE, chapters.length);
-    const batchLabel = `第 ${resumeBatch + 1}/${totalBatches} 批（${startIdx + 1}-${endIdx} 章）`;
+    const batchLabel = `第 ${resumeBatch + 1}/${totalBatches} 批（${startIdx + 1}-${endIdx} 集）`;
     const loadingToast = toast.loading(`正在生成 ${batchLabel}...`);
     setBatchInfo({ active: true, batchSize: BATCH_SIZE, totalBatches, completedBatches: resumeBatch });
 
     const batchResults: { chapterNumber: number; success: boolean; skipped?: boolean; error?: string }[] = [];
-    
+
     try {
       // 逐章串行生成（仅当前批次的章节）
       for (let i = startIdx; i < endIdx; i++) {
@@ -4438,13 +6747,13 @@ export default function StoryboardGenerator() {
           batchResults.push({ chapterNumber: chapterNum, success: true, skipped: true });
           continue;
         }
-        
-        toast.loading(`正在生成第 ${chapterNum} 章...（${batchLabel}）`, { id: loadingToast });
+
+        toast.loading(`正在生成第 ${chapterNum} 集...（${batchLabel}）`, { id: loadingToast });
         setCollapsedStoryboardChapters(prev => ({ ...prev, [String(chapterNum)]: false }));
-        
+
         let lastError = '';
         let result = null;
-        
+
         // 自动重试（最多 2 次）
         for (let attempt = 0; attempt < 3; attempt++) {
           if (storyboardBatchCancelledRef.current) {
@@ -4452,12 +6761,12 @@ export default function StoryboardGenerator() {
           }
 
           if (attempt > 0) {
-            toast.loading(`第 ${chapterNum} 章第 ${attempt + 1} 次重试...（${batchLabel}）`, { id: loadingToast });
+            toast.loading(`第 ${chapterNum} 集第 ${attempt + 1} 次重试...（${batchLabel}）`, { id: loadingToast });
             await new Promise(resolve => setTimeout(resolve, 3000));
           }
-          
+
           result = await generateSingleStoryboard(chapter);
-          
+
           if (result.storyboard) {
             break;
           }
@@ -4470,31 +6779,31 @@ export default function StoryboardGenerator() {
         if (storyboardBatchCancelledRef.current) {
           break;
         }
-        
+
         batchResults.push({
           chapterNumber: chapterNum,
           success: !!result!.storyboard,
           error: result!.storyboard ? undefined : lastError,
         });
-        
+
         if (result!.storyboard) {
           successfulChapterNumbers.add(chapterNum);
-          toast.success(`第 ${chapterNum} 章 ✅`, { id: loadingToast });
+          toast.success(`第 ${chapterNum} 集 ✅`, { id: loadingToast });
         } else {
-          toast.error(`第 ${chapterNum} 章失败: ${lastError}`, { id: loadingToast });
+          toast.error(`第 ${chapterNum} 集失败: ${lastError}`, { id: loadingToast });
         }
       }
-      
+
       // 当前批次完成
       toast.dismiss(loadingToast);
-      
+
       const batchSuccessCount = batchResults.filter(r => r.success).length;
       const skippedCount = batchResults.filter(r => r.skipped).length;
       const nextIncompleteIndex = chapters.findIndex(chapter => !successfulChapterNumbers.has(chapter.chapterNumber));
       const newCompletedBatches = nextIncompleteIndex === -1 ? totalBatches : Math.floor(nextIncompleteIndex / BATCH_SIZE);
 
       if (storyboardBatchCancelledRef.current) {
-        toast.info('已停止生成，本批未完成章节下次会自动继续');
+        toast.info('已停止生成，本批未完成分集下次会自动继续');
         setBatchInfo({ active: true, batchSize: BATCH_SIZE, totalBatches, completedBatches: resumeBatch });
       } else if (nextIncompleteIndex === -1) {
         // 全部批次完成
@@ -4502,14 +6811,14 @@ export default function StoryboardGenerator() {
         const allFailCount = chapters.length - allSuccessCount;
 
         if (allSuccessCount === chapters.length) {
-          toast.success(`全部 ${chapters.length} 个章节分镜生成成功 🎉`);
+          toast.success(`全部 ${chapters.length} 集分镜生成成功 🎉`);
         } else if (allSuccessCount > 0) {
-          toast.success(`共生成 ${allSuccessCount}/${chapters.length} 个章节分镜`);
-          if (allFailCount > 0) toast.warning(`${allFailCount} 个章节生成失败，可点击章节旁的刷新按钮单独重试`);
+          toast.success(`共生成 ${allSuccessCount}/${chapters.length} 集分镜`);
+          if (allFailCount > 0) toast.warning(`${allFailCount} 集生成失败，可点击对应分集旁的刷新按钮单独重试`);
         } else {
-          toast.error(`全部 ${chapters.length} 个章节分镜生成失败，请检查网络后逐个重试`);
+          toast.error(`全部 ${chapters.length} 集分镜生成失败，请检查网络后逐集重试`);
         }
-        
+
         setStepConfirmed(prev => ({ ...prev, storyboard: allSuccessCount > 0 }));
         if (allSuccessCount > 0) setCurrentStep(2);
         setBatchInfo({ active: false, batchSize: BATCH_SIZE, totalBatches: 0, completedBatches: 0 });
@@ -4517,7 +6826,7 @@ export default function StoryboardGenerator() {
         // 还有下一批，等待用户确认
         const nextChapter = chapters[nextIncompleteIndex];
         const skipText = skippedCount > 0 ? `，已跳过 ${skippedCount} 章成功分镜` : '';
-        toast.success(`第 ${resumeBatch + 1}/${totalBatches} 批已处理（${batchSuccessCount}/${endIdx - startIdx} 章成功${skipText}），下次从第 ${nextChapter.chapterNumber} 章继续`);
+        toast.success(`第 ${resumeBatch + 1}/${totalBatches} 批已处理（${batchSuccessCount}/${endIdx - startIdx} 集成功${skipText}），下次从第 ${nextChapter.chapterNumber} 集继续`);
         setBatchInfo({ active: true, batchSize: BATCH_SIZE, totalBatches, completedBatches: newCompletedBatches });
       }
     } catch (error) {
@@ -4541,11 +6850,11 @@ export default function StoryboardGenerator() {
 
     setIsProcessing(true);
     setProgress(85);
-    
+
     try {
       // 将素材图片转换为数组格式
       const assetImagesArray = Object.values(assetImagesObj);
-      
+
       const response = await fetch('/api/generate-connecting-prompts', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -4556,11 +6865,14 @@ export default function StoryboardGenerator() {
           assetImages: assetImagesArray,
           scenesData,
           charactersData,
+          propsData,
+          chapterNumber: selectedChapter?.chapterNumber,
+          creationBible: getCreationBiblePayload(),
         }),
       });
-      
+
       const data = await response.json();
-      
+
       if (data.success) {
         setConnectingPrompts(data.connectingPrompts);
         if (data.tokenUsage) {
@@ -4568,7 +6880,7 @@ export default function StoryboardGenerator() {
         }
         toast.success('串联提示词生成成功，请确认后继续');
         setProgress(90);
-        
+
         // 串联提示词生成完成，等待用户确认后再生成视频
       } else {
         throw new Error(data.error);
@@ -4587,11 +6899,11 @@ export default function StoryboardGenerator() {
 
     setIsProcessing(true);
     setProgress(70);
-    
+
     try {
       // 将素材图片转换为数组格式
       const assetImagesArray = Object.values(assetImagesObj);
-      
+
       const response = await fetch('/api/generate-connecting-prompts', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -4602,11 +6914,14 @@ export default function StoryboardGenerator() {
           assetImages: assetImagesArray,
           scenesData,
           charactersData,
+          propsData,
+          chapterNumber: selectedChapter?.chapterNumber,
+          creationBible: getCreationBiblePayload(),
         }),
       });
-      
+
       const data = await response.json();
-      
+
       if (data.success) {
         setConnectingPrompts(data.connectingPrompts);
         if (data.tokenUsage) {
@@ -4764,13 +7079,32 @@ export default function StoryboardGenerator() {
   const generatePromptGroupVideo = async (cs: ChapterStoryboard, pg: PromptGroup, retryVideoId?: string) => {
     if (!(await requireLoginBeforePaidAction())) return;
 
+    const preciseDuration = getPromptGroupDurationSeconds(cs, pg);
+    if (preciseDuration > STORYBOARD_GROUP_MAX_SECONDS) {
+      toast.error(
+        `本组实际总时长为 ${formatStoryboardDurationSeconds(preciseDuration)} 秒，超过 15 秒。请先重新生成本集故事版面板描述，系统会按实际时长重新分组。`,
+      );
+      return;
+    }
+
     const groupKey = getPromptGroupVideoKey(pg);
     const existingVideos = cs.shotVideos?.find(sv => sv.shotNumber === groupKey)?.videos || [];
     const videoId = retryVideoId || `group-video-${cs.chapterNumber}-${pg.groupIndex}-${Date.now()}`;
     const referenceSelection = getPromptGroupReferenceSelection(cs, pg);
     const referenceImages = referenceSelection.images.map(item => item.url);
+    const voiceResolution = resolveVideoVoiceAssignments(
+      getPromptGroupShots(cs, pg),
+      cs.chapterNumber,
+      characterVoiceData,
+      voiceLibrary,
+    );
+    if (voiceResolution.missingCharacters.length > 0) {
+      toast.error(`请先为以下说话人物捆绑音色：${voiceResolution.missingCharacters.join('、')}`);
+      setActiveTab('extraction');
+      return;
+    }
     const prompt = buildPromptGroupVideoPrompt(cs, pg, referenceSelection);
-    const duration = normalizeManfeiDuration(pg.shotNumbers.length * 4);
+    const duration = normalizeManfeiDuration(preciseDuration);
 
     const newVideo: VideoItem = {
       videoId,
@@ -4840,6 +7174,8 @@ export default function StoryboardGenerator() {
             name: item.name,
           })),
           linkedEntities: referenceSelection.entities,
+          speakingCharacters: voiceResolution.speakingCharacters,
+          voiceAssignments: voiceResolution.assignments,
         }, (taskId) => {
           setChapterStoryboards(prev => ({
             ...prev,
@@ -4932,28 +7268,42 @@ export default function StoryboardGenerator() {
   };
 
   const generateVideos = async (
-    shotPrompts: any[], 
-    images: ImageStoryboard[], 
+    shotPrompts: any[],
+    images: ImageStoryboard[],
     chapterTitle: string
   ) => {
     if (!(await requireLoginBeforePaidAction())) return;
 
     setIsProcessing(true);
     setProgress(95);
-    
+
     try {
       const results: VideoResult[] = [];
       for (const promptItem of shotPrompts) {
         const image = images.find(item => item.shotNumber === promptItem.shotNumber);
         const duration = normalizeManfeiDuration(promptItem.duration);
+        const voiceResolution = resolveVideoVoiceAssignments(
+          image?.originalShot ? [image.originalShot] : [],
+          selectedChapter?.chapterNumber,
+          characterVoiceData,
+          voiceLibrary,
+        );
+        if (voiceResolution.missingCharacters.length > 0) {
+          throw new Error(`请先为以下说话人物捆绑音色：${voiceResolution.missingCharacters.join('、')}`);
+        }
         const video = await createAndWaitForManfeiVideo({
-          prompt: promptItem.videoPrompt || promptItem.panelDescription || promptItem.prompt || '',
+          prompt: [
+            promptItem.videoPrompt || promptItem.panelDescription || promptItem.prompt || '',
+            voiceResolution.instruction,
+          ].filter(Boolean).join('\n\n'),
           imageUrl: image?.imageUrl || '',
           imageUrls: image?.imageUrl ? [image.imageUrl] : [],
           duration,
           videoRatio: getEffectiveVideoRatio(),
           chapterTitle,
           shotNumber: promptItem.shotNumber,
+          speakingCharacters: voiceResolution.speakingCharacters,
+          voiceAssignments: voiceResolution.assignments,
         });
         results.push({
           shotNumber: promptItem.shotNumber,
@@ -4991,9 +7341,9 @@ export default function StoryboardGenerator() {
         'application/msword',
         'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
       ];
-      
-      if (supportedTypes.includes(file.type) || 
-          file.name.endsWith('.txt') || 
+
+      if (supportedTypes.includes(file.type) ||
+          file.name.endsWith('.txt') ||
           file.name.endsWith('.md') ||
           file.name.endsWith('.pdf') ||
           file.name.endsWith('.doc') ||
@@ -5016,22 +7366,33 @@ export default function StoryboardGenerator() {
     const videoItem = videoResults.find(v => v.shotNumber === shotNumber);
     const imageStoryboard = imageStoryboards.find(s => s.shotNumber === shotNumber);
     if (!videoItem && !customPrompt) return;
-    
+
     const promptItem = connectingPrompts?.shotPrompts?.find((p: any) => p.shotNumber === shotNumber);
     if (!promptItem && !customPrompt) {
       toast.error('找不到故事版面板描述');
       return;
     }
-    
+
     setRegeneratingShot(shotNumber);
     try {
+      const voiceResolution = resolveVideoVoiceAssignments(
+        imageStoryboard?.originalShot ? [imageStoryboard.originalShot] : [],
+        selectedChapter?.chapterNumber,
+        characterVoiceData,
+        voiceLibrary,
+      );
+      if (voiceResolution.missingCharacters.length > 0) {
+        throw new Error(`请先为以下说话人物捆绑音色：${voiceResolution.missingCharacters.join('、')}`);
+      }
       const video = await createAndWaitForManfeiVideo({
         shotNumber,
-        prompt: customPrompt || getShotDescription(shotNumber) || '',
+        prompt: [customPrompt || getShotDescription(shotNumber) || '', voiceResolution.instruction].filter(Boolean).join('\n\n'),
         imageUrl: imageStoryboard?.imageUrl || '',
         imageUrls: imageStoryboard?.imageUrl ? [imageStoryboard.imageUrl] : [],
         duration: normalizeManfeiDuration(promptItem?.duration),
         videoRatio: getEffectiveVideoRatio(),
+        speakingCharacters: voiceResolution.speakingCharacters,
+        voiceAssignments: voiceResolution.assignments,
       });
       setVideoResults(prev => prev.map(v =>
         v.shotNumber === shotNumber
@@ -5040,8 +7401,8 @@ export default function StoryboardGenerator() {
       ));
       toast.success(`镜头 ${shotNumber} 视频已重新生成`);
       setEditingPrompt(null);
-    } catch {
-      toast.error('重新生成失败');
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : '重新生成失败');
     } finally {
       setRegeneratingShot(null);
     }
@@ -5055,25 +7416,36 @@ export default function StoryboardGenerator() {
       toast.error('没有视频可重新生成');
       return;
     }
-    
+
     setIsProcessing(true);
     toast.info('正在批量重新生成所有视频...');
-    
+
     let successCount = 0;
     let failCount = 0;
-    
+
     for (const promptItem of connectingPrompts.shotPrompts) {
       const imageStoryboard = imageStoryboards.find(s => s.shotNumber === promptItem.shotNumber);
       if (!imageStoryboard) continue;
-      
+
       try {
+        const voiceResolution = resolveVideoVoiceAssignments(
+          imageStoryboard.originalShot ? [imageStoryboard.originalShot] : [],
+          selectedChapter?.chapterNumber,
+          characterVoiceData,
+          voiceLibrary,
+        );
+        if (voiceResolution.missingCharacters.length > 0) {
+          throw new Error(`请先为以下说话人物捆绑音色：${voiceResolution.missingCharacters.join('、')}`);
+        }
         const video = await createAndWaitForManfeiVideo({
           shotNumber: promptItem.shotNumber,
-          prompt: getShotDescription(promptItem.shotNumber) || '',
+          prompt: [getShotDescription(promptItem.shotNumber) || '', voiceResolution.instruction].filter(Boolean).join('\n\n'),
           imageUrl: imageStoryboard.imageUrl,
           imageUrls: [imageStoryboard.imageUrl],
           duration: normalizeManfeiDuration(promptItem.duration),
           videoRatio: getEffectiveVideoRatio(),
+          speakingCharacters: voiceResolution.speakingCharacters,
+          voiceAssignments: voiceResolution.assignments,
         });
         setVideoResults(prev => prev.map(v =>
           v.shotNumber === promptItem.shotNumber
@@ -5085,7 +7457,7 @@ export default function StoryboardGenerator() {
         failCount++;
       }
     }
-    
+
     setIsProcessing(false);
     if (failCount === 0) {
       toast.success(`成功重新生成 ${successCount} 个视频`);
@@ -5115,7 +7487,7 @@ export default function StoryboardGenerator() {
   // 现在改为使用名称作为主键，确保每个素材独立管理图片
   const getAssetImages = (type: 'scene' | 'character' | 'prop', idOrName: number | string | undefined, name?: string): AssetImages | undefined => {
     let key: string;
-    
+
     // 优先使用名称作为 key（名称是唯一的）
     // 如果提供了名称参数，直接使用
     if (name) {
@@ -5158,8 +7530,22 @@ export default function StoryboardGenerator() {
     } else {
       key = `${type}-${idOrName}`;
     }
-    
+
     return assetImages.get(key);
+  };
+
+  const getPrimaryCompletedAssetImage = (
+    type: 'scene' | 'character' | 'prop',
+    name: string
+  ): AssetSingleImage | undefined => {
+    const asset = getAssetImages(type, name);
+    return asset?.images.find(image => !image.isGenerating && typeof image.imageUrl === 'string' && image.imageUrl.trim().length > 0);
+  };
+
+  const getSceneReferenceImage = (scene: Scene): AssetSingleImage | undefined => {
+    const referenceName = scene.referenceSceneName?.trim();
+    if (!referenceName || referenceName === scene.name.trim()) return undefined;
+    return getPrimaryCompletedAssetImage('scene', referenceName);
   };
 
   // 获取当前章节关联的素材
@@ -5226,31 +7612,85 @@ export default function StoryboardGenerator() {
       tempImageId?: string;
       skipPlaceholder?: boolean;
       generatingStatus?: string;
+      referenceImageUrl?: string;
+      onSuccess?: (image: AssetSingleImage) => void;
     }
   ): Promise<boolean> => {
     if (!data?.name) {
       if (!options?.silent) toast.error('素材名称缺失，无法生成图片');
       return false;
     }
-    if (!(await requireLoginBeforePaidAction())) return false;
 
     // 使用素材的名称作为 key，确保唯一性（名称是唯一的，id 可能在分批时重复）
     const assetId = `${type}-${data.name}`;
     const currentAsset = assetImages.get(assetId);
     const currentCount = currentAsset?.images.length || 0;
 
-    // 检查数量限制
+    // 在调用付费接口前拦截第 4 张图片，避免产生无效扣费。
     if (currentCount >= MAX_IMAGES_PER_ASSET) {
-      if (!options?.silent) toast.error(`每个素材最多支持 ${MAX_IMAGES_PER_ASSET} 张图片`);
+      if (!options?.silent) setAssetImageLimitNotice({ type, name: data.name });
+      return false;
+    }
+    if (!(await requireLoginBeforePaidAction())) return false;
+
+    const referenceType: 'scene' | 'prop' | null = type === 'scene' ? 'scene' : type === 'prop' ? 'prop' : null;
+    const referenceAssetName = type === 'scene' && typeof data.referenceSceneName === 'string'
+      ? data.referenceSceneName.trim()
+      : type === 'prop' && typeof data.referencePropName === 'string'
+        ? data.referencePropName.trim()
+        : '';
+    const referenceLabel = type === 'prop' ? '道具状态' : '场景';
+    let referenceImageUrl = options?.referenceImageUrl?.trim() || '';
+
+    if (referenceAssetName && referenceType && !referenceImageUrl) {
+      const referenceImage = getPrimaryCompletedAssetImage(referenceType, referenceAssetName);
+      referenceImageUrl = referenceImage?.imageUrl?.trim() || '';
+      if (!referenceImageUrl) {
+        const referenceAsset = getAssetImages(referenceType, referenceAssetName);
+        const referenceIsGenerating = referenceAsset?.images.some(image => image.isGenerating);
+        if (!options?.silent) {
+          if (referenceIsGenerating) {
+            toast.info(`参考${referenceLabel}「${referenceAssetName}」正在生成，请完成后再生成当前变体`);
+          } else {
+            toast.warning(`请先生成参考${referenceLabel}「${referenceAssetName}」的基准图`);
+          }
+        }
+        return false;
+      }
+    }
+
+    if (activeAssetGenerationIdsRef.current.has(assetId)) {
+      if (!options?.silent) toast.warning(`${data.name} 正在生成中`);
       return false;
     }
 
-    if (currentAsset?.images.some(img => img.isGenerating)) {
+    const hasOtherGeneratingImage = currentAsset?.images.some(img => (
+      img.isGenerating && !(options?.skipPlaceholder && img.imageId === options.tempImageId)
+    ));
+    if (hasOtherGeneratingImage) {
       if (!options?.silent) toast.warning(`${data.name} 正在生成中`);
       return false;
     }
 
     const tempImageId = options?.tempImageId || `temp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const initialGeneratingStatus = options?.generatingStatus || (
+      referenceImageUrl && referenceAssetName
+        ? `正在参考「${referenceAssetName}」进行图生图`
+        : '请求已提交，正在连接图像模型'
+    );
+
+    activeAssetGenerationIdsRef.current.add(assetId);
+    setAssetGenerationStatuses(prev => ({ ...prev, [assetId]: initialGeneratingStatus }));
+    const processingStatusTimer = window.setTimeout(() => {
+      setAssetGenerationStatuses(prev => (
+        prev[assetId] ? { ...prev, [assetId]: 'API 正在处理并生成图片，请耐心等待' } : prev
+      ));
+    }, 1800);
+    const longProcessingStatusTimer = window.setTimeout(() => {
+      setAssetGenerationStatuses(prev => (
+        prev[assetId] ? { ...prev, [assetId]: '图片仍在生成，页面可以继续操作' } : prev
+      ));
+    }, 30000);
 
     // 设置生成中状态
     setAssetImages(prev => {
@@ -5262,7 +7702,7 @@ export default function StoryboardGenerator() {
             ...existing,
             images: existing.images.map(img =>
               img.imageId === tempImageId
-                ? { ...img, isGenerating: true, generatingStatus: options?.generatingStatus || '生成中' }
+                ? { ...img, isGenerating: true, generatingStatus: initialGeneratingStatus }
                 : img
             ),
           });
@@ -5277,7 +7717,7 @@ export default function StoryboardGenerator() {
             imageUrl: '',
             imageKey: '',
             isGenerating: true,
-            generatingStatus: options?.generatingStatus || '生成中',
+            generatingStatus: initialGeneratingStatus,
           }],
         });
       } else {
@@ -5290,7 +7730,7 @@ export default function StoryboardGenerator() {
             imageUrl: '',
             imageKey: '',
             isGenerating: true,
-            generatingStatus: options?.generatingStatus || '生成中',
+            generatingStatus: initialGeneratingStatus,
           }],
         });
       }
@@ -5301,33 +7741,55 @@ export default function StoryboardGenerator() {
       const response = await fetch('/api/generate-asset-image', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ type, data, currentCount }),
+        body: JSON.stringify({
+          type,
+          data,
+          currentCount,
+          referenceImageUrl: referenceImageUrl || undefined,
+          creationBible: getCreationBiblePayload(),
+        }),
       });
 
       const result = await response.json();
 
       if (result.success) {
+        const generatedImage: AssetSingleImage = {
+          imageId: `img-${Date.now()}`,
+          imageUrl: result.localUrl || result.imageUrl,
+          imageKey: result.imageKey,
+          prompt: result.prompt,
+          promptSource: result.prompt ? 'actual' : 'rebuilt',
+          isGenerating: false,
+          isCustom: false,
+        };
         setAssetImages(prev => {
           const newMap = new Map(prev);
           const existing = newMap.get(assetId);
           if (existing) {
+            let replacedPlaceholder = false;
+            const nextImages = existing.images.map(img => {
+              if (img.imageId !== tempImageId) return img;
+              replacedPlaceholder = true;
+              return generatedImage;
+            });
+            if (!replacedPlaceholder && !nextImages.some(img => img.imageUrl === generatedImage.imageUrl)) {
+              nextImages.push(generatedImage);
+            }
             newMap.set(assetId, {
               ...existing,
-              images: existing.images.map(img =>
-                img.imageId === tempImageId
-                  ? {
-                      imageId: `img-${Date.now()}`,
-                      imageUrl: result.localUrl || result.imageUrl,
-                      imageKey: result.imageKey,
-                      isGenerating: false,
-                      isCustom: false,
-                    }
-                  : img
-              ),
+              images: nextImages,
+            });
+          } else {
+            newMap.set(assetId, {
+              assetId,
+              type,
+              name: data.name,
+              images: [generatedImage],
             });
           }
           return newMap;
         });
+        options?.onSuccess?.(generatedImage);
         if (!options?.silent) toast.success(`${data.name} 图片生成成功`);
         return true;
       } else {
@@ -5361,11 +7823,31 @@ export default function StoryboardGenerator() {
       });
       if (!options?.silent) toast.error(getNetworkErrorMessage(error, '生成图片'));
       return false;
+    } finally {
+      window.clearTimeout(processingStatusTimer);
+      window.clearTimeout(longProcessingStatusTimer);
+      activeAssetGenerationIdsRef.current.delete(assetId);
+      setAssetGenerationStatuses(prev => {
+        if (!(assetId in prev)) return prev;
+        const next = { ...prev };
+        delete next[assetId];
+        return next;
+      });
     }
   };
 
-  const generateAllAssetImages = async (type: 'scene' | 'character' | 'prop') => {
-    if (!(await requireLoginBeforePaidAction())) return;
+  const generateAllAssetImages = async (
+    type: 'scene' | 'character' | 'prop',
+    repeatConfirmed = false
+  ) => {
+    if (batchAssetGenerationGuardRef.current) {
+      toast.warning('批量生成任务正在启动或运行，请勿重复点击');
+      return;
+    }
+
+    batchAssetGenerationGuardRef.current = true;
+    try {
+      if (!(await requireLoginBeforePaidAction())) return;
 
     if (stepConfirmed.assets) {
       toast.warning('素材已确认，如需重新生成请先撤回到素材确认步骤');
@@ -5387,7 +7869,8 @@ export default function StoryboardGenerator() {
     const candidates = allItems.filter((item: any) => {
       const assetData = getAssetImages(type, item.id, item.name);
       const images = assetData?.images || [];
-      return images.length < MAX_IMAGES_PER_ASSET && !images.some(img => img.isGenerating);
+      const assetId = `${type}-${item.name}`;
+      return images.length < MAX_IMAGES_PER_ASSET && !images.some(img => img.isGenerating) && !assetGenerationStatuses[assetId];
     });
 
     if (allItems.length === 0) {
@@ -5396,9 +7879,31 @@ export default function StoryboardGenerator() {
     }
 
     if (candidates.length === 0) {
+      const itemAtLimit = allItems.find((item: any) => {
+        const assetData = getAssetImages(type, item.id, item.name);
+        return (assetData?.images?.length || 0) >= MAX_IMAGES_PER_ASSET;
+      });
+      if (itemAtLimit) {
+        setAssetImageLimitNotice({
+          type,
+          name: allItems.length === 1 ? itemAtLimit.name : `${labelMap[type]}列表中的素材`,
+        });
+        return;
+      }
       toast.info(`${labelMap[type]}列表没有可继续生成的素材`);
       return;
     }
+
+    if (batchAssetGenerationHistory[type] && !repeatConfirmed) {
+      setBatchRegenerationConfirmType(type);
+      return;
+    }
+
+    setBatchAssetGenerationHistory(prev => ({
+      ...INITIAL_BATCH_ASSET_GENERATION_HISTORY,
+      ...prev,
+      [type]: true,
+    }));
 
     const batchItems = candidates.map((item: any) => ({
       item,
@@ -5410,6 +7915,14 @@ export default function StoryboardGenerator() {
       current: 0,
       total: candidates.length,
       currentName: `已加入队列 ${candidates.length} 个`,
+    });
+
+    setAssetGenerationStatuses(prev => {
+      const next = { ...prev };
+      batchItems.forEach(({ item }) => {
+        next[`${type}-${item.name}`] = '已进入队列，等待 API 处理';
+      });
+      return next;
     });
 
     // 先给所有待生成素材插入占位图，让用户能立即看到整批任务已进入队列。
@@ -5448,7 +7961,33 @@ export default function StoryboardGenerator() {
     let failCount = 0;
     let completedCount = 0;
     let activeCount = 0;
-    let nextIndex = 0;
+    const generatedReferenceUrls = new Map<string, string>();
+
+    const resolveCanonicalAssetName = (rawName: string) => {
+      const normalizedName = normalizeAssetIdentity(rawName);
+      const matched = allItems.find((item: any) => normalizeAssetIdentity(item?.name) === normalizedName);
+      return matched?.name || rawName;
+    };
+
+    const getReferenceAssetName = (item: any) => {
+      const rawName = type === 'scene'
+        ? item?.referenceSceneName
+        : type === 'prop'
+          ? item?.referencePropName
+          : '';
+      return typeof rawName === 'string' && rawName.trim()
+        ? resolveCanonicalAssetName(rawName.trim())
+        : '';
+    };
+
+    const resolveBatchReferenceUrl = (item: any) => {
+      const referenceName = getReferenceAssetName(item);
+      if (!referenceName || (type !== 'scene' && type !== 'prop')) return '';
+      if (referenceName === item.name) return '';
+      return generatedReferenceUrls.get(`${type}-${referenceName}`)
+        || getPrimaryCompletedAssetImage(type, referenceName)?.imageUrl
+        || '';
+    };
 
     const updateBatchProgress = (currentName?: string) => {
       setBatchAssetGeneration({
@@ -5460,33 +7999,93 @@ export default function StoryboardGenerator() {
       toast.loading(`正在批量生成${labelMap[type]}图片：已完成 ${completedCount}/${candidates.length}`, { id: loadingToast });
     };
 
-    const workerCount = Math.min(BATCH_ASSET_IMAGE_CONCURRENCY, batchItems.length);
-    const runWorker = async () => {
-      while (nextIndex < batchItems.length) {
-        const index = nextIndex++;
-        const { item, tempImageId } = batchItems[index];
-        activeCount++;
-        updateBatchProgress(item.name);
+    const runBatchWave = async (waveItems: typeof batchItems) => {
+      let waveIndex = 0;
+      const workerCount = Math.min(BATCH_ASSET_IMAGE_CONCURRENCY, waveItems.length);
+      const runWorker = async () => {
+        while (waveIndex < waveItems.length) {
+          const index = waveIndex++;
+          const { item, tempImageId } = waveItems[index];
+          const referenceImageUrl = resolveBatchReferenceUrl(item);
+          const referenceAssetName = getReferenceAssetName(item);
 
-        const success = await generateAssetImage(type, item, {
-          silent: true,
-          tempImageId,
-          skipPlaceholder: true,
-          generatingStatus: '生成中',
-        });
+          activeCount++;
+          updateBatchProgress(item.name);
 
-        activeCount--;
-        completedCount++;
-        if (success) {
-          successCount++;
-        } else {
-          failCount++;
+          const success = await generateAssetImage(type, item, {
+            silent: true,
+            tempImageId,
+            skipPlaceholder: true,
+            referenceImageUrl: referenceImageUrl || undefined,
+            generatingStatus: referenceImageUrl
+              ? `正在参考「${referenceAssetName}」进行图生图`
+              : '生成中',
+            onSuccess: image => {
+              generatedReferenceUrls.set(`${type}-${item.name}`, image.imageUrl);
+            },
+          });
+
+          activeCount--;
+          completedCount++;
+          if (success) {
+            successCount++;
+          } else {
+            failCount++;
+          }
+          updateBatchProgress(item.name);
         }
-        updateBatchProgress(item.name);
-      }
+      };
+
+      await Promise.all(Array.from({ length: workerCount }, () => runWorker()));
     };
 
-    await Promise.all(Array.from({ length: workerCount }, () => runWorker()));
+    if (type === 'scene' || type === 'prop') {
+      let pendingItems = [...batchItems];
+      while (pendingItems.length > 0) {
+        const readyItems = pendingItems.filter(({ item }) => (
+          !getReferenceAssetName(item) || Boolean(resolveBatchReferenceUrl(item))
+        ));
+
+        if (readyItems.length === 0) {
+          failCount += pendingItems.length;
+          completedCount += pendingItems.length;
+          setAssetImages(prev => {
+            const next = new Map(prev);
+            pendingItems.forEach(({ item, tempImageId }) => {
+              const assetId = `${type}-${item.name}`;
+              const existing = next.get(assetId);
+              if (!existing) return;
+              next.set(assetId, {
+                ...existing,
+                images: existing.images.filter(image => image.imageId !== tempImageId),
+              });
+            });
+            return next;
+          });
+          const missingNames = pendingItems
+            .slice(0, 3)
+            .map(({ item }) => getReferenceAssetName(item) || item.name)
+            .join('、');
+          toast.warning(`以下${labelMap[type]}状态缺少可用基准图，已跳过：${missingNames}${pendingItems.length > 3 ? ' 等' : ''}`);
+          updateBatchProgress(`等待基准图的${labelMap[type]}已跳过`);
+          break;
+        }
+
+        await runBatchWave(readyItems);
+        const readySet = new Set(readyItems);
+        pendingItems = pendingItems.filter(item => !readySet.has(item));
+      }
+    } else {
+      await runBatchWave(batchItems);
+    }
+
+    setAssetGenerationStatuses(prev => {
+      const next = { ...prev };
+      batchItems.forEach(({ item }) => {
+        delete next[`${type}-${item.name}`];
+      });
+      return next;
+    });
 
     setBatchAssetGeneration({
       type: null,
@@ -5495,12 +8094,28 @@ export default function StoryboardGenerator() {
       currentName: '',
     });
 
-    if (failCount === 0) {
-      toast.success(`${labelMap[type]}图片批量生成完成：成功 ${successCount} 个`, { id: loadingToast });
-    } else {
-      toast.warning(`${labelMap[type]}图片批量生成完成：成功 ${successCount} 个，失败/跳过 ${failCount} 个`, { id: loadingToast });
+      if (failCount === 0) {
+        toast.success(`${labelMap[type]}图片批量生成完成：成功 ${successCount} 个`, { id: loadingToast });
+      } else {
+        toast.warning(`${labelMap[type]}图片批量生成完成：成功 ${successCount} 个，失败/跳过 ${failCount} 个`, { id: loadingToast });
+      }
+    } finally {
+      batchAssetGenerationGuardRef.current = false;
     }
   };
+
+  const updateCharacterIdentityByName = useCallback((characterName: string, updates: Partial<Character>) => {
+    const updateCharacters = (characters: Character[]) => characters.map(character => (
+      character.name === characterName ? { ...character, ...updates } : character
+    ));
+
+    setCharactersData((prev: any) => prev?.characters
+      ? { ...prev, characters: updateCharacters(prev.characters) }
+      : prev);
+    setCharacterBatchInfo((prev: any) => prev?.allCharacters
+      ? { ...prev, allCharacters: updateCharacters(prev.allCharacters) }
+      : prev);
+  }, [setCharactersData, setCharacterBatchInfo]);
 
   // Helper: 按人物 + lookId 更新造型状态（lookId 在不同人物间会重复）
   const updateLookById = (targetLookId: string, updates: any, targetCharacter?: any) => {
@@ -5546,22 +8161,108 @@ export default function StoryboardGenerator() {
     });
   };
 
-  const getCharacterFaceReferenceImage = (character: any): string | undefined => {
+  const getCharacterFaceReferenceImage = (character: Character): string | undefined => {
+    if (!character?.identityImageConfirmed || !character.confirmedFaceImageUrl) return undefined;
     const assetKey = `character-${character?.name}`;
     const existingAsset = assetImages.get(assetKey);
-    const faceImage = existingAsset?.images?.find((img: any) => img.imageUrl && !img.isGenerating)?.imageUrl;
-    if (faceImage) return faceImage;
+    const confirmedImage = existingAsset?.images?.find((image: AssetSingleImage) => (
+      image.imageUrl === character.confirmedFaceImageUrl && !image.isGenerating
+    ));
+    return confirmedImage?.imageUrl;
+  };
 
-    for (const look of character?.looks || []) {
-      if (look?.imageUrl) return look.imageUrl;
-      if (look?.fourViewImageUrl) return look.fourViewImageUrl;
+  const getCharacterLookReference = (character: Character, look: CharacterLook) => {
+    const confirmedFaceImageUrl = getCharacterFaceReferenceImage(character);
+    if (!confirmedFaceImageUrl) {
+      return {
+        imageUrl: undefined,
+        label: '人物正脸身份基准图',
+        missingMessage: `请先选择并确认 ${character.name} 的正脸身份基准图`,
+      };
     }
 
-    return undefined;
+    if (look.isBaseLook) {
+      return {
+        imageUrl: confirmedFaceImageUrl,
+        label: '已确认正脸身份基准图',
+        missingMessage: '',
+      };
+    }
+
+    if (!look.referenceLookId) {
+      return {
+        imageUrl: undefined,
+        label: '缺少父级造型',
+        missingMessage: `造型依赖关系异常：「${look.scene || look.id}」没有父级造型，请重新提取人物信息`,
+      };
+    }
+
+    const referenceLook = character.looks?.find(candidate => candidate.id === look.referenceLookId);
+    if (!referenceLook) {
+      return {
+        imageUrl: undefined,
+        label: look.referenceLookId,
+        missingMessage: `造型依赖关系异常：未找到父级造型 ${look.referenceLookId}`,
+      };
+    }
+    if (!referenceLook.imageUrl) {
+      return {
+        imageUrl: undefined,
+        label: referenceLook.scene || referenceLook.id,
+        missingMessage: `请先生成父级造型「${referenceLook.scene || referenceLook.id}」`,
+      };
+    }
+    if (referenceLook.identityNeedsReview) {
+      return {
+        imageUrl: undefined,
+        label: referenceLook.scene || referenceLook.id,
+        missingMessage: `父级造型「${referenceLook.scene || referenceLook.id}」基于旧正脸，请先重新生成该父级造型`,
+      };
+    }
+
+    return {
+      imageUrl: referenceLook.imageUrl,
+      label: referenceLook.scene || referenceLook.id,
+      missingMessage: '',
+    };
+  };
+
+  const confirmCharacterFaceIdentity = (character: Character, faceImageUrl: string) => {
+    if (!faceImageUrl) {
+      toast.warning(`请先为 ${character.name} 生成或上传人物正脸`);
+      return;
+    }
+    updateCharacterIdentityByName(character.name, {
+      identityImageConfirmed: true,
+      confirmedFaceImageUrl: faceImageUrl,
+      identityConfirmedAt: Date.now(),
+      looks: character.looks?.map(look => ({
+        ...look,
+        identityNeedsReview: Boolean(look.imageUrl && look.identitySourceUrl !== faceImageUrl),
+        fourViewIdentityNeedsReview: Boolean(
+          look.fourViewImageUrl && (
+            look.fourViewIdentitySourceUrl !== faceImageUrl ||
+            !look.imageUrl ||
+            look.fourViewLookSourceUrl !== look.imageUrl
+          )
+        ),
+      })),
+    });
+    toast.success(`${character.name} 的正脸身份基准已确认，造型图生图已解锁`);
   };
 
   // 生成人物造型图片
   const handleGenerateCharacterLookImage = async (character: any, lookId: string) => {
+    const look = character.looks?.find((candidate: CharacterLook) => candidate.id === lookId) as CharacterLook | undefined;
+    if (!look) {
+      toast.error('造型不存在');
+      return;
+    }
+    const reference = getCharacterLookReference(character, look);
+    if (!reference.imageUrl) {
+      toast.warning(reference.missingMessage);
+      return;
+    }
     if (!(await requireLoginBeforePaidAction())) return;
 
     setIsGeneratingImage(true);
@@ -5570,21 +8271,11 @@ export default function StoryboardGenerator() {
     let statusTimer2: ReturnType<typeof setTimeout> | undefined;
     let fetchTimeout: ReturnType<typeof setTimeout> | undefined;
     try {
-      const look = character.looks?.find((l: any) => l.id === lookId);
-      if (!look) {
-        toast.error('造型不存在');
-        return;
-      }
-
-      updateLookById(lookId, { imageUrl: '', isGenerating: true, generatingStatus: '正在提交到 AI 绘图服务...' }, character);
+      updateLookById(lookId, {
+        isGenerating: true,
+        generatingStatus: `正在参考「${reference.label}」提交图生图任务...`,
+      }, character);
       toast.info(`开始生成 ${character.name} - ${look.scene || lookId} 造型图片`);
-
-      const referenceImageUrl = getCharacterFaceReferenceImage(character);
-      if (!referenceImageUrl) {
-        updateLookById(lookId, { isGenerating: false, generatingStatus: undefined }, character);
-        toast.warning(`请先生成 ${character.name} 的基础人脸近景图，再进行换装`);
-        return;
-      }
 
       // 启动进度更新定时器
       statusTimer1 = setTimeout(() => updateLookById(lookId, { generatingStatus: 'AI 正在生成图片（约30~90秒）...' }, character), 5000);
@@ -5592,7 +8283,7 @@ export default function StoryboardGenerator() {
 
       // 添加超时控制并注册到取消列表
       const controller = new AbortController();
-      fetchTimeout = setTimeout(() => controller.abort(), 120000);
+      fetchTimeout = setTimeout(() => controller.abort(), CHARACTER_IMAGE_REQUEST_TIMEOUT_MS);
       lookAbortControllers.current.set(generationKey, controller);
 
       const response = await fetch('/api/generate-asset-image', {
@@ -5602,8 +8293,9 @@ export default function StoryboardGenerator() {
           type: 'character',
           data: character,
           lookId,
-          referenceImageUrl,
+          referenceImageUrl: reference.imageUrl,
           imageVariant: 'character-look',
+          creationBible: getCreationBiblePayload(),
         }),
         signal: controller.signal,
       });
@@ -5619,7 +8311,15 @@ export default function StoryboardGenerator() {
       const result = await response.json();
 
       if (result.success) {
-        updateLookById(lookId, { imageUrl: result.localUrl || result.imageUrl, isGenerating: false, generatingStatus: undefined }, character);
+        updateLookById(lookId, {
+          imageUrl: result.localUrl || result.imageUrl,
+          imagePrompt: result.prompt,
+          isGenerating: false,
+          generatingStatus: undefined,
+          identitySourceUrl: character.confirmedFaceImageUrl,
+          identityNeedsReview: false,
+          fourViewIdentityNeedsReview: Boolean(look.fourViewImageUrl),
+        }, character);
         toast.success(`${character.name} - ${look.scene || lookId} 造型图片生成成功`);
       } else {
         updateLookById(lookId, { isGenerating: false, generatingStatus: undefined }, character);
@@ -5631,8 +8331,11 @@ export default function StoryboardGenerator() {
       if (statusTimer2) clearTimeout(statusTimer2);
       lookAbortControllers.current.delete(generationKey);
       updateLookById(lookId, { isGenerating: false, generatingStatus: undefined }, character);
+      const manuallyStopped = manuallyStoppedLookGenerations.current.delete(generationKey);
       if (error?.name === 'AbortError') {
-        toast.error('造型图片生成超时（超过2分钟），请重试');
+        if (!manuallyStopped) {
+          toast.error('造型图片等待超时（超过3分30秒）。后台任务可能仍在处理，请稍后到资产管理查看后再决定是否重试');
+        }
       } else {
         console.error('生成造型图片失败:', error);
         toast.error('造型图片生成失败');
@@ -5644,6 +8347,23 @@ export default function StoryboardGenerator() {
 
   // 生成人物指定造型的四视图
   const handleGenerateCharacterFourView = async (character: any, lookId: string) => {
+    const look = character.looks?.find((candidate: CharacterLook) => candidate.id === lookId) as CharacterLook | undefined;
+    if (!look) {
+      toast.error('造型不存在');
+      return;
+    }
+    if (!getCharacterFaceReferenceImage(character)) {
+      toast.warning(`请先选择并确认 ${character.name} 的正脸身份基准图`);
+      return;
+    }
+    if (!look.imageUrl) {
+      toast.warning(`请先生成或上传「${look.scene || look.id}」造型图，再生成对应四视图`);
+      return;
+    }
+    if (look.identityNeedsReview) {
+      toast.warning(`「${look.scene || look.id}」基于旧正脸，请先重新生成造型图`);
+      return;
+    }
     if (!(await requireLoginBeforePaidAction())) return;
 
     setIsGeneratingImage(true);
@@ -5652,20 +8372,9 @@ export default function StoryboardGenerator() {
     let fetchTimeout: ReturnType<typeof setTimeout> | undefined;
 
     try {
-      const look = character.looks?.find((l: any) => l.id === lookId);
-      if (!look) {
-        toast.error('造型不存在');
-        return;
-      }
-
-      const referenceImageUrl = look.imageUrl || getCharacterFaceReferenceImage(character);
-      if (!referenceImageUrl) {
-        toast.warning(`请先生成 ${character.name} 的基础人脸近景图，再生成四视图`);
-        return;
-      }
+      const referenceImageUrl = look.imageUrl;
 
       updateLookById(lookId, {
-        fourViewImageUrl: '',
         isGeneratingFourView: true,
         fourViewStatus: '正在提交四视图生成任务...',
       }, character);
@@ -5675,7 +8384,7 @@ export default function StoryboardGenerator() {
       statusTimer2 = setTimeout(() => updateLookById(lookId, { fourViewStatus: '四视图生成中，请耐心等待...' }, character), 30000);
 
       const controller = new AbortController();
-      fetchTimeout = setTimeout(() => controller.abort(), 120000);
+      fetchTimeout = setTimeout(() => controller.abort(), CHARACTER_IMAGE_REQUEST_TIMEOUT_MS);
 
       const response = await fetch('/api/generate-asset-image', {
         method: 'POST',
@@ -5687,6 +8396,7 @@ export default function StoryboardGenerator() {
           referenceImageUrl,
           imageVariant: 'character-four-view',
           assetImageName: `${character.name}的四视图`,
+          creationBible: getCreationBiblePayload(),
         }),
         signal: controller.signal,
       });
@@ -5703,8 +8413,12 @@ export default function StoryboardGenerator() {
       if (result.success) {
         updateLookById(lookId, {
           fourViewImageUrl: result.localUrl || result.imageUrl,
+          fourViewPrompt: result.prompt,
           isGeneratingFourView: false,
           fourViewStatus: undefined,
+          fourViewIdentitySourceUrl: character.confirmedFaceImageUrl,
+          fourViewLookSourceUrl: referenceImageUrl,
+          fourViewIdentityNeedsReview: false,
         }, character);
         toast.success(`${character.name}的四视图生成成功`);
       } else {
@@ -5717,7 +8431,7 @@ export default function StoryboardGenerator() {
       if (statusTimer2) clearTimeout(statusTimer2);
       updateLookById(lookId, { isGeneratingFourView: false, fourViewStatus: undefined }, character);
       if (error?.name === 'AbortError') {
-        toast.error('四视图生成超时（超过2分钟），请重试');
+        toast.error('四视图等待超时（超过3分30秒）。后台任务可能仍在处理，请稍后到资产管理查看后再决定是否重试');
       } else {
         console.error('生成四视图失败:', error);
         toast.error('四视图生成失败');
@@ -5728,38 +8442,39 @@ export default function StoryboardGenerator() {
   };
 
   // 删除人物造型图片
-  const handleDeleteCharacterLookImage = (characterId: number, lookId: string) => {
-    setCharactersData((prev: any) => {
-      if (!prev || !prev.characters) return prev;
-      return {
-        ...prev,
-        characters: prev.characters.map((char: any) => {
-          if (char.id === characterId) {
-            return {
-              ...char,
-              looks: char.looks?.map((l: any) =>
-                l.id === lookId
-                  ? { ...l, imageUrl: undefined }
-                  : l
-              ),
-            };
-          }
-          return char;
-        }),
-      };
-    });
+  const handleDeleteCharacterLookImage = (character: Character, lookId: string) => {
+    const look = character.looks?.find(candidate => candidate.id === lookId);
+    updateLookById(lookId, {
+      imageUrl: undefined,
+      identitySourceUrl: undefined,
+      identityNeedsReview: false,
+      fourViewIdentityNeedsReview: Boolean(look?.fourViewImageUrl),
+    }, character);
     toast.success('造型图片已删除');
   };
 
   // 上传人物造型图片
   const handleUploadCharacterLookImage = (character: any, lookId: string, file: File) => {
+    if (!getCharacterFaceReferenceImage(character)) {
+      toast.warning(`请先选择并确认 ${character.name} 的正脸身份基准图，再上传造型图片`);
+      return;
+    }
     setIsGeneratingImage(true);
     const reader = new FileReader();
     reader.onload = async (e) => {
       try {
         const imageUrl = e.target?.result as string;
-        
-        updateLookById(lookId, { imageUrl, isCustom: true, isGenerating: false }, character);
+
+        updateLookById(lookId, {
+          imageUrl,
+          isCustom: true,
+          isGenerating: false,
+          identitySourceUrl: character.confirmedFaceImageUrl,
+          identityNeedsReview: false,
+          fourViewIdentityNeedsReview: Boolean(
+            character.looks?.find((look: CharacterLook) => look.id === lookId)?.fourViewImageUrl
+          ),
+        }, character);
         toast.success(`${character.name} 造型图片上传成功`);
       } catch (error) {
         console.error('上传造型图片失败:', error);
@@ -5778,11 +8493,19 @@ export default function StoryboardGenerator() {
       toast.error('请先生成或上传造型图片');
       return;
     }
+    if (!getCharacterFaceReferenceImage(character)) {
+      toast.warning(`请先选择并确认 ${character.name} 的正脸身份基准图`);
+      return;
+    }
+    if (look.identityNeedsReview) {
+      toast.warning('该造型基于旧正脸，请从父级造型重新生成，不能继续沿用旧图');
+      return;
+    }
     if (!(await requireLoginBeforePaidAction())) return;
 
     setIsGeneratingImage(true);
     try {
-      updateLookById(lookId, { imageUrl: '', isGenerating: true }, character);
+      updateLookById(lookId, { isGenerating: true, generatingStatus: '正在参考当前造型重新生成...' }, character);
 
       const response = await fetch('/api/generate-asset-image', {
         method: 'POST',
@@ -5792,20 +8515,30 @@ export default function StoryboardGenerator() {
           data: character,
           lookId,
           referenceImageUrl: look.imageUrl,
+          imageVariant: 'character-look',
+          creationBible: getCreationBiblePayload(),
         }),
       });
 
       const result = await response.json();
 
       if (result.success) {
-        updateLookById(lookId, { imageUrl: result.localUrl || result.imageUrl, isGenerating: false }, character);
+        updateLookById(lookId, {
+          imageUrl: result.localUrl || result.imageUrl,
+          imagePrompt: result.prompt,
+          isGenerating: false,
+          generatingStatus: undefined,
+          identitySourceUrl: character.confirmedFaceImageUrl,
+          identityNeedsReview: false,
+          fourViewIdentityNeedsReview: Boolean(look.fourViewImageUrl),
+        }, character);
         toast.success(`${character.name} 造型图片重新生成成功`);
       } else {
-        updateLookById(lookId, { isGenerating: false }, character);
+        updateLookById(lookId, { isGenerating: false, generatingStatus: undefined }, character);
         toast.error(result.error || '造型图片重新生成失败');
       }
     } catch (error: any) {
-      updateLookById(lookId, { isGenerating: false }, character);
+      updateLookById(lookId, { isGenerating: false, generatingStatus: undefined }, character);
       if (error?.name !== 'AbortError') {
         console.error('重新生成造型图片失败:', error);
       }
@@ -5822,18 +8555,17 @@ export default function StoryboardGenerator() {
     referenceImageUrl: string,
     customPrompt?: string
   ) => {
-    if (!(await requireLoginBeforePaidAction())) return;
-
     // 使用素材的名称作为 key，确保唯一性（名称是唯一的，id 可能在分批时重复）
     const assetId = `${type}-${data.name}`;
     const currentAsset = assetImages.get(assetId);
     const currentCount = currentAsset?.images.length || 0;
 
-    // 检查数量限制
+    // 检查数量限制，拦截后不调用付费接口。
     if (currentCount >= MAX_IMAGES_PER_ASSET) {
-      toast.error(`每个素材最多支持 ${MAX_IMAGES_PER_ASSET} 张图片`);
+      setAssetImageLimitNotice({ type, name: data.name });
       return;
     }
+    if (!(await requireLoginBeforePaidAction())) return;
 
     const tempImageId = `temp-img2img-${Date.now()}`;
 
@@ -5876,6 +8608,7 @@ export default function StoryboardGenerator() {
           data,
           referenceImageUrl,
           customPrompt,
+          creationBible: getCreationBiblePayload(),
         }),
       });
 
@@ -5894,6 +8627,8 @@ export default function StoryboardGenerator() {
                       imageId: `img2img-${Date.now()}`,
                       imageUrl: result.localUrl || result.imageUrl,
                       imageKey: result.imageKey,
+                      prompt: result.prompt,
+                      promptSource: result.prompt ? 'actual' : 'rebuilt',
                       isGenerating: false,
                       isCustom: false,
                       isImg2Img: true,
@@ -6002,18 +8737,18 @@ export default function StoryboardGenerator() {
   const removeSelectedImage = async (assetId: string, imageId: string) => {
     console.log('[removeSelectedImage] 参数 assetId:', assetId, 'imageId:', imageId);
     console.log('[removeSelectedImage] assetImages 所有 keys:', Array.from(assetImages.keys()));
-    
+
     const asset = assetImages.get(assetId);
     console.log('[removeSelectedImage] 找到的素材:', asset?.name, '图片数量:', asset?.images.length);
-    
+
     if (!asset) {
       toast.error('素材不存在');
       return;
     }
-    
+
     const image = asset.images.find(img => img.imageId === imageId);
     console.log('[removeSelectedImage] 找到的图片:', image?.imageId, image?.imageUrl?.substring(0, 50));
-    
+
     if (!image) {
       toast.error('图片不存在');
       return;
@@ -6033,14 +8768,40 @@ export default function StoryboardGenerator() {
       }
       return newMap;
     });
-    
+
+    if (asset.type === 'character' && image.imageUrl) {
+      const clearRemovedIdentity = (characters: Character[]) => characters.map(character => (
+        character.name === asset.name && character.confirmedFaceImageUrl === image.imageUrl
+          ? {
+              ...character,
+              identityImageConfirmed: false,
+              confirmedFaceImageUrl: undefined,
+              identityConfirmedAt: undefined,
+              looks: character.looks?.map(look => (
+                look.imageUrl || look.fourViewImageUrl
+                  ? {
+                      ...look,
+                      identityNeedsReview: Boolean(look.imageUrl),
+                      fourViewIdentityNeedsReview: Boolean(look.fourViewImageUrl),
+                    }
+                  : look
+              )),
+            }
+          : character
+      ));
+      setCharactersData((prev: any) => prev?.characters
+        ? { ...prev, characters: clearRemovedIdentity(prev.characters) }
+        : prev);
+      setCharacterBatchInfo((prev: any) => prev?.allCharacters
+        ? { ...prev, allCharacters: clearRemovedIdentity(prev.allCharacters) }
+        : prev);
+    }
+
     toast.success('已取消选中该图片');
   };
 
   // 上传自定义图片
   const uploadCustomImage = async (type: 'scene' | 'character' | 'prop', data: any, file: File) => {
-    if (!(await requireLoginBeforePaidAction())) return;
-
     // 使用素材的名称作为 key，确保唯一性（名称是唯一的，id 可能在分批时重复）
     const assetId = `${type}-${data.name}`;
     const currentAsset = assetImages.get(assetId);
@@ -6048,9 +8809,10 @@ export default function StoryboardGenerator() {
 
     // 检查数量限制
     if (currentCount >= MAX_IMAGES_PER_ASSET) {
-      toast.error(`每个素材最多支持 ${MAX_IMAGES_PER_ASSET} 张图片`);
+      setAssetImageLimitNotice({ type, name: data.name });
       return;
     }
+    if (!(await requireLoginBeforePaidAction())) return;
 
     // 检查文件大小（支持 4K 高清图，最大 50MB）
     const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50MB
@@ -6165,6 +8927,731 @@ export default function StoryboardGenerator() {
     }
   };
 
+  const executionScriptReady = hasCurrentExecutionScript();
+  const uploadedStoryReady = !!((uploadedFile || (uploadedFileName && fileContent)) && fileContent);
+  const creationBibleReady = hasConfirmedCreationBible();
+  const canShowExtractionResults = !uploadedStoryReady || (executionScriptReady && creationBibleReady);
+  const hasLegacyExtractionResultsPendingExecutionScript =
+    uploadedStoryReady && (!executionScriptReady || !creationBibleReady) && hasExtractionStatusToShow;
+
+  const resetExtractionOutputsForFreshRun = () => {
+    setScenesData(null);
+    setCharactersData(null);
+    setCharacterVoiceData(null);
+    setPropsData(null);
+    setOutline(null);
+    setOutlineBatchInfo(null);
+    setSceneBatchInfo(null);
+    setCharacterBatchInfo(null);
+    setPropBatchInfo(null);
+    setExtractionReview(INITIAL_EXTRACTION_REVIEW);
+    extractionReviewRequestedRef.current = false;
+    setSelectedChapter(null);
+    setStoryboard(null);
+    setImageStoryboards([]);
+    setConnectingPrompts(null);
+    setVideoResults([]);
+    setVideoTotalDuration(0);
+    setAssetImages(() => new Map());
+    setBatchAssetGenerationHistory({ ...INITIAL_BATCH_ASSET_GENERATION_HISTORY });
+    setChapterStoryboards({});
+    setStepConfirmed(prev => ({
+      ...prev,
+      extraction: false,
+      storyboard: false,
+      assets: false,
+      prompts: false,
+      videos: false,
+    }));
+    setExtractionStatus({
+      scenes: 'pending',
+      characters: 'pending',
+      voices: 'pending',
+      props: 'pending',
+      outline: 'pending',
+    });
+  };
+
+  const getSceneMainSceneName = (scene: Scene) => getSceneMainLocation(scene) || scene.name;
+
+  const getSceneEpisodeNumbers = (scene: Scene): number[] => {
+    const fromEpisodes = Array.isArray(scene.episodeNumbers)
+      ? scene.episodeNumbers.filter((item): item is number => typeof item === 'number' && Number.isFinite(item))
+      : [];
+    const fromOccurrences = Array.isArray(scene.occurrences)
+      ? scene.occurrences
+        .map(item => item.episodeNumber)
+        .filter((item): item is number => typeof item === 'number' && Number.isFinite(item))
+      : [];
+    return Array.from(new Set([...fromEpisodes, ...fromOccurrences])).sort((a, b) => a - b);
+  };
+
+  const formatSceneEpisodeText = (scene: Scene) => {
+    const episodeNumbers = getSceneEpisodeNumbers(scene);
+    if (episodeNumbers.length > 0) {
+      return episodeNumbers.length <= 4
+        ? episodeNumbers.map(item => `第${item}集`).join('、')
+        : `${episodeNumbers.slice(0, 4).map(item => `第${item}集`).join('、')} 等${episodeNumbers.length}集`;
+    }
+    const labels = Array.isArray(scene.occurrences)
+      ? scene.occurrences
+        .map(item => item.episodeLabel)
+        .filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+      : [];
+    return Array.from(new Set(labels)).join('、') || '未关联集数';
+  };
+
+  const getPropMainPropName = (prop: Prop) => (
+    prop.mainPropName ||
+    String(prop.name || '')
+      .replace(/[【\[]\s*(?:完整|基准|原始|破碎|碎裂|损坏|破损|裂开|断裂|旧化|陈旧|老旧|沾血|染血|血迹|烧毁|焦黑|修复|修好|打开|关闭|空的|空置|空瓶|空盒|空状态|装满|改造前|改造后|十年前|10年前|十年后|10年后|遗失|失效)\s*[】\]]/g, '')
+      .replace(/（\s*(?:完整|基准|原始|破碎|碎裂|损坏|破损|裂开|断裂|旧化|陈旧|老旧|沾血|染血|血迹|烧毁|焦黑|修复|修好|打开|关闭|空的|空置|空瓶|空盒|空状态|装满|改造前|改造后|十年前|10年前|十年后|10年后|遗失|失效)(?:状态)?\s*）/g, '')
+      .replace(/\(\s*(?:完整|基准|原始|破碎|碎裂|损坏|破损|裂开|断裂|旧化|陈旧|老旧|沾血|染血|血迹|烧毁|焦黑|修复|修好|打开|关闭|空的|空置|空瓶|空盒|空状态|装满|改造前|改造后|十年前|10年前|十年后|10年后|遗失|失效)(?:状态)?\s*\)/g, '')
+      .replace(/^(?:完整|基准|原始|破碎|碎裂|损坏|破损|裂开|断裂|旧化|陈旧|老旧|沾血|染血|血迹|烧毁|焦黑|修复|修好|打开|关闭|空的|空置|空瓶|空盒|空状态|装满|改造前|改造后|十年前|10年前|十年后|10年后|遗失|失效)的?/g, '')
+      .replace(/(?:完整|基准|原始|破碎|碎裂|损坏|破损|裂开|断裂|旧化|陈旧|老旧|沾血|染血|血迹|烧毁|焦黑|修复|修好|打开|关闭|空的|空置|空瓶|空盒|空状态|装满|改造前|改造后|十年前|10年前|十年后|10年后|遗失|失效)(?:状态|版|后|前)?$/g, '')
+      .replace(/\s+/g, '')
+      .trim() ||
+    prop.name
+  );
+
+  const getPropEpisodeNumbers = (prop: Prop): number[] => {
+    const fromEpisodes = Array.isArray(prop.episodeNumbers)
+      ? prop.episodeNumbers.filter((item): item is number => typeof item === 'number' && Number.isFinite(item))
+      : [];
+    const fromOccurrences = Array.isArray(prop.occurrences)
+      ? prop.occurrences
+        .map(item => item.episodeNumber)
+        .filter((item): item is number => typeof item === 'number' && Number.isFinite(item))
+      : [];
+    const fromStates = !prop.isStateUnit && Array.isArray(prop.stateVariants)
+      ? prop.stateVariants.flatMap(state => (
+          Array.isArray(state.episodeNumbers)
+            ? state.episodeNumbers.filter((item): item is number => typeof item === 'number' && Number.isFinite(item))
+            : []
+        ))
+      : [];
+    return Array.from(new Set([...fromEpisodes, ...fromOccurrences, ...fromStates])).sort((a, b) => a - b);
+  };
+
+  const formatPropEpisodeText = (prop: Prop) => {
+    const episodeNumbers = getPropEpisodeNumbers(prop);
+    if (episodeNumbers.length > 0) {
+      return episodeNumbers.length <= 4
+        ? episodeNumbers.map(item => `第${item}集`).join('、')
+        : `${episodeNumbers.slice(0, 4).map(item => `第${item}集`).join('、')} 等${episodeNumbers.length}集`;
+    }
+    const labels = [
+      ...(Array.isArray(prop.occurrences)
+        ? prop.occurrences
+          .map(item => item.episodeLabel)
+          .filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+        : []),
+      ...(!prop.isStateUnit && Array.isArray(prop.stateVariants)
+        ? prop.stateVariants.flatMap(state => (
+            Array.isArray(state.occurrences)
+              ? state.occurrences
+                .map(item => item.episodeLabel)
+                .filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+              : []
+          ))
+        : []),
+    ];
+    return Array.from(new Set(labels)).join('、') || '未关联集数';
+  };
+
+  const getPropStateCount = (prop: Prop) => (
+    prop.isStateUnit ? 1 : (Array.isArray(prop.stateVariants) && prop.stateVariants.length > 0 ? prop.stateVariants.length : 1)
+  );
+
+  type AssetListExportType = 'scene' | 'character' | 'prop';
+  type AssetListExportImage = {
+    url?: string;
+    label?: string;
+    fileName?: string;
+  };
+  type AssetListExportRow = {
+    group: string;
+    assetName: string;
+    assetLookId?: string;
+    cells: Record<string, string | number>;
+    images: AssetListExportImage[];
+  };
+
+  const joinExportValues = (values: unknown, separator = '、') => {
+    const flattenValues = (value: unknown): unknown[] => (
+      Array.isArray(value) ? value.flatMap(item => flattenValues(item)) : [value]
+    );
+    return Array.from(new Set(
+      flattenValues(values)
+        .map(value => normalizeDisplayText(value))
+        .filter(Boolean)
+    )).join(separator);
+  };
+
+  const formatExportEpisodeNumbers = (numbers: number[]) => (
+    numbers.length > 0 ? numbers.map(number => `第${number}集`).join('、') : '未关联集数'
+  );
+
+  const getExportImageFileName = (imageUrl: string, fallback: string) => {
+    try {
+      const url = new URL(imageUrl, window.location.origin);
+      const localFileName = url.searchParams.get('filename');
+      if (localFileName) return localFileName;
+      const pathName = decodeURIComponent(url.pathname.split('/').pop() || '');
+      if (pathName) return pathName;
+    } catch {
+      // data URL 或旧格式地址没有可读文件名时使用下方默认名称。
+    }
+    return fallback;
+  };
+
+  const makeExportImage = (
+    imageUrl: string | undefined,
+    label: string,
+    fallbackName: string
+  ): AssetListExportImage => ({
+    url: imageUrl || undefined,
+    label,
+    fileName: imageUrl ? getExportImageFileName(imageUrl, fallbackName) : fallbackName,
+  });
+
+  const getCreationBibleExportText = () => (
+    `创作类型：${creationBible.creationType || '未选择'}；创作题材：${creationBible.subjectRegion || '未选择'}；创作背景：${creationBible.creationBackground || '未选择'}`
+  );
+
+  const getPromptExportText = (
+    promptItems: Array<{ label: string; prompt?: string }>,
+    rebuiltPrompt: string
+  ) => {
+    const actualPrompts = promptItems
+      .map(item => ({ label: item.label, prompt: normalizeDisplayText(item.prompt) }))
+      .filter(item => item.prompt.length > 0);
+    const uniquePrompts = actualPrompts.filter((item, index, list) => (
+      list.findIndex(candidate => candidate.prompt === item.prompt) === index
+    ));
+    if (uniquePrompts.length === 1) {
+      return `${uniquePrompts[0].prompt}\n\n【提示词来源】图片生成接口实际提示词`;
+    }
+    if (uniquePrompts.length > 1) {
+      return `${uniquePrompts.map(item => `【${item.label}】${item.prompt}`).join('\n\n')}\n\n【提示词来源】图片生成接口实际提示词`;
+    }
+    return `${rebuiltPrompt}\n\n【提示词来源】历史图片未保存实际提示词，已根据当前创作圣经和本行资料重建`;
+  };
+
+  const buildSceneExportPrompt = (scene: Scene) => joinExportValues([
+    getCreationBibleExportText(),
+    `场景名称：${scene.name}`,
+    scene.physicalLocation ? `物理地点：${scene.physicalLocation}` : '',
+    scene.stateLabel ? `场景状态：${scene.stateLabel}` : '',
+    scene.stateReason ? `状态成立原因：${getSceneStateReasonLabel(scene.stateReason)}` : '',
+    scene.stateChangeEvidence ? `剧本依据：${scene.stateChangeEvidence}` : '',
+    scene.stateVisualDifference ? `本状态唯一变化：${scene.stateVisualDifference}` : '',
+    scene.description,
+    scene.type ? `场景类型：${scene.type}` : '',
+    scene.timeOfDay ? `时间：${scene.timeOfDay}` : '',
+    scene.atmosphere ? `氛围：${scene.atmosphere}` : '',
+    scene.visualElements?.length ? `视觉元素：${scene.visualElements.join('、')}` : '',
+    scene.referenceSceneName ? `严格参考基准状态「${scene.referenceSceneName}」，保留同一地点的空间结构和视觉身份，只改变剧本明确要求的日夜、年代或重大持久变化` : '',
+    '纯场景环境，无人物、无人影、无字幕、无文字、水印',
+  ], '；');
+
+  const buildCharacterExportPrompt = (character: Character, look?: CharacterLook) => {
+    const faceFeatures = character.faceFeatures
+      ? joinExportValues([
+        character.faceFeatures.faceShape && `脸型：${character.faceFeatures.faceShape}`,
+        character.faceFeatures.eyes && `眼睛：${character.faceFeatures.eyes}`,
+        character.faceFeatures.nose && `鼻子：${character.faceFeatures.nose}`,
+        character.faceFeatures.mouth && `嘴巴：${character.faceFeatures.mouth}`,
+        character.faceFeatures.skinTone && `肤色：${character.faceFeatures.skinTone}`,
+      ], '，')
+      : '';
+    return joinExportValues([
+      getCreationBibleExportText(),
+      `人物：${character.name}`,
+      character.role ? `角色：${character.role}` : '',
+      character.age ? `年龄：${character.age}` : '',
+      character.gender ? `性别：${character.gender}` : '',
+      character.appearance ? `正脸外貌：${stripBodyDetailsFromAppearance(character.appearance)}` : '',
+      faceFeatures ? `固定面部特征：${faceFeatures}` : '',
+      look ? `造型名称：${look.scene || look.stage || look.id}` : '正脸身份基准图',
+      look?.description,
+      look?.changeType ? `变化类型：${look.changeType}` : '',
+      look?.ageStage ? `人物时期：${look.ageStage}` : '',
+      look?.physicalState ? `身体状态：${look.physicalState}` : '',
+      look?.transformationState ? `特殊形态：${look.transformationState}` : '',
+      look?.costume ? `服装：${look.costume}` : '',
+      look?.hairstyle ? `发型：${look.hairstyle}` : '',
+      look?.accessories?.length ? `配饰：${look.accessories.join('、')}` : '',
+      look ? `全身体态档案：${formatCharacterBodyProfile(mergeCharacterBodyProfiles(look.bodyProfile, character.bodyProfile)) || '按人物档案保持一致'}` : '',
+      look ? '全身完整造型图，严格保持已确认正脸身份一致' : '正面人脸近景，纯白背景，不读取身高体重和全身体型信息',
+      '无字幕、无文字、无水印',
+    ], '；');
+  };
+
+  const buildPropExportPrompt = (prop: Prop) => joinExportValues([
+    getCreationBibleExportText(),
+    `道具名称：${prop.name}`,
+    prop.mainPropName ? `同一道具身份：${prop.mainPropName}` : '',
+    prop.stateLabel ? `本次唯一状态：${prop.stateLabel}` : '',
+    prop.description,
+    prop.visualDescription && prop.visualDescription !== prop.description ? `当前状态视觉：${prop.visualDescription}` : '',
+    prop.stateVisualChange ? `相对前一状态的变化：${prop.stateVisualChange}` : '',
+    prop.stateTransitionEvent ? `状态形成原因：${prop.stateTransitionEvent}` : '',
+    prop.stateNarrativeFunction ? `剧情识别重点：${prop.stateNarrativeFunction}` : '',
+    prop.referencePropName ? `严格参考前一状态「${prop.referencePropName}」，保留同一件道具的结构、材质、颜色和识别特征` : '建立该道具的首张身份基准图',
+    '单个道具、单一稳定状态、纯白背景，禁止完整与损坏状态同图对比，无人物、无字幕、无文字、水印',
+  ], '；');
+
+  const getCompletedImages = (asset?: AssetImages) => (
+    (asset?.images || []).filter(image => Boolean(image.imageUrl) && !image.isGenerating)
+  );
+
+  const buildSceneExportRows = (): AssetListExportRow[] => {
+    const scenes = getBatchAssetList('scene') as Scene[];
+    const totals = new Map<string, number>();
+    scenes.forEach(scene => {
+      const mainName = getSceneMainSceneName(scene);
+      totals.set(mainName, (totals.get(mainName) || 0) + 1);
+    });
+    const counters = new Map<string, number>();
+
+    return scenes.map((scene, index) => {
+      const mainName = getSceneMainSceneName(scene);
+      const stateSequence = (counters.get(mainName) || 0) + 1;
+      counters.set(mainName, stateSequence);
+      const asset = getAssetImages('scene', scene.id, scene.name);
+      const images = getCompletedImages(asset).slice(0, MAX_IMAGES_PER_ASSET);
+      const occurrenceText = joinExportValues((scene.occurrences || []).map(item => (
+        joinExportValues([
+          item.episodeNumber ? `第${item.episodeNumber}集` : item.episodeLabel,
+          item.heading,
+          item.stateLabel,
+        ], ' · ')
+      )), '\n');
+      const rebuiltPrompt = buildSceneExportPrompt(scene);
+      const prompt = getPromptExportText(
+        images.map((image, imageIndex) => ({ label: imageIndex === 0 ? '主图' : `图片${imageIndex + 1}`, prompt: image.prompt })),
+        rebuiltPrompt
+      );
+
+      return {
+        group: mainName,
+        assetName: scene.name,
+        cells: {
+          sequence: index + 1,
+          mainName,
+          stateName: scene.stateLabel || scene.name,
+          stateSequence: `${stateSequence} / ${totals.get(mainName) || 1}`,
+          episodes: formatExportEpisodeNumbers(getSceneEpisodeNumbers(scene)),
+          occurrences: occurrenceText || '未记录具体场次',
+          timePeriod: joinExportValues([scene.timeOfDay, scene.stateLabel]),
+          description: scene.description || '',
+          events: joinExportValues(scene.keyEvents || [], '\n'),
+          visualElements: joinExportValues(scene.visualElements || [], '、'),
+          prompt,
+          generationMode: scene.imageMode === 'image-to-image' || scene.referenceSceneName ? '图生图' : '文生图',
+          reference: scene.referenceSceneName || '无（基准状态）',
+        },
+        images: [0, 1, 2].map(imageIndex => makeExportImage(
+          images[imageIndex]?.imageUrl,
+          imageIndex === 0 ? '主图' : `图片 ${imageIndex + 1}`,
+          `${scene.name}_${imageIndex + 1}.png`
+        )),
+      };
+    });
+  };
+
+  const buildCharacterExportRows = (): AssetListExportRow[] => {
+    const characters = getBatchAssetList('character') as Character[];
+    const rows: AssetListExportRow[] = [];
+
+    characters.forEach(character => {
+      const asset = getAssetImages('character', character.id, character.name);
+      const completedFaceImages = getCompletedImages(asset);
+      const confirmedFaceUrl = getCharacterFaceReferenceImage(character);
+      const faceImages = [...completedFaceImages].sort((left, right) => (
+        left.imageUrl === confirmedFaceUrl ? -1 : right.imageUrl === confirmedFaceUrl ? 1 : 0
+      )).slice(0, MAX_IMAGES_PER_ASSET);
+      const faceFeatures = joinExportValues([
+        character.appearance,
+        character.faceFeatures?.faceShape && `脸型：${character.faceFeatures.faceShape}`,
+        character.faceFeatures?.eyes && `眼睛：${character.faceFeatures.eyes}`,
+        character.faceFeatures?.nose && `鼻子：${character.faceFeatures.nose}`,
+        character.faceFeatures?.mouth && `嘴巴：${character.faceFeatures.mouth}`,
+        character.faceFeatures?.skinTone && `肤色：${character.faceFeatures.skinTone}`,
+      ], '\n');
+      const relationships = joinExportValues((character.keyRelationships || []).map(item => (
+        `${item.target}：${item.relationship}`
+      )), '\n');
+      const backgroundRelationships = joinExportValues([character.background, relationships], '\n');
+      const basePrompt = getPromptExportText(
+        faceImages.map((image, imageIndex) => ({ label: imageIndex === 0 ? '主图' : `图片${imageIndex + 1}`, prompt: image.prompt })),
+        buildCharacterExportPrompt(character)
+      );
+
+      rows.push({
+        group: character.name,
+        assetName: character.name,
+        cells: {
+          sequence: rows.length + 1,
+          mainName: character.name,
+          role: character.role || '',
+          ageGender: joinExportValues([character.age, character.gender], ' / '),
+          lookName: '正脸身份基准',
+          changeType: '身份基准',
+          episodes: formatExportEpisodeNumbers(Array.from(new Set(
+            (character.looks || []).flatMap(look => look.episodeNumbers || [])
+          )).sort((a, b) => a - b)),
+          scenes: joinExportValues(character.keyScenes || [], '\n'),
+          events: '用于锁定人物脸型、五官、肤色与年龄感，其他造型必须在确认此图后生成',
+          personality: joinExportValues(character.personality || [], '、'),
+          appearance: faceFeatures,
+          bodyProfile: '正脸基准图不使用身高、体重和全身体型信息',
+          costume: '不作为服装造型依据',
+          background: backgroundRelationships,
+          arc: character.arc || '',
+          prompt: basePrompt,
+          reference: confirmedFaceUrl ? '用户已确认正脸主图' : '待用户确认正脸主图',
+        },
+        images: [
+          ...[0, 1, 2].map(imageIndex => makeExportImage(
+            faceImages[imageIndex]?.imageUrl,
+            imageIndex === 0 ? '主图' : `图片 ${imageIndex + 1}`,
+            `${character.name}_正脸_${imageIndex + 1}.png`
+          )),
+          makeExportImage(undefined, '四视图', `${character.name}_四视图.png`),
+        ],
+      });
+
+      (character.looks || []).forEach(look => {
+        const storedLookImages = asset?.lookImages?.[look.id] || [];
+        const lookImages = [
+          ...(look.imageUrl ? [{ imageId: `look-${look.id}`, imageUrl: look.imageUrl, prompt: look.imagePrompt }] : []),
+          ...storedLookImages,
+        ].filter((image, imageIndex, list) => (
+          image.imageUrl && list.findIndex(candidate => candidate.imageUrl === image.imageUrl) === imageIndex
+        )).slice(0, MAX_IMAGES_PER_ASSET);
+        const prompt = getPromptExportText([
+          ...lookImages.map((image, imageIndex) => ({ label: imageIndex === 0 ? '主图' : `图片${imageIndex + 1}`, prompt: image.prompt })),
+          { label: '四视图', prompt: look.fourViewPrompt },
+        ], buildCharacterExportPrompt(character, look));
+        const referenceLook = look.referenceLookId
+          ? character.looks?.find(candidate => candidate.id === look.referenceLookId)
+          : undefined;
+        const lookBodyProfile = mergeCharacterBodyProfiles(look.bodyProfile, character.bodyProfile);
+
+        rows.push({
+          group: character.name,
+          assetName: character.name,
+          assetLookId: look.id,
+          cells: {
+            sequence: rows.length + 1,
+            mainName: character.name,
+            role: character.role || '',
+            ageGender: joinExportValues([look.ageStage || character.age, character.gender], ' / '),
+            lookName: look.scene || look.stage || look.id,
+            changeType: look.changeType || (look.isBaseLook ? '基础造型' : '场景换装'),
+            episodes: formatExportEpisodeNumbers((look.episodeNumbers || []).filter(number => Number.isFinite(number)).sort((a, b) => a - b)),
+            scenes: joinExportValues([look.sceneNames || [], look.scene], '\n'),
+            events: joinExportValues([look.sourceEvidence, look.continuityNote, look.stage], '\n'),
+            personality: joinExportValues(character.personality || [], '、'),
+            appearance: faceFeatures,
+            bodyProfile: formatCharacterBodyProfile(lookBodyProfile) || '沿用人物全身体态档案',
+            costume: joinExportValues([
+              look.costume,
+              look.hairstyle && `发型：${look.hairstyle}`,
+              look.accessories?.length ? `配饰：${look.accessories.join('、')}` : '',
+              look.makeup && `妆容：${look.makeup}`,
+              look.bodyChanges && `身体变化：${look.bodyChanges}`,
+            ], '\n'),
+            background: backgroundRelationships,
+            arc: character.arc || '',
+            prompt,
+            reference: look.isBaseLook
+              ? '已确认正脸身份基准图'
+              : referenceLook?.scene || look.referenceReason || '已确认正脸身份基准图',
+          },
+          images: [
+            ...[0, 1, 2].map(imageIndex => makeExportImage(
+              lookImages[imageIndex]?.imageUrl,
+              imageIndex === 0 ? '主图' : `图片 ${imageIndex + 1}`,
+              `${character.name}_${look.scene || look.id}_${imageIndex + 1}.png`
+            )),
+            makeExportImage(
+              look.fourViewImageUrl,
+              '四视图',
+              `${character.name}_${look.scene || look.id}_四视图.png`
+            ),
+          ],
+        });
+      });
+    });
+
+    return rows;
+  };
+
+  const buildPropExportRows = (): AssetListExportRow[] => {
+    const props = getBatchAssetList('prop') as Prop[];
+    const totals = new Map<string, number>();
+    props.forEach(prop => {
+      const mainName = getPropMainPropName(prop);
+      totals.set(mainName, (totals.get(mainName) || 0) + 1);
+    });
+    const counters = new Map<string, number>();
+
+    return props.map((prop, index) => {
+      const mainName = getPropMainPropName(prop);
+      const sequence = prop.stateSequence || (counters.get(mainName) || 0) + 1;
+      counters.set(mainName, Math.max(counters.get(mainName) || 0, sequence));
+      const asset = getAssetImages('prop', prop.id, prop.name);
+      const images = getCompletedImages(asset).slice(0, MAX_IMAGES_PER_ASSET);
+      const occurrenceText = joinExportValues((prop.occurrences || []).map(item => (
+        joinExportValues([
+          item.episodeNumber ? `第${item.episodeNumber}集` : item.episodeLabel,
+          item.sceneName || item.heading,
+          item.stateLabel,
+        ], ' · ')
+      )), '\n');
+      const prompt = getPromptExportText(
+        images.map((image, imageIndex) => ({ label: imageIndex === 0 ? '主图' : `图片${imageIndex + 1}`, prompt: image.prompt })),
+        buildPropExportPrompt(prop)
+      );
+
+      return {
+        group: mainName,
+        assetName: prop.name,
+        cells: {
+          sequence: index + 1,
+          mainName,
+          stateName: prop.stateLabel || prop.name,
+          stateSequence: `${sequence} / ${prop.totalStates || totals.get(mainName) || 1}`,
+          typeImportance: joinExportValues([prop.type, prop.importance], ' / '),
+          owner: prop.owner || '',
+          episodes: formatExportEpisodeNumbers(getPropEpisodeNumbers(prop)),
+          occurrences: occurrenceText || joinExportValues(prop.appearanceScenes || [], '\n') || '未记录具体场次',
+          transition: prop.stateTransitionEvent || '',
+          visualChange: prop.stateVisualChange || prop.visualDescription || '',
+          narrativeFunction: prop.stateNarrativeFunction || prop.function || '',
+          evidence: prop.stateEvidence || '',
+          description: joinExportValues([prop.description, prop.notes], '\n'),
+          prompt,
+          generationMode: prop.imageMode === 'image-to-image' || prop.referencePropName ? '图生图' : '文生图',
+          reference: prop.referencePropName || '无（基准状态）',
+        },
+        images: [0, 1, 2].map(imageIndex => makeExportImage(
+          images[imageIndex]?.imageUrl,
+          imageIndex === 0 ? '主图' : `图片 ${imageIndex + 1}`,
+          `${prop.name}_${imageIndex + 1}.png`
+        )),
+      };
+    });
+  };
+
+  const exportAssetListPackage = async (type: AssetListExportType) => {
+    console.info('[完整素材 ZIP] 开始整理列表:', type);
+    if (exportingAssetListType) return;
+    const typeLabel = type === 'scene' ? '场景' : type === 'character' ? '人物' : '道具';
+    const loadingToast = toast.loading(`正在整理${typeLabel}完整素材包和原图，请稍候...`);
+    setExportingAssetListType(type);
+    try {
+      const rows = type === 'scene'
+        ? buildSceneExportRows()
+        : type === 'character'
+          ? buildCharacterExportRows()
+          : buildPropExportRows();
+      if (rows.length === 0) {
+        toast.warning('当前列表没有可导出的内容', { id: loadingToast });
+        return;
+      }
+      console.info('[完整素材 ZIP] 列表整理完成:', type, rows.length);
+      const projectName = getCurrentFileName().replace(/\.[^.]+$/, '') || '项目';
+      const response = await fetch('/api/export-asset-list-xlsx?prepare=1', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          type,
+          projectName,
+          rows,
+          packageOriginals: true,
+          saveToDownloads: shouldSaveToServerDownloads(),
+        }),
+      });
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.error || `导出失败（${response.status}）`);
+      }
+
+      const result = await response.json();
+      if (!result.success || (!result.savedToDownloads && !result.downloadUrl)) {
+        throw new Error(result.error || '服务器没有返回下载地址');
+      }
+      if (!result.savedToDownloads) {
+        const downloadLink = document.createElement('a');
+        downloadLink.href = result.downloadUrl;
+        downloadLink.download = String(result.fileName || `${projectName}_${typeLabel}列表_完整素材.zip`);
+        downloadLink.style.display = 'none';
+        document.body.appendChild(downloadLink);
+        downloadLink.click();
+        downloadLink.remove();
+      }
+
+      const rowCount = Number(result.rowCount || rows.length);
+      const imageCount = Number(result.imageCount || 0);
+      const originalImageCount = Number(result.originalImageCount || 0);
+      const failedImageCount = Number(result.failedImageCount || 0);
+      setAssetPackageExportSuccess({
+        typeLabel,
+        fileName: String(result.fileName || `${projectName}_${typeLabel}列表_完整素材.zip`),
+        workbookFileName: String(result.workbookFileName || `${projectName}_${typeLabel}列表.xlsx`),
+        rowCount,
+        imageCount,
+        originalImageCount,
+        failedImageCount,
+        savedToDownloads: Boolean(result.savedToDownloads),
+        savedPath: String(result.savedPath || ''),
+      });
+      if (failedImageCount > 0) {
+        toast.warning(`${typeLabel}完整素材 ZIP 已生成，另有 ${failedImageCount} 张旧图无法读取`, { id: loadingToast });
+      } else {
+        toast.success(
+          result.savedToDownloads
+            ? `${typeLabel}完整素材 ZIP 已保存到下载目录`
+            : `${typeLabel}完整素材 ZIP 已开始下载`,
+          { id: loadingToast }
+        );
+      }
+    } catch (error) {
+      console.error(`${typeLabel}列表导出失败:`, error);
+      toast.error(error instanceof Error ? error.message : `${typeLabel}列表导出失败`, { id: loadingToast });
+    } finally {
+      setExportingAssetListType(null);
+    }
+  };
+
+  const confirmCreationBibleAndStartExtraction = async () => {
+    if (!creationBible.creationType || !creationBible.subjectRegion || !creationBible.creationBackground) {
+      toast.error('请先选择创作类型、创作题材和创作背景');
+      return;
+    }
+    if (!(await requireLoginBeforePaidAction())) return;
+
+    let extractionContent = getExtractionSourceContent();
+    if (!executionScriptReady) {
+      const preparedScript = await ensureExecutionScript();
+      if (!preparedScript) return;
+      extractionContent = preparedScript;
+    }
+
+    const bible = getCreationBiblePayload();
+    setCreationBible(prev => ({ ...prev, ...bible, confirmed: true }));
+    setStepConfirmed(prev => ({ ...prev, upload: true }));
+    resetExtractionOutputsForFreshRun();
+    void extractAllParallel(extractionContent, getCurrentFileName(), bible);
+  };
+
+  const reopenCreationBibleSelection = async () => {
+    await cleanupStoryboardImages();
+    await cleanupAssetImages();
+    resetExtractionOutputsForFreshRun();
+    setCreationBible(prev => ({ ...prev, confirmed: false }));
+    setCurrentStep(1);
+    setProgress(15);
+    toast.info('已重新打开创作圣经，请确认后重新提取');
+  };
+
+  type WorkflowStepStatus = 'completed' | 'active' | 'pending';
+  type WorkflowStepView = {
+    title: string;
+    icon: typeof Upload;
+    status: WorkflowStepStatus;
+    revertKey?: keyof typeof stepConfirmed;
+  };
+
+  const hasStoryboardGroups = Object.values(chapterStoryboards).some(
+    cs => (cs.promptGroups?.length ?? 0) > 0
+  );
+  const hasStoryboardImages = Object.values(chapterStoryboards).some(
+    cs => (cs.promptGroups ?? []).some(pg => !!pg.storyboardImageUrl)
+  );
+
+  const workflowSteps: WorkflowStepView[] = [
+    {
+      title: '上传文件',
+      icon: Upload,
+      status: uploadedStoryReady ? 'completed' : 'active',
+      revertKey: 'upload',
+    },
+    {
+      title: '执行剧本',
+      icon: FileText,
+      status: executionScriptReady ? 'completed' : uploadedStoryReady ? 'active' : 'pending',
+    },
+    {
+      title: '创作圣经',
+      icon: BookOpen,
+      status: creationBibleReady ? 'completed' : executionScriptReady ? 'active' : 'pending',
+    },
+    {
+      title: '并行提取',
+      icon: Sparkles,
+      status: stepConfirmed.extraction ? 'completed' : creationBibleReady ? 'active' : 'pending',
+      revertKey: 'extraction',
+    },
+    {
+      title: '生成分镜',
+      icon: Film,
+      status: stepConfirmed.storyboard ? 'completed' : stepConfirmed.extraction ? 'active' : 'pending',
+      revertKey: 'storyboard',
+    },
+    {
+      title: '素材确认',
+      icon: Package,
+      status: stepConfirmed.assets ? 'completed' : stepConfirmed.storyboard ? 'active' : 'pending',
+      revertKey: 'assets',
+    },
+    {
+      title: '提示词确认',
+      icon: FileText,
+      status: stepConfirmed.prompts ? 'completed' : stepConfirmed.assets ? 'active' : 'pending',
+      revertKey: 'prompts',
+    },
+    {
+      title: '故事版',
+      icon: ImageIcon,
+      status: hasStoryboardImages ? 'completed' : (hasStoryboardGroups || stepConfirmed.prompts) ? 'active' : 'pending',
+    },
+    {
+      title: '生成视频',
+      icon: Video,
+      status: stepConfirmed.videos ? 'completed' : hasStoryboardImages ? 'active' : 'pending',
+      revertKey: 'videos',
+    },
+  ];
+  const activeWorkflowIndex = workflowSteps.findIndex(step => step.status === 'active');
+  const lastCompletedWorkflowIndex = workflowSteps.reduce(
+    (last, step, index) => step.status === 'completed' ? index : last,
+    -1
+  );
+  const workflowProgressIndex = activeWorkflowIndex >= 0 ? activeWorkflowIndex : lastCompletedWorkflowIndex;
+  const workflowProgress = workflowSteps.length <= 1
+    ? 0
+    : Math.min(100, Math.max(0, (workflowProgressIndex / (workflowSteps.length - 1)) * 100));
+  const batchRegenerationLabel = batchRegenerationConfirmType
+    ? ({ scene: '场景', character: '人物', prop: '道具' } as const)[batchRegenerationConfirmType]
+    : '';
+  const batchRegenerationAssetCount = batchRegenerationConfirmType
+    ? getBatchAssetList(batchRegenerationConfirmType).length
+    : 0;
+  const assetImageLimitLabel = assetImageLimitNotice
+    ? ({ scene: '场景', character: '人物', prop: '道具' } as const)[assetImageLimitNotice.type]
+    : '素材';
+  const assetImageChooserData = assetImageChooserTarget
+    ? assetImages.get(assetImageChooserTarget.assetId)
+    : undefined;
+  const assetImageChooserImages = (assetImageChooserData?.images || [])
+    .filter(image => Boolean(image.imageUrl) && !image.isGenerating)
+    .slice(0, MAX_IMAGES_PER_ASSET);
+
   return (
     <div className="black-mirror-shell min-h-screen px-4 py-6 sm:px-6 lg:px-8">
       <AlertDialog open={loginRequiredOpen} onOpenChange={setLoginRequiredOpen}>
@@ -6179,6 +9666,225 @@ export default function StoryboardGenerator() {
             <AlertDialogCancel>先不登录</AlertDialogCancel>
             <AlertDialogAction onClick={openLoginFromRequired}>
               去登录
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+      <AlertDialog
+        open={assetPackageExportSuccess !== null}
+        onOpenChange={open => {
+          if (!open) setAssetPackageExportSuccess(null);
+        }}
+      >
+        <AlertDialogContent className="border-amber-400/45 bg-[#0c0d0b] text-amber-50 sm:max-w-lg">
+          <AlertDialogHeader>
+            <AlertDialogTitle className="flex items-center gap-2 text-amber-100">
+              <CheckCircle2 className="size-5 text-emerald-400" />
+              完整素材 ZIP 导出成功
+            </AlertDialogTitle>
+            <AlertDialogDescription className="space-y-3 leading-6 text-amber-100/70">
+              <span className="block">
+                {assetPackageExportSuccess?.typeLabel}列表、Excel 缩略图和对应原图已经整理完成。
+              </span>
+              <span className="grid grid-cols-2 gap-x-4 gap-y-2 rounded-md border border-amber-400/20 bg-amber-400/[0.05] p-3 text-sm text-amber-50/85">
+                <span>制作项：{assetPackageExportSuccess?.rowCount || 0} 条</span>
+                <span>原图：{assetPackageExportSuccess?.originalImageCount || 0} 张</span>
+                <span>Excel 缩略图：{assetPackageExportSuccess?.imageCount || 0} 张</span>
+                <span>读取失败：{assetPackageExportSuccess?.failedImageCount || 0} 张</span>
+              </span>
+              <span className="block break-all text-sm text-amber-200/80">
+                文件：{assetPackageExportSuccess?.fileName || '完整素材.zip'}
+              </span>
+              {assetPackageExportSuccess?.savedToDownloads && assetPackageExportSuccess.savedPath ? (
+                <span className="block break-all text-xs text-emerald-300/85">
+                  已保存到：{assetPackageExportSuccess.savedPath}
+                </span>
+              ) : null}
+              <span className="block rounded-md border border-amber-400/20 bg-black/30 px-3 py-2 text-sm">
+                请先完整解压 ZIP，再打开 Excel。点击表格中的缩略图即可打开同一状态对应的原图。
+              </span>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogAction
+              className="bg-amber-400 text-black hover:bg-amber-300"
+              onClick={() => setAssetPackageExportSuccess(null)}
+            >
+              知道了
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+      <AlertDialog
+        open={assetImageLimitNotice !== null}
+        onOpenChange={open => {
+          if (!open) setAssetImageLimitNotice(null);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle className="flex items-center gap-2">
+              <AlertTriangle className="size-5 text-amber-400" />
+              已达到{assetImageLimitLabel}图片上限
+            </AlertDialogTitle>
+            <AlertDialogDescription className="leading-7">
+              「{assetImageLimitNotice?.name || assetImageLimitLabel}」已达到 {MAX_IMAGES_PER_ASSET} 张图片上限。
+              每个{assetImageLimitLabel}最多保留 {MAX_IMAGES_PER_ASSET} 张，如需添加新图，请先从卡片中移除一张已有图片。
+              <br />
+              <span className="font-medium text-amber-300">本次操作已拦截，没有调用图片 API，也不会扣除创作点。</span>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogAction
+              className="bg-amber-500 text-black hover:bg-amber-400"
+              onClick={() => setAssetImageLimitNotice(null)}
+            >
+              知道了
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+      <Dialog
+        open={assetImageChooserTarget !== null}
+        onOpenChange={open => {
+          if (!open) setAssetImageChooserTarget(null);
+        }}
+      >
+        <DialogContent className="max-h-[88vh] overflow-y-auto sm:max-w-4xl">
+          <DialogHeader>
+            <DialogTitle>选择「{assetImageChooserTarget?.name || '素材'}」主图</DialogTitle>
+            <DialogDescription>
+              完整查看当前素材的全部图片。鼠标悬停可轻微放大预览，点击图片后，它会成为列表卡片最上方显示的主图。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid grid-cols-1 gap-4 py-2 sm:grid-cols-3">
+            {assetImageChooserImages.map((image, index) => {
+              const isCurrentPrimary = index === 0;
+              const isPortrait = assetImageChooserTarget?.type === 'character';
+              return (
+                <button
+                  key={image.imageId}
+                  type="button"
+                  className={`group/select overflow-hidden rounded-md border bg-black/45 text-left shadow-lg transition duration-200 hover:scale-[1.025] hover:border-amber-300 hover:shadow-[0_12px_32px_rgba(251,191,36,0.16)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300 ${
+                    isCurrentPrimary ? 'border-amber-300/80' : 'border-amber-400/20'
+                  }`}
+                  onClick={() => {
+                    if (!assetImageChooserTarget) return;
+                    requestPrimaryAssetImageSelection(
+                      assetImageChooserTarget.assetId,
+                      image.imageId,
+                      assetImageChooserTarget.name,
+                      assetImageChooserTarget.type,
+                      image.imageUrl
+                    );
+                  }}
+                  aria-label={`将第 ${index + 1} 张图片设为主图`}
+                >
+                  <div className={`relative w-full bg-black ${isPortrait ? 'aspect-[4/5]' : 'aspect-video'}`}>
+                    <img
+                      src={image.imageUrl}
+                      alt={`${assetImageChooserTarget?.name || '素材'}第 ${index + 1} 张`}
+                      className="h-full w-full object-contain transition-transform duration-200 group-hover/select:scale-[1.02]"
+                    />
+                    {isCurrentPrimary && (
+                      <Badge className="absolute left-2 top-2 border border-amber-200/40 bg-amber-400 text-black">
+                        当前主图
+                      </Badge>
+                    )}
+                  </div>
+                  <div className="flex items-center justify-between gap-2 border-t border-amber-400/15 px-3 py-2 text-xs">
+                    <span className="text-amber-100/75">第 {index + 1} 张</span>
+                    <span className={isCurrentPrimary ? 'text-amber-300' : 'text-amber-100/50'}>
+                      {isCurrentPrimary ? '正在使用' : '点击设为主图'}
+                    </span>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setAssetImageChooserTarget(null)}>
+              取消
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      <AlertDialog
+        open={pendingCharacterFaceChange !== null}
+        onOpenChange={open => {
+          if (!open) setPendingCharacterFaceChange(null);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle className="flex items-center gap-2">
+              <AlertTriangle className="size-5 text-amber-400" />
+              确认更换人物正脸主图？
+            </AlertDialogTitle>
+            <AlertDialogDescription className="leading-7">
+              更换「{pendingCharacterFaceChange?.characterName || '人物'}」的正脸主图后，原身份基准会立即失效，所有造型生成按钮将重新锁定，直到你确认新的正脸。
+              {Boolean(pendingCharacterFaceChange?.affectedLookCount) && (
+                <>
+                  <br />
+                  当前有 <span className="font-semibold text-amber-300">{pendingCharacterFaceChange?.affectedLookCount} 个已生成造型或四视图</span>
+                  将标记为“需按新正脸重做”，系统不会自动调用 API 或扣除创作点。
+                </>
+              )}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>取消更换</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-amber-500 text-black hover:bg-amber-400"
+              onClick={() => {
+                const pending = pendingCharacterFaceChange;
+                setPendingCharacterFaceChange(null);
+                if (!pending) return;
+                selectPrimaryAssetImage(
+                  pending.assetId,
+                  pending.imageId,
+                  pending.characterName,
+                  'character',
+                  pending.imageUrl
+                );
+              }}
+            >
+              确认更换
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+      <AlertDialog
+        open={batchRegenerationConfirmType !== null}
+        onOpenChange={open => {
+          if (!open) setBatchRegenerationConfirmType(null);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle className="flex items-center gap-2">
+              <AlertTriangle className="size-5 text-amber-400" />
+              确认再次批量生成全部{batchRegenerationLabel}图片？
+            </AlertDialogTitle>
+            <AlertDialogDescription className="leading-7">
+              你已经使用过“一键生成{batchRegenerationLabel}图”。继续后，系统将再次为当前列表中的
+              <span className="px-1 font-semibold text-amber-300">{batchRegenerationAssetCount} 个{batchRegenerationLabel}素材</span>
+              批量新增图片，已有图片不会被覆盖。
+              <br />
+              <span className="font-semibold text-red-400">本次操作可能产生大批量创作点消耗，请确认确实需要重新生成。</span>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>取消，不消耗</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-amber-500 text-black hover:bg-amber-400"
+              onClick={() => {
+                const confirmedType = batchRegenerationConfirmType;
+                setBatchRegenerationConfirmType(null);
+                if (confirmedType) void generateAllAssetImages(confirmedType, true);
+              }}
+            >
+              确认并继续生成
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
@@ -6202,7 +9908,7 @@ export default function StoryboardGenerator() {
                 <span className="brand-star brand-star-right" aria-hidden="true">✧</span>
               </div>
               <p className="mt-2 text-sm text-stone-400 sm:text-base">
-                seedance满血版，seedance海外版，从未有过的顺滑创作体验。
+                爆款作品一站式工作流
               </p>
               <div className="mt-3 flex items-start gap-2 text-left">
                 <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-400" />
@@ -6503,16 +10209,15 @@ export default function StoryboardGenerator() {
         {/* Progress Steps */}
         <div className="black-mirror-steps mb-8">
           <div className="flex items-start justify-between gap-1 mb-3">
-            {steps.map((step, index) => {
+            {workflowSteps.map((step) => {
               const Icon = step.icon;
-              const isActive = index === currentStep;
-              const isCompleted = index < currentStep;
-              const stepKey = ['upload', 'extraction', 'storyboard', 'assets', 'prompts', 'videos'][index] as keyof typeof stepConfirmed;
-              const isConfirmed = stepConfirmed[stepKey];
-              
+              const isActive = step.status === 'active';
+              const isCompleted = step.status === 'completed';
+              const isConfirmed = step.revertKey ? stepConfirmed[step.revertKey] : false;
+
               return (
                 <div
-                  key={index}
+                  key={step.title}
                   className={`mirror-step relative flex min-w-0 flex-1 flex-col items-center ${
                     isCompleted ? 'is-completed' : isActive ? 'is-active' : ''
                   }`}
@@ -6533,13 +10238,13 @@ export default function StoryboardGenerator() {
                       <Icon className="w-6 h-6" />
                     )}
                     {/* 撤回按钮 - 已确认的步骤显示 */}
-                    {isConfirmed && index < 5 && (
+                    {isConfirmed && step.revertKey && step.revertKey !== 'videos' && (
                       <Button
                         size="icon"
                         variant="ghost"
                         className="mirror-step-undo absolute -right-1 -top-1 w-5 h-5 rounded-full p-0"
                         title="撤回到此步骤"
-                        onClick={() => revertToStep(stepKey)}
+                        onClick={() => revertToStep(step.revertKey!)}
                       >
                         <Undo2 className="w-3 h-3" />
                       </Button>
@@ -6552,7 +10257,7 @@ export default function StoryboardGenerator() {
               );
             })}
           </div>
-          <Progress value={progress} className="mirror-progress h-2" />
+          <Progress value={workflowProgress} className="mirror-progress h-2" />
         </div>
 
         {/* Main Content */}
@@ -6617,44 +10322,381 @@ export default function StoryboardGenerator() {
                 {/* 上传确认按钮 */}
                 {(uploadedFile || (uploadedFileName && fileContent)) && !stepConfirmed.upload && fileContent && (
                   <div className="mt-4 space-y-2">
-                    <Button 
-                      className="w-full" 
-                      onClick={() => confirmStep('upload')}
-                      disabled={isProcessing}
-                    >
-                      <CheckCircle2 className="w-4 h-4 mr-2" />
-                      确认文件，开始提取
-                    </Button>
-                    <Button 
-                      className="w-full" 
+	                    <Button
+	                      className="w-full"
+	                      onClick={() => confirmStep('upload')}
+	                      disabled={isProcessing || isGeneratingExecutionScript}
+	                    >
+	                      {isGeneratingExecutionScript ? (
+	                        <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+	                      ) : (
+	                        <CheckCircle2 className="w-4 h-4 mr-2" />
+	                      )}
+	                      确认文件，拉执行剧本
+	                    </Button>
+                    <Button
+                      className="w-full"
                       variant="outline"
                       onClick={() => {
                         setUploadedFile(null);
                         setFileContent('');
                         setUploadedFileName(null);
+                        setExecutionScript('');
+                        setExecutionScriptSourceSignature('');
+                        setCreationBible(DEFAULT_CREATION_BIBLE);
                         setProgress(0);
                         toast.info('已清除文件，请重新上传');
-                      }}
-                      disabled={isProcessing}
-                    >
+	                      }}
+	                      disabled={isProcessing || isGeneratingExecutionScript}
+	                    >
                       <RefreshCw className="w-4 h-4 mr-2" />
                       不满意，重新上传
                     </Button>
                   </div>
                 )}
-              </CardContent>
-            </Card>
+	              </CardContent>
+	            </Card>
 
-            {/* Parallel Extraction Status */}
-            {hasExtractionStatusToShow && (
-              <Card>
+	            {/* Execution Script Preparation */}
+	            {uploadedStoryReady && (
+		              <Card className="execution-script-card">
+		                <CardHeader>
+		                  <CardTitle className="flex flex-wrap items-center justify-between gap-2">
+		                    <span className="flex min-w-0 items-center gap-2">
+		                      <FileText className="w-5 h-5" />
+		                      拉执行剧本
+		                    </span>
+		                    <Badge className="shrink-0" variant={executionScriptReady ? 'default' : 'outline'}>
+		                      {executionScriptReady ? '已生成' : '待生成'}
+		                    </Badge>
+		                  </CardTitle>
+		                  <CardDescription className="execution-script-copy">
+		                    使用 DeepSeek 先整理成执行剧本，再进入五维提取。
+		                  </CardDescription>
+	                </CardHeader>
+	                <CardContent className="space-y-3">
+		                {!executionScriptReady ? (
+		                  <Button
+		                    className="w-full"
+		                    onClick={async () => {
+		                      await ensureExecutionScript();
+		                    }}
+		                    disabled={isProcessing || isGeneratingExecutionScript}
+		                  >
+		                    {isGeneratingExecutionScript ? (
+		                      <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+		                    ) : (
+		                      <Sparkles className="w-4 h-4 mr-2" />
+		                    )}
+		                    生成执行剧本
+		                  </Button>
+		                ) : (
+		                  <div className="space-y-4">
+		                    <div className="execution-script-ready-state flex items-start gap-3 rounded-md border border-amber-400/25 bg-amber-500/10 px-4 py-3.5 text-amber-100">
+		                      <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-amber-300/35 bg-black/20">
+		                        <CheckCircle2 className="h-4 w-4" />
+		                      </span>
+		                      <div className="min-w-0 flex-1">
+		                        <div className="text-sm font-semibold leading-5">执行剧本已就绪</div>
+		                        <div className="execution-script-copy mt-0.5 text-xs leading-5 text-amber-100/70">
+		                          后续场景、人物、人物音色、道具和大纲提取将优先使用这份执行剧本。
+		                        </div>
+		                      </div>
+		                    </div>
+		                    <div className="execution-script-actions">
+		                        <Dialog open={showExecutionScriptPreview} onOpenChange={setShowExecutionScriptPreview}>
+		                          <DialogTrigger asChild>
+		                            <Button
+		                              variant="outline"
+		                              className="execution-script-action execution-script-action-primary w-full justify-center border-amber-300/45 bg-amber-500/10 text-amber-50 hover:bg-amber-500/20"
+		                            >
+		                              <Eye className="h-4 w-4 shrink-0" />
+		                              <span className="whitespace-nowrap text-center">查看执行剧本</span>
+		                            </Button>
+		                          </DialogTrigger>
+			                          <DialogContent className="flex max-h-[82vh] flex-col sm:max-w-xl">
+		                            <DialogHeader>
+		                              <DialogTitle>查看执行剧本</DialogTitle>
+		                              <DialogDescription>
+		                                这是基于上传故事整理出的执行剧本，后续提取会优先使用这份内容。
+		                              </DialogDescription>
+		                            </DialogHeader>
+			                            <Textarea
+			                              readOnly
+			                              value={normalizedExecutionScript}
+			                              className="h-[min(56vh,520px)] min-h-[320px] resize-none overflow-y-auto [field-sizing:fixed] text-xs leading-6"
+			                            />
+		                            <DialogFooter className="gap-2">
+		                              <Button
+		                                variant="outline"
+		                                onClick={() => {
+		                                  navigator.clipboard.writeText(normalizedExecutionScript).then(
+		                                    () => toast.success('执行剧本内容已复制'),
+		                                    () => toast.error('复制失败，请手动选择复制')
+		                                  );
+		                                }}
+		                              >
+		                                <Copy className="w-4 h-4 mr-2" />
+		                                复制内容
+		                              </Button>
+		                              <Button variant="outline" onClick={() => setShowExecutionScriptPreview(false)}>
+		                                关闭
+		                              </Button>
+		                            </DialogFooter>
+		                          </DialogContent>
+		                        </Dialog>
+		                        <Button
+		                          variant="outline"
+		                          className="execution-script-action w-full justify-center"
+		                          onClick={async () => {
+		                            await ensureExecutionScript(true);
+		                          }}
+		                          disabled={isProcessing || isGeneratingExecutionScript}
+		                        >
+		                          {isGeneratingExecutionScript ? (
+		                            <Loader2 className="h-4 w-4 shrink-0 animate-spin" />
+		                          ) : (
+		                            <RefreshCw className="h-4 w-4 shrink-0" />
+		                          )}
+		                          <span className="whitespace-nowrap text-center">重新拉起</span>
+		                        </Button>
+		                        <Button
+		                          variant="outline"
+		                          className="execution-script-action w-full justify-center"
+		                          onClick={handleExportExecutionScript}
+		                          disabled={isExportingExecutionScript}
+		                        >
+		                          {isExportingExecutionScript ? (
+		                            <Loader2 className="h-4 w-4 shrink-0 animate-spin" />
+		                          ) : (
+		                            <Download className="h-4 w-4 shrink-0" />
+		                          )}
+		                          <span className="whitespace-nowrap text-center">导出 Word</span>
+		                        </Button>
+		                  </div>
+		                </div>
+		                )}
+		                  {hasLegacyExtractionResultsPendingExecutionScript && (
+		                    <div className="execution-script-copy rounded-md border border-amber-400/25 bg-amber-500/10 p-3 text-xs leading-5 text-amber-100">
+		                      当前恢复的是旧流程提取结果。请先生成执行剧本并确认创作圣经，系统会按新流程重新提取场景、人物、人物音色、道具和大纲。
+		                    </div>
+		                  )}
+	                </CardContent>
+	              </Card>
+	            )}
+
+	            <Dialog open={showExecutionScriptSuccessDialog} onOpenChange={setShowExecutionScriptSuccessDialog}>
+	              <DialogContent className="sm:max-w-md">
+	                <DialogHeader>
+	                  <DialogTitle className="flex items-center gap-2">
+	                    <CheckCircle2 className="h-5 w-5 text-emerald-300" />
+	                    执行剧本拉取成功
+	                  </DialogTitle>
+	                  <DialogDescription>
+	                    执行剧本已经整理完成。接下来可以查看内容，或继续确认创作圣经后进入并行提取。
+	                  </DialogDescription>
+	                </DialogHeader>
+	                <DialogFooter className="gap-2">
+	                  <Button
+	                    variant="outline"
+	                    onClick={() => {
+	                      setShowExecutionScriptSuccessDialog(false);
+	                      setShowExecutionScriptPreview(true);
+	                    }}
+	                  >
+	                    <Eye className="mr-2 h-4 w-4" />
+	                    查看执行剧本
+	                  </Button>
+	                  <Button onClick={() => setShowExecutionScriptSuccessDialog(false)}>
+	                    继续
+	                  </Button>
+	                </DialogFooter>
+	              </DialogContent>
+	            </Dialog>
+
+	            {/* Creation Bible */}
+	            {uploadedStoryReady && executionScriptReady && (
+	              <Card>
+	                <CardHeader>
+	                  <CardTitle className="flex items-center justify-between gap-2">
+	                    <span className="flex items-center gap-2">
+	                      <BookOpen className="w-5 h-5" />
+	                      创作圣经
+	                    </span>
+	                    <Badge variant={creationBibleReady ? 'default' : 'outline'}>
+	                      {creationBibleReady ? '已确认' : '待确认'}
+	                    </Badge>
+	                  </CardTitle>
+	                  <CardDescription>
+	                    确认后，场景、人物、道具提取和后续素材生图都会遵循这里的创作方向。
+	                  </CardDescription>
+	                </CardHeader>
+	                <CardContent className="space-y-4">
+	                  {creationBibleReady ? (
+	                    <div className="rounded-md border border-amber-400/25 bg-amber-500/10 p-4">
+	                      <div className="mb-3 flex items-center gap-2 text-sm font-medium text-amber-100">
+	                        <CheckCircle2 className="h-4 w-4" />
+	                        创作圣经已确认，后续流程将按以下方向执行
+	                      </div>
+                      <div className="grid gap-3 sm:grid-cols-3">
+	                        <div className="rounded-md border border-amber-400/20 bg-black/20 px-3 py-2">
+	                          <div className="text-[11px] text-amber-200/70">创作类型</div>
+	                          <div className="mt-1 text-sm font-semibold text-amber-50">{creationBible.creationType}</div>
+	                        </div>
+                        <div className="rounded-md border border-amber-400/20 bg-black/20 px-3 py-2">
+                          <div className="text-[11px] text-amber-200/70">创作题材</div>
+                          <div className="mt-1 text-sm font-semibold text-amber-50">{creationBible.subjectRegion}</div>
+                        </div>
+                        <div className="rounded-md border border-amber-400/20 bg-black/20 px-3 py-2">
+                          <div className="text-[11px] text-amber-200/70">创作背景</div>
+                          <div className="mt-1 text-sm font-semibold text-amber-50">{creationBible.creationBackground}</div>
+                        </div>
+	                      </div>
+	                      <AlertDialog>
+	                        <AlertDialogTrigger asChild>
+	                          <Button
+	                            type="button"
+	                            variant="outline"
+	                            className="mt-3 w-full border-amber-400/35 bg-black/20 text-amber-50 hover:bg-amber-500/10"
+	                            disabled={isProcessing || isGeneratingExecutionScript}
+	                          >
+	                            <RefreshCw className="mr-2 h-4 w-4" />
+	                            重新选择创作圣经
+	                          </Button>
+	                        </AlertDialogTrigger>
+	                        <AlertDialogContent>
+	                          <AlertDialogHeader>
+	                            <AlertDialogTitle>确认重新选择创作圣经？</AlertDialogTitle>
+	                            <AlertDialogDescription>
+	                              创作圣经会影响后续场景、人物、道具、大纲提取，以及分镜、提示词、故事版和图片生成结果。确认后，当前后续提取结果会被清空，需要重新提取。
+	                            </AlertDialogDescription>
+	                          </AlertDialogHeader>
+	                          <AlertDialogFooter>
+	                            <AlertDialogCancel>取消</AlertDialogCancel>
+	                            <AlertDialogAction onClick={reopenCreationBibleSelection}>
+	                              确认重新选择
+	                            </AlertDialogAction>
+	                          </AlertDialogFooter>
+	                        </AlertDialogContent>
+	                      </AlertDialog>
+	                    </div>
+	                  ) : (
+	                    <>
+	                      <div className="space-y-2">
+	                        <Label className="text-sm text-amber-100">创作类型（单选）</Label>
+	                        <div className="grid gap-2 sm:grid-cols-3">
+	                          {CREATION_TYPE_OPTIONS.map(option => {
+	                            const selected = creationBible.creationType === option.value;
+	                            return (
+	                              <Button
+	                                key={option.value}
+	                                type="button"
+	                                variant={selected ? 'default' : 'outline'}
+	                                className={`h-auto justify-start px-3 py-3 text-left ${selected ? 'border-amber-300 shadow-[0_0_18px_rgba(245,184,64,0.28)]' : ''}`}
+	                                onClick={() => setCreationBible(prev => ({
+	                                  ...prev,
+	                                  creationType: option.value,
+	                                  confirmed: false,
+	                                }))}
+	                              >
+	                                <span>
+	                                  <span className="block text-sm font-medium">{option.label}</span>
+	                                  <span className="mt-1 block whitespace-normal text-xs opacity-70">{option.description}</span>
+	                                </span>
+	                              </Button>
+	                            );
+	                          })}
+	                        </div>
+	                      </div>
+
+	                      <div className="space-y-2">
+	                        <Label className="text-sm text-amber-100">创作题材（单选）</Label>
+	                        <div className="grid gap-2 sm:grid-cols-2">
+	                          {CREATION_REGION_OPTIONS.map(option => {
+	                            const selected = creationBible.subjectRegion === option.value;
+	                            return (
+	                              <Button
+	                                key={option.value}
+	                                type="button"
+	                                variant={selected ? 'default' : 'outline'}
+	                                className={`h-auto justify-start px-3 py-3 text-left ${selected ? 'border-amber-300 shadow-[0_0_18px_rgba(245,184,64,0.28)]' : ''}`}
+	                                onClick={() => setCreationBible(prev => ({
+	                                  ...prev,
+	                                  subjectRegion: option.value,
+	                                  confirmed: false,
+	                                }))}
+	                              >
+	                                <span>
+	                                  <span className="block text-sm font-medium">{option.label}</span>
+	                                  <span className="mt-1 block whitespace-normal text-xs opacity-70">{option.description}</span>
+	                                </span>
+	                              </Button>
+	                            );
+	                          })}
+	                        </div>
+	                      </div>
+
+	                      <div className="space-y-2">
+	                        <Label className="text-sm text-amber-100">创作背景（单选）</Label>
+	                        <div className="grid gap-2 sm:grid-cols-3">
+	                          {CREATION_BACKGROUND_OPTIONS.map(option => {
+	                            const selected = creationBible.creationBackground === option.value;
+	                            return (
+	                              <Button
+	                                key={option.value}
+	                                type="button"
+	                                variant={selected ? 'default' : 'outline'}
+	                                className={`h-auto justify-start px-3 py-3 text-left ${selected ? 'border-amber-300 shadow-[0_0_18px_rgba(245,184,64,0.28)]' : ''}`}
+	                                onClick={() => setCreationBible(prev => ({
+	                                  ...prev,
+	                                  creationBackground: option.value,
+	                                  confirmed: false,
+	                                }))}
+	                              >
+	                                <span>
+	                                  <span className="block text-sm font-medium">{option.label}</span>
+	                                  <span className="mt-1 block whitespace-normal text-xs opacity-70">{option.description}</span>
+	                                </span>
+	                              </Button>
+	                            );
+	                          })}
+	                        </div>
+	                      </div>
+
+	                      <Button
+	                        className="w-full"
+	                        onClick={confirmCreationBibleAndStartExtraction}
+	                        disabled={
+	                          isProcessing ||
+	                          isGeneratingExecutionScript ||
+	                          !creationBible.creationType ||
+	                          !creationBible.subjectRegion ||
+	                          !creationBible.creationBackground
+	                        }
+	                      >
+	                        {isGeneratingExecutionScript ? (
+	                          <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+	                        ) : (
+	                          <Sparkles className="w-4 h-4 mr-2" />
+	                        )}
+	                        确认创作圣经并开始提取
+	                      </Button>
+	                    </>
+	                  )}
+	                </CardContent>
+	              </Card>
+	            )}
+
+	            {/* Parallel Extraction Status */}
+	            {canShowExtractionResults && hasExtractionStatusToShow && (
+	              <Card>
                 <CardHeader>
                   <CardTitle className="flex items-center gap-2">
                     <Sparkles className="w-5 h-5" />
                     并行提取状态
                   </CardTitle>
                   <CardDescription>
-                    四个维度提取进度
+                    五个维度提取完成后，会回查原剧本核验重复项
                   </CardDescription>
                 </CardHeader>
                 <CardContent>
@@ -6701,6 +10743,26 @@ export default function StoryboardGenerator() {
                     </div>
                     <div className="flex items-center justify-between p-2 rounded bg-gray-50 dark:bg-gray-800">
                       <div className="flex items-center gap-2">
+                        <Volume2 className="w-4 h-4 text-amber-400" />
+                        <span className="text-sm">人物音色提取</span>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        {renderStatusIcon(effectiveExtractionStatus.voices)}
+                        {effectiveExtractionStatus.voices !== 'loading' && (
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            className="h-6 px-2"
+                            title={effectiveExtractionStatus.voices === 'pending' ? '提取人物音色' : '重新提取人物音色'}
+                            onClick={() => retryExtraction('voices')}
+                          >
+                            <RefreshCw className="w-3 h-3" />
+                          </Button>
+                        )}
+                      </div>
+                    </div>
+                    <div className="flex items-center justify-between p-2 rounded bg-gray-50 dark:bg-gray-800">
+                      <div className="flex items-center gap-2">
                         <Package className="w-4 h-4 text-orange-500" />
                         <span className="text-sm">道具提取</span>
                       </div>
@@ -6739,8 +10801,87 @@ export default function StoryboardGenerator() {
                         )}
                       </div>
                     </div>
+                    <div className="rounded bg-gray-50 p-2 dark:bg-gray-800">
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="flex min-w-0 items-center gap-2">
+                          <CheckCircle2 className="h-4 w-4 shrink-0 text-amber-400" />
+                          <div className="min-w-0">
+                            <div className="text-sm">全文质量核验</div>
+                            <div className="truncate text-[11px] text-muted-foreground">
+                              {extractionReview.status === 'reviewing'
+                                ? '正在核验重复项与人物造型时间线'
+                                : extractionReview.status === 'pending'
+                                  ? '等待人物、场景、道具全部提取完成'
+                                  : extractionReview.status === 'success'
+                                    ? extractionReview.mergedGroupCount > 0
+                                      ? `已确认并合并 ${extractionReview.mergedGroupCount} 组重复项`
+                                      : '重复项已核验'
+                                    : extractionReview.status === 'error'
+                                      ? (extractionReview.error || '核验失败，可重新尝试')
+                                      : '核验重复实体，并自动检查人物时期与状态造型漏项'}
+                            </div>
+                          </div>
+                        </div>
+                        <div className="flex shrink-0 items-center gap-1.5">
+                          {extractionReview.status === 'reviewing' ? (
+                            <Loader2 className="h-4 w-4 animate-spin text-amber-300" />
+                          ) : extractionReview.status === 'success' ? (
+                            <CheckCircle2 className="h-4 w-4 text-emerald-400" />
+                          ) : extractionReview.status === 'error' ? (
+                            <AlertCircle className="h-4 w-4 text-red-400" />
+                          ) : (
+                            <Circle className="h-4 w-4 text-muted-foreground" />
+                          )}
+                          {hasSceneExtractionResult && hasCharacterExtractionResult && hasPropExtractionResult && extractionReview.status !== 'reviewing' && (
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              className="h-7 px-2 text-xs"
+                              title="重新通读原剧本，核验重复项与人物时期/状态造型漏项；会按实际 Token 扣除创作点"
+                              onClick={() => void runExtractionQualityReview(true)}
+                            >
+                              <RefreshCw className="mr-1 h-3 w-3" />
+                              {extractionReview.reviewedAt ? '重新核验' : '开始核验'}
+                            </Button>
+                          )}
+                        </div>
+                      </div>
+                      {extractionReview.status === 'success' && extractionReview.lifecycle && (
+                        <div className={`mt-2 rounded border px-2 py-1.5 text-[11px] ${
+                          extractionReview.lifecycle.unresolvedCount > 0
+                            ? 'border-red-400/25 bg-red-500/[0.06] text-red-100/80'
+                            : 'border-emerald-400/20 bg-emerald-500/[0.05] text-emerald-100/75'
+                        }`}>
+                          人物造型证据 {extractionReview.lifecycle.requiredCount - extractionReview.lifecycle.unresolvedCount}
+                          /{extractionReview.lifecycle.requiredCount} 已覆盖
+                          {(extractionReview.lifecycle.repairedByModel + extractionReview.lifecycle.fallbackAdded) > 0 && (
+                            <>；本次自动补齐 {extractionReview.lifecycle.repairedByModel + extractionReview.lifecycle.fallbackAdded} 项</>
+                          )}
+                          {extractionReview.lifecycle.unresolvedCount > 0 && (
+                            <>；仍有 {extractionReview.lifecycle.unresolvedCount} 项需复核</>
+                          )}
+                        </div>
+                      )}
+                      {extractionReview.status === 'success' && extractionReview.groups.length > 0 && (
+                        <div className="mt-2 space-y-1 border-t border-amber-400/15 pt-2">
+                          {extractionReview.groups.slice(0, 4).map((group, index) => (
+                            <div
+                              key={`${group.type}-${group.canonicalName}-${index}`}
+                              className="truncate text-[11px] text-amber-100/70"
+                              title={`${group.aliases.join(' / ')} → ${group.canonicalName}；${group.reason}`}
+                            >
+                              {group.type === 'scene' ? '场景' : group.type === 'character' ? '人物' : '道具'}：
+                              {group.aliases.join(' / ')} → {group.canonicalName}
+                            </div>
+                          ))}
+                          {extractionReview.groups.length > 4 && (
+                            <div className="text-[11px] text-muted-foreground">另有 {extractionReview.groups.length - 4} 组已完成合并</div>
+                          )}
+                        </div>
+                      )}
+                    </div>
                   </div>
-                  
+
                   {/* 大纲分批提取进度和确认按钮 */}
                   {outlineBatchInfo && (extractionStatus.outline === 'batch_confirm' || extractionStatus.outline === 'loading') && (
                     <div className="mt-4 p-3 bg-blue-50 dark:bg-blue-900/20 rounded-lg space-y-3">
@@ -6760,17 +10901,17 @@ export default function StoryboardGenerator() {
                         </span>
                       </div>
                       <div className="w-full bg-blue-200 dark:bg-blue-800 rounded-full h-2">
-                        <div 
+                        <div
                           className={`bg-blue-600 h-2 rounded-full transition-all duration-300 ${extractionStatus.outline === 'loading' ? 'animate-pulse' : ''}`}
                           style={{ width: `${(outlineBatchInfo.currentBatch / outlineBatchInfo.totalBatches) * 100}%` }}
                         />
                       </div>
                       <div className="text-xs text-gray-600 dark:text-gray-400">
-                        已提取 {outlineBatchInfo.allChapters.length} / {outlineBatchInfo.totalEpisodes} 个章节
+                        已提取 {outlineBatchInfo.allChapters.length} / {outlineBatchInfo.totalEpisodes} 集
                       </div>
                       {extractionStatus.outline === 'batch_confirm' && outlineBatchInfo.hasMore && (
-                        <Button 
-                          className="w-full" 
+                        <Button
+                          className="w-full"
                           onClick={continueOutlineExtraction}
                           disabled={isProcessing}
                         >
@@ -6780,20 +10921,20 @@ export default function StoryboardGenerator() {
                       )}
                     </div>
                   )}
-                  
+
                   {/* 提取完成确认按钮 */}
-                  {isEffectiveExtractionSuccess && !stepConfirmed.extraction && (
+	                  {canShowExtractionResults && isEffectiveExtractionSuccess && !stepConfirmed.extraction && (
                     <div className="mt-4 space-y-2">
-                      <Button 
-                        className="w-full" 
+                      <Button
+                        className="w-full"
                         onClick={() => confirmStep('extraction')}
                         disabled={isProcessing}
                       >
                         <CheckCircle2 className="w-4 h-4 mr-2" />
-                        确认提取结果，选择章节
+                        确认提取结果，选择分集
                       </Button>
-                      <Button 
-                        className="w-full" 
+                      <Button
+                        className="w-full"
                         variant="outline"
                         onClick={() => retryAllExtractions()}
                         disabled={isProcessing}
@@ -6808,7 +10949,7 @@ export default function StoryboardGenerator() {
             )}
 
             {/* Outline Card */}
-            {outline && (
+	            {canShowExtractionResults && outline && (
               <Card>
                 <CardHeader>
                   <CardTitle className="flex items-center gap-2">
@@ -6816,7 +10957,7 @@ export default function StoryboardGenerator() {
                     故事大纲
                   </CardTitle>
                   <CardDescription>
-                    共 {outline.totalChapters} 个章节
+                    共 {outline.totalChapters} 集
                   </CardDescription>
                 </CardHeader>
                 <CardContent>
@@ -6831,13 +10972,13 @@ export default function StoryboardGenerator() {
                       </p>
                     </div>
 
-                    {/* 分步确认流程 - 步骤1：确认大纲和章节选择 */}
+                    {/* 分步确认流程 - 步骤1：确认大纲和分集选择 */}
                     {stepConfirmed.extraction ? (
                       <div className="p-3 bg-green-50 dark:bg-green-900/20 rounded-lg">
                         <div className="flex items-center justify-between">
                           <div className="flex items-center gap-2 text-green-600 dark:text-green-400">
                             <CheckCircle2 className="w-4 h-4" />
-                            <span className="text-sm font-medium">大纲和章节选择已确认</span>
+                            <span className="text-sm font-medium">大纲和分集选择已确认</span>
                           </div>
                           <span className="text-xs text-gray-500">请前往"文字分镜"标签页继续下一步</span>
                         </div>
@@ -6849,7 +10990,7 @@ export default function StoryboardGenerator() {
                             <div className="w-6 h-6 rounded-full bg-blue-500 flex items-center justify-center text-white text-xs">
                               1
                             </div>
-                            <span className="text-sm font-medium">确认大纲和章节选择</span>
+                            <span className="text-sm font-medium">确认大纲和分集选择</span>
                           </div>
                           <Button
                             size="sm"
@@ -6861,14 +11002,14 @@ export default function StoryboardGenerator() {
                           </Button>
                         </div>
                         <p className="text-xs text-gray-500 mt-2 pl-8">
-                          确认后，系统将基于选定章节生成文字分镜
+                          确认后，系统将基于选定分集生成文字分镜
                         </p>
                       </div>
                     )}
-                    
-                    {/* 章节列表 */}
+
+                    {/* 分集列表 */}
                     <div className="space-y-2 mt-4">
-                      <p className="text-sm font-medium text-gray-700 dark:text-gray-300">章节列表：</p>
+                      <p className="text-sm font-medium text-gray-700 dark:text-gray-300">分集列表：</p>
                       {outline.chapters.map((chapter, index) => (
                         <div
                           key={`chapter-list-${chapter.chapterNumber}-${index}`}
@@ -6876,12 +11017,11 @@ export default function StoryboardGenerator() {
                         >
                           <div className="flex items-start gap-3">
                             <Badge variant="outline" className="shrink-0 mt-0.5">
-                              第 {chapter.chapterNumber} 章
+                              第 {chapter.chapterNumber} 集
                             </Badge>
                             <div className="flex-1 min-w-0">
-                              <h4 className="font-medium text-sm">{chapter.title}</h4>
                               <p
-                                className="text-xs text-gray-500 mt-1 line-clamp-2"
+                                className="text-xs text-gray-500 line-clamp-2"
                                 title={chapter.summary || ''}
                               >
                                 {chapter.summary}
@@ -6925,38 +11065,62 @@ export default function StoryboardGenerator() {
                   <Video className="w-4 h-4 mr-2" />
                   视频生成
                 </TabsTrigger>
-                
+
               </TabsList>
 
               {/* Extraction Results Tab */}
               <TabsContent value="extraction">
                 <div className="space-y-4">
                   {/* Scenes */}
-                  {scenesData && (
+	                  {canShowExtractionResults && scenesData && (
                     <Card>
                       <CardHeader>
                         <div className="flex items-center justify-between gap-3">
                           <CardTitle className="flex items-center gap-2 text-lg">
                             <MapPin className="w-5 h-5 text-blue-500" />
                             场景列表
-                            <Badge variant="secondary">{sceneBatchInfo?.sceneMarkers?.length || scenesData.totalScenes} 个场景</Badge>
+                            {(() => {
+                              const scenesForCount = ((sceneBatchInfo?.allScenes?.length ?? 0) > 0 ? sceneBatchInfo?.allScenes : scenesData.scenes) || [];
+                              const mainSceneCount = new Set(scenesForCount.map((scene: Scene) => getSceneMainSceneName(scene))).size;
+                              return (
+                                <Badge variant="secondary">
+                                  {mainSceneCount || scenesData.totalMainScenes || 0} 个主场景 / {scenesForCount.length || scenesData.totalScenes || 0} 个状态
+                                </Badge>
+                              );
+                            })()}
                           </CardTitle>
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            onClick={() => generateAllAssetImages('scene')}
-                            disabled={isProcessing || isBatchAssetGenerating || stepConfirmed.assets || getBatchAssetList('scene').length === 0}
-                            title={stepConfirmed.assets ? '素材已确认，无法继续生成' : '一键为场景列表生成图片'}
-                          >
-                            {batchAssetGeneration.type === 'scene' ? (
-                              <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                            ) : (
-                              <Sparkles className="w-4 h-4 mr-2" />
-                            )}
-                            {batchAssetGeneration.type === 'scene'
-                              ? `生成中 ${batchAssetGeneration.current}/${batchAssetGeneration.total}`
-                              : '一键生成场景图'}
-                          </Button>
+                          <div className="flex shrink-0 flex-wrap justify-end gap-2">
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              onClick={() => exportAssetListPackage('scene')}
+                              disabled={exportingAssetListType !== null || getBatchAssetList('scene').length === 0}
+                              title="导出场景 Excel、缩略图和全部原图 ZIP"
+                            >
+                              {exportingAssetListType === 'scene' ? (
+                                <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                              ) : (
+                                <Download className="w-4 h-4 mr-2" />
+                              )}
+                              导出完整素材 ZIP
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              onClick={() => generateAllAssetImages('scene')}
+                              disabled={isProcessing || isBatchAssetGenerating || stepConfirmed.assets || getBatchAssetList('scene').length === 0}
+                              title={stepConfirmed.assets ? '素材已确认，无法继续生成' : '一键为场景列表生成图片'}
+                            >
+                              {batchAssetGeneration.type === 'scene' ? (
+                                <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                              ) : (
+                                <Sparkles className="w-4 h-4 mr-2" />
+                              )}
+                              {batchAssetGeneration.type === 'scene'
+                                ? `生成中 ${batchAssetGeneration.current}/${batchAssetGeneration.total}`
+                                : '一键生成场景图'}
+                            </Button>
+                          </div>
                         </div>
                         {batchAssetGeneration.type === 'scene' && (
                           <CardDescription>
@@ -6965,168 +11129,138 @@ export default function StoryboardGenerator() {
                         )}
                       </CardHeader>
                       <CardContent>
-                        {/* 场景分批提取进度和确认按钮 - 放在列表上方 */}
+                        {/* 场景整体提取进度 */}
                         {sceneBatchInfo && (
                           <div className="mb-4 p-3 bg-blue-50 dark:bg-blue-900/20 rounded-lg space-y-3">
                             <div className="flex items-center justify-between">
                               <span className="text-sm font-medium text-blue-700 dark:text-blue-400">
-                                {extractionStatus.scenes === 'loading' ? (
+                                {extractionStatus.scenes === 'error' ? (
+                                  '场景提取中断，请点击重新提取'
+                                ) : extractionStatus.scenes === 'loading' ? (
                                   <span className="flex items-center gap-2">
                                     <Loader2 className="w-4 h-4 animate-spin" />
-                                    正在提取场景...
+                                    正在自动提取全部场景...
                                   </span>
                                 ) : sceneBatchInfo.hasMore ? (
-                                  '场景提取进度（未完成）'
+                                  '场景正在自动提取全部内容'
                                 ) : (
-                                  '场景提取完成'
+                                  '场景已全部提取完成'
                                 )}
                               </span>
                               <span className="text-sm text-blue-600 dark:text-blue-300">
-                                {sceneBatchInfo.currentBatch} / {sceneBatchInfo.totalBatches} 批
+                                {Math.round((sceneBatchInfo.currentBatch / sceneBatchInfo.totalBatches) * 100)}%
                               </span>
                             </div>
                             <div className="w-full bg-blue-200 dark:bg-blue-800 rounded-full h-2">
-                              <div 
+                              <div
                                 className={`bg-blue-600 h-2 rounded-full transition-all duration-300 ${extractionStatus.scenes === 'loading' ? 'animate-pulse' : ''}`}
                                 style={{ width: `${(sceneBatchInfo.currentBatch / sceneBatchInfo.totalBatches) * 100}%` }}
                               />
                             </div>
                             <div className="text-xs text-gray-600 dark:text-gray-400">
-                              已提取 {sceneBatchInfo.allScenes?.length || 0} / {sceneBatchInfo.sceneMarkers?.length || 0} 个场景
+                              已整理 {sceneBatchInfo.allScenes?.length || 0} 个有效制作状态
+                              {sceneBatchInfo.sceneMarkers?.length > 0 && `（原始识别 ${sceneBatchInfo.sceneMarkers.length} 条场景记录）`}
                             </div>
-                            {sceneBatchInfo.hasMore && extractionStatus.scenes !== 'loading' && (
-                              <Button 
-                                className="w-full" 
-                                onClick={continueSceneExtraction}
-                                disabled={isProcessing}
-                              >
-                                <ArrowRightCircle className="w-4 h-4 mr-2" />
-                                确认并继续提取下一批
-                              </Button>
-                            )}
                           </div>
                         )}
-                        
-                        <div className={`grid grid-cols-1 2xl:grid-cols-2 gap-3 ${expandedSections.scenes ? '' : 'max-h-[400px]'} overflow-x-hidden overflow-y-auto transition-all duration-300`}>
+
+                        <div className={`grid grid-cols-1 gap-3 ${expandedSections.scenes ? '' : 'max-h-[520px]'} overflow-x-hidden overflow-y-auto transition-all duration-300`}>
                           {(() => {
                             const scenesToDisplay = (sceneBatchInfo?.allScenes?.length ?? 0) > 0 ? sceneBatchInfo?.allScenes : scenesData.scenes;
-                            
+
                             if (!scenesToDisplay || scenesToDisplay.length === 0) {
                               return (
-                                <div className="col-span-2 text-center py-8 text-gray-400">
+                                <div className="col-span-full text-center py-8 text-gray-400">
                                   <Users className="w-12 h-12 mx-auto mb-2 opacity-50" />
                                   <p className="text-sm">暂无场景数据</p>
                                 </div>
                               );
                             }
-                            
+
                             return scenesToDisplay.map((scene: Scene, index: number) => {
-                            const assetData = getAssetImages('scene', scene.id);
+                            const mainSceneName = getSceneMainSceneName(scene);
+                            const previousScene = index > 0 ? scenesToDisplay[index - 1] as Scene : null;
+                            const shouldShowMainSceneHeader = !previousScene || getSceneMainSceneName(previousScene) !== mainSceneName;
+                            const siblingScenes = scenesToDisplay.filter((item: Scene) => getSceneMainSceneName(item) === mainSceneName);
+                            const siblingStateCount = siblingScenes.length;
+                            const siblingStateIndex = siblingScenes.findIndex((item: Scene) => item.name === scene.name);
+                            const siblingEpisodeNumbers = Array.from(new Set<number>(
+                              siblingScenes
+                                .flatMap((item: Scene) => getSceneEpisodeNumbers(item))
+                            )).sort((a, b) => a - b);
+                            const assetData = getAssetImages('scene', scene.id, scene.name);
                             const images = assetData?.images || [];
-                            const canAddMore = images.length < MAX_IMAGES_PER_ASSET;
-                            const isGenerating = images.some(img => img.isGenerating);
+                            const sceneReferenceImage = getSceneReferenceImage(scene);
+                            const referenceSceneAsset = scene.referenceSceneName
+                              ? getAssetImages('scene', scene.referenceSceneName)
+                              : undefined;
+                            const referenceSceneIsGenerating = referenceSceneAsset?.images.some(image => image.isGenerating) || false;
+                            const generationAssetId = `scene-${scene.name}`;
+                            const generatingImage = images.find(img => img.isGenerating);
+                            const generationStatus = assetGenerationStatuses[generationAssetId] || generatingImage?.generatingStatus || '';
+                            const isGenerating = Boolean(generationStatus || generatingImage);
+                            const completedImageCount = images.filter(img => Boolean(img.imageUrl) && !img.isGenerating).length;
                             const currentAssetId = assetData?.assetId || `scene-${scene.name}`;
                             const isAssetsConfirmed = stepConfirmed.assets; // 素材是否已确认
-                            
+
                             return (
-                              <div key={`scene-${scene.name}-${index}`} className={`min-w-0 overflow-hidden p-3 border rounded space-y-2 ${isAssetsConfirmed ? 'opacity-75' : ''}`}>
-                                {/* 图片展示区域 - 支持多张图片 */}
-                                <div className="grid grid-cols-3 gap-1.5 min-h-14">
-                                  {images.map((img, imgIdx) => (
-                                    <div key={img.imageId || `scene-${scene.id}-img-${imgIdx}`} className="relative group cursor-pointer overflow-hidden rounded border border-amber-400/10 bg-black/20">
-                                      {img.isGenerating ? (
-                                        <div className="w-full h-14 bg-gray-100 dark:bg-gray-800 rounded flex flex-col items-center justify-center gap-0.5">
-                                          <Loader2 className="size-3 animate-spin text-gray-400" />
-                                          <span className="text-[10px] leading-none text-gray-400">{img.generatingStatus || '生成中'}</span>
-                                        </div>
-                                      ) : img.imageUrl ? (
-                                        <>
-                                          <img
-                                            src={img.imageUrl}
-                                            alt={scene.name}
-                                            className="w-full h-14 object-cover rounded hover:opacity-80 transition-opacity"
-                                            onClick={() => openImagePreview(img.imageUrl, scene.name, 'scene')}
-                                          />
-                                          <div className={`absolute top-1 right-1 grid grid-cols-2 gap-0.5 transition-opacity ${isAssetsConfirmed ? 'hidden' : 'opacity-0 group-hover:opacity-100'}`}>
-                                            <Button
-                                              size="icon"
-                                              variant="secondary"
-                                              className="h-5 w-5 min-w-0 p-0"
-                                              title="预览"
-                                              onClick={(e) => {
-                                                e.stopPropagation();
-                                                openImagePreview(img.imageUrl, scene.name, 'scene');
-                                              }}
-                                            >
-                                              <Eye className="size-2.5" />
-                                            </Button>
-                                            <Button
-                                              size="icon"
-                                              variant="secondary"
-                                              className="h-5 w-5 min-w-0 p-0"
-                                              title="以此图为参考生成新图"
-                                              disabled={isAssetsConfirmed}
-                                              onClick={(e) => {
-                                                e.stopPropagation();
-                                                if (!isAssetsConfirmed) generateImageFromImage('scene', scene, img.imageUrl);
-                                              }}
-                                            >
-                                              <Copy className="size-2.5" />
-                                            </Button>
-                                            <Button
-                                              size="icon"
-                                              variant="secondary"
-                                              className="h-5 w-5 min-w-0 p-0"
-                                              onClick={(e) => {
-                                                e.stopPropagation();
-                                                downloadImage(img.imageUrl, scene.name);
-                                              }}
-                                            >
-                                              <Download className="size-2.5" />
-                                            </Button>
-                                            <Button
-                                              size="icon"
-                                              variant="destructive"
-                                              className="h-5 w-5 min-w-0 p-0"
-                                              disabled={isAssetsConfirmed}
-                                              onClick={(e) => {
-                                                e.stopPropagation();
-                                                if (!isAssetsConfirmed) removeSelectedImage(currentAssetId, img.imageId);
-                                              }}
-                                              title={isAssetsConfirmed ? "素材已确认，无法删除" : "取消选中（图片仍在图片库中）"}
-                                            >
-                                              <Trash2 className="size-2.5" />
-                                            </Button>
-                                          </div>
-                                          {img.isCustom && (
-                                            <Badge className="absolute bottom-0 left-0 text-xs" variant="secondary">
-                                              自
-                                            </Badge>
-                                          )}
-                                        </>
-                                      ) : (
-                                        <div className="w-full h-14 bg-gray-100 dark:bg-gray-800 rounded flex items-center justify-center">
-                                          <span className="text-xs text-gray-400">图片加载中</span>
-                                        </div>
-                                      )}
+                              <Fragment key={`scene-${scene.id}-${scene.name}-${index}`}>
+                              {shouldShowMainSceneHeader && (
+                                <div className="col-span-full rounded border border-amber-400/25 bg-amber-500/10 px-3 py-2">
+                                  <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
+                                    <div className="min-w-0">
+                                      <div className="flex min-w-0 flex-wrap items-center gap-2">
+                                        <span className="text-sm font-semibold text-amber-100" title={normalizeDisplayText(mainSceneName)}>
+                                          {compactDisplayText(mainSceneName, 34)}
+                                        </span>
+                                        <Badge variant="outline" className="border-amber-400/35 text-amber-100">
+                                          主场景
+                                        </Badge>
+                                      </div>
+                                      <p className="mt-1 text-xs text-amber-100/65">
+                                        下含 {siblingStateCount} 个有效制作状态
+                                        {siblingEpisodeNumbers.length > 0 && `，关联 ${siblingEpisodeNumbers.slice(0, 5).map(item => `第${item}集`).join('、')}${siblingEpisodeNumbers.length > 5 ? ` 等${siblingEpisodeNumbers.length}集` : ''}`}
+                                      </p>
                                     </div>
-                                  ))}
-                                  {/* 添加图片按钮 */}
-                                  {canAddMore && !isGenerating && !isAssetsConfirmed && (
-                                    <div className="col-span-full grid grid-cols-3 gap-1.5">
+                                  </div>
+                                </div>
+                              )}
+                              <div key={`scene-${scene.name}-${index}`} className={`min-w-0 overflow-hidden rounded-md border border-amber-400/20 bg-black/15 p-3 ${isAssetsConfirmed ? 'opacity-75' : ''}`}>
+                                <div className="grid min-w-0 gap-4 lg:grid-cols-[minmax(320px,44%)_minmax(0,1fr)] lg:items-start">
+                                <div className="min-w-0 space-y-2">
+                                <AssetImageStack
+                                  images={images}
+                                  name={scene.name}
+                                  type="scene"
+                                  generationStatus={generationStatus}
+                                  isGenerating={isGenerating}
+                                  isAssetsConfirmed={isAssetsConfirmed}
+                                  onOpenChooser={() => setAssetImageChooserTarget({ assetId: currentAssetId, type: 'scene', name: scene.name })}
+                                  onPreview={image => openImagePreview(image.imageUrl, scene.name, 'scene')}
+                                  onGenerateFromImage={image => generateImageFromImage('scene', scene, image.imageUrl)}
+                                  onDownload={image => downloadImage(image.imageUrl, scene.name)}
+                                  onRemove={image => removeSelectedImage(currentAssetId, image.imageId)}
+                                />
+                                <div className="flex min-h-8 items-center justify-between gap-2">
+                                  <span className="text-xs text-amber-100/55">
+                                    {isGenerating ? `处理中 · 候选图 ${completedImageCount}/${MAX_IMAGES_PER_ASSET}` : `候选图 ${completedImageCount}/${MAX_IMAGES_PER_ASSET}`}
+                                  </span>
+                                  {!isGenerating && !isAssetsConfirmed && (
+                                    <div className="flex items-center gap-1 rounded-md border border-amber-400/15 bg-black/20 p-1">
                                       <Button
-                                        size="sm"
+                                        size="icon"
                                         variant="ghost"
-                                        className="h-10 min-w-0 px-0"
+                                        className="h-7 w-7 min-w-0 p-0 text-amber-100/80 hover:bg-amber-400/15 hover:text-amber-50"
                                         onClick={() => generateAssetImage('scene', scene)}
                                         title="AI生成图片"
+                                        aria-label="生成场景图片"
                                       >
-                                        <ImageIcon className="size-4" />
+                                        <Sparkles className="size-3.5" />
                                       </Button>
                                       <Button
-                                        size="sm"
+                                        size="icon"
                                         variant="ghost"
-                                        className="h-10 min-w-0 px-0"
+                                        className="h-7 w-7 min-w-0 p-0 text-amber-100/80 hover:bg-amber-400/15 hover:text-amber-50"
                                         onClick={() => {
                                           const input = document.createElement('input');
                                           input.type = 'file';
@@ -7138,25 +11272,25 @@ export default function StoryboardGenerator() {
                                           input.click();
                                         }}
                                         title="上传本地图片"
+                                        aria-label="上传场景图片"
                                       >
-                                        <ImagePlus className="size-4" />
+                                        <ImagePlus className="size-3.5" />
                                       </Button>
                                       <Button
-                                        size="sm"
+                                        size="icon"
                                         variant="ghost"
-                                        className="h-10 min-w-0 px-0"
+                                        className="h-7 w-7 min-w-0 p-0 text-amber-100/80 hover:bg-amber-400/15 hover:text-amber-50"
                                         onClick={() => openImageLibrary('scene', scene.id, scene.name)}
                                         title="从图片库选择"
+                                        aria-label="从图片库选择场景图片"
                                       >
-                                        <FolderOpen className="size-4" />
+                                        <FolderOpen className="size-3.5" />
                                       </Button>
                                     </div>
                                   )}
                                 </div>
-                                {/* 图片数量提示 */}
-                                {images.length > 0 && (
-                                  <p className="text-xs text-gray-500">{images.length}/{MAX_IMAGES_PER_ASSET} 张</p>
-                                )}
+                                </div>
+                                <div className="min-w-0 space-y-3">
                                 <div className="flex min-w-0 max-w-full flex-wrap items-center gap-2 overflow-hidden">
                                   <span
                                     className="min-w-0 max-w-full break-words text-sm font-medium leading-5 [overflow-wrap:anywhere]"
@@ -7164,8 +11298,61 @@ export default function StoryboardGenerator() {
                                   >
                                     {compactDisplayText(scene.name, 28)}
                                   </span>
+                                  <Badge variant="outline" className="border-amber-400/30 text-amber-100/85">
+                                    状态 {Math.max(1, siblingStateIndex + 1)}/{siblingStateCount}
+                                  </Badge>
                                   <CompactBadge text={scene.type} maxChars={8} />
                                   <CompactBadge text={scene.importance} maxChars={8} variant="default" />
+                                  {scene.stateLabel && (
+                                    <CompactBadge text={scene.stateLabel} maxChars={10} variant="secondary" />
+                                  )}
+                                </div>
+                                <div className="flex min-w-0 flex-wrap items-center gap-1 text-xs text-amber-100/75">
+                                  <span className="shrink-0">关联集数：</span>
+                                  <span className="min-w-0 truncate" title={normalizeDisplayText(formatSceneEpisodeText(scene))}>
+                                    {compactDisplayText(formatSceneEpisodeText(scene), 42)}
+                                  </span>
+                                </div>
+                                {scene.occurrences && scene.occurrences.length > 0 && (
+                                  <div className="flex min-w-0 flex-wrap gap-1">
+                                    {scene.occurrences.slice(0, 2).map((occurrence, occurrenceIndex) => (
+                                      <CompactBadge
+                                        key={`scene-${scene.id}-occurrence-${occurrenceIndex}`}
+                                        text={`${occurrence.episodeLabel || '未标注'} ${occurrence.heading || scene.name}`}
+                                        maxChars={28}
+                                        variant="outline"
+                                      />
+                                    ))}
+                                    {scene.occurrences.length > 2 && (
+                                      <span className="text-xs text-gray-400">+{scene.occurrences.length - 2}</span>
+                                    )}
+                                  </div>
+                                )}
+                                {scene.referenceSceneName && (
+                                  <p
+                                    className={`truncate text-xs ${sceneReferenceImage ? 'text-emerald-300/90' : 'text-amber-200/75'}`}
+                                    title={`基准图生图参考：${normalizeDisplayText(scene.referenceSceneName)}；${sceneReferenceImage ? '基准图已关联' : referenceSceneIsGenerating ? '基准图正在生成' : '需要先生成基准图'}`}
+                                  >
+                                    基准图生图参考：{compactDisplayText(scene.referenceSceneName, 26)} · {sceneReferenceImage ? '已关联' : referenceSceneIsGenerating ? '生成中' : '待生成'}
+                                  </p>
+                                )}
+                                <div className="rounded border border-amber-400/15 bg-amber-500/[0.04] px-2.5 py-2 text-xs leading-5 text-amber-100/70">
+                                  <p>
+                                    <span className="text-amber-200/90">状态依据：</span>
+                                    {scene.stateReasonLabel || getSceneStateReasonLabel(scene.stateReason)}
+                                  </p>
+                                  {scene.stateChangeEvidence && (
+                                    <p className="line-clamp-2 break-words [overflow-wrap:anywhere]" title={normalizeDisplayText(scene.stateChangeEvidence)}>
+                                      <span className="text-amber-200/90">剧本证据：</span>
+                                      {compactDisplayText(scene.stateChangeEvidence, 76)}
+                                    </p>
+                                  )}
+                                  {scene.stateVisualDifference && scene.stateReason !== 'baseline' && (
+                                    <p className="line-clamp-2 break-words [overflow-wrap:anywhere]" title={normalizeDisplayText(scene.stateVisualDifference)}>
+                                      <span className="text-amber-200/90">画面变化：</span>
+                                      {compactDisplayText(scene.stateVisualDifference, 76)}
+                                    </p>
+                                  )}
                                 </div>
                                 {/* 场景描述 - 可编辑 */}
                                 {editingSceneId === scene.id ? (
@@ -7184,8 +11371,8 @@ export default function StoryboardGenerator() {
                                         onClick={() => {
                                           // 保存修改
                                           if (scenesData) {
-                                            const updatedScenes = scenesData.scenes.map((s: Scene) => 
-                                              s.id === scene.id 
+                                            const updatedScenes = scenesData.scenes.map((s: Scene) =>
+                                              s.id === scene.id
                                                 ? { ...s, description: editingSceneDescription }
                                                 : s
                                             );
@@ -7227,7 +11414,7 @@ export default function StoryboardGenerator() {
                                     </div>
                                   </div>
                                 ) : (
-                                  <div 
+                                  <div
                                     className="group min-w-0 cursor-pointer"
                                     onClick={() => {
                                       setEditingSceneId(scene.id);
@@ -7235,7 +11422,7 @@ export default function StoryboardGenerator() {
                                     }}
                                   >
                                     <p
-                                      className="line-clamp-2 break-words text-xs leading-5 text-gray-600 [overflow-wrap:anywhere] group-hover:text-blue-600 dark:text-gray-400 dark:group-hover:text-blue-400"
+                                      className="line-clamp-3 break-words text-xs leading-5 text-gray-600 [overflow-wrap:anywhere] group-hover:text-blue-600 dark:text-gray-400 dark:group-hover:text-blue-400"
                                       title={normalizeDisplayText(scene.description)}
                                     >
                                       {compactDisplayText(scene.description || '点击添加场景描述...', 92)}
@@ -7274,14 +11461,17 @@ export default function StoryboardGenerator() {
                                     </div>
                                   </div>
                                 )}
+                                </div>
+                                </div>
                               </div>
+                              </Fragment>
                             );
                           });
                           })()}
                         </div>
                         <div className="text-center mt-2">
                           <Button variant="ghost" size="sm" className="text-xs text-gray-500" onClick={() => toggleSection('scenes')}>
-                            {expandedSections.scenes ? '收起' : '展开全部'} {sceneBatchInfo?.allScenes?.length || scenesData?.scenes?.length || 0} 个场景
+                            {expandedSections.scenes ? '收起' : '展开全部'} {sceneBatchInfo?.allScenes?.length || scenesData?.scenes?.length || 0} 个状态
                             <ChevronDown className={`w-3 h-3 ml-1 transition-transform ${expandedSections.scenes ? 'rotate-180' : ''}`} />
                           </Button>
                         </div>
@@ -7290,7 +11480,7 @@ export default function StoryboardGenerator() {
                   )}
 
                   {/* Characters */}
-                  {charactersData && (
+	                  {canShowExtractionResults && charactersData && (
                     <Card>
                       <CardHeader>
                         <div className="flex items-center justify-between gap-3">
@@ -7299,22 +11489,38 @@ export default function StoryboardGenerator() {
                             人物列表
                             <Badge variant="secondary">{characterBatchInfo?.characterMarkers?.length || charactersData.totalCharacters} 个人物</Badge>
                           </CardTitle>
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            onClick={() => generateAllAssetImages('character')}
-                            disabled={isProcessing || isBatchAssetGenerating || stepConfirmed.assets || getBatchAssetList('character').length === 0}
-                            title={stepConfirmed.assets ? '素材已确认，无法继续生成' : '一键为人物列表生成图片'}
-                          >
-                            {batchAssetGeneration.type === 'character' ? (
-                              <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                            ) : (
-                              <Sparkles className="w-4 h-4 mr-2" />
-                            )}
-                            {batchAssetGeneration.type === 'character'
-                              ? `生成中 ${batchAssetGeneration.current}/${batchAssetGeneration.total}`
-                              : '一键生成人物图'}
-                          </Button>
+                          <div className="flex shrink-0 flex-wrap justify-end gap-2">
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              onClick={() => exportAssetListPackage('character')}
+                              disabled={exportingAssetListType !== null || getBatchAssetList('character').length === 0}
+                              title="导出人物 Excel、缩略图和全部原图 ZIP"
+                            >
+                              {exportingAssetListType === 'character' ? (
+                                <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                              ) : (
+                                <Download className="w-4 h-4 mr-2" />
+                              )}
+                              导出完整素材 ZIP
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              onClick={() => generateAllAssetImages('character')}
+                              disabled={isProcessing || isBatchAssetGenerating || stepConfirmed.assets || getBatchAssetList('character').length === 0}
+                              title={stepConfirmed.assets ? '素材已确认，无法继续生成' : '只批量生成人物正脸候选图，造型需确认正脸后再生成'}
+                            >
+                              {batchAssetGeneration.type === 'character' ? (
+                                <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                              ) : (
+                                <Sparkles className="w-4 h-4 mr-2" />
+                              )}
+                              {batchAssetGeneration.type === 'character'
+                                ? `生成中 ${batchAssetGeneration.current}/${batchAssetGeneration.total}`
+                                : '一键生成人物正脸'}
+                            </Button>
+                          </div>
                         </div>
                         {batchAssetGeneration.type === 'character' && (
                           <CardDescription>
@@ -7323,28 +11529,30 @@ export default function StoryboardGenerator() {
                         )}
                       </CardHeader>
                       <CardContent>
-                        {/* 人物分批提取进度和确认按钮 - 放在列表上方 */}
+                        {/* 人物整体提取进度 */}
                         {characterBatchInfo && (
                           <div className="mb-4 p-3 bg-purple-50 dark:bg-purple-900/20 rounded-lg space-y-3">
                             <div className="flex items-center justify-between">
                               <span className="text-sm font-medium text-purple-700 dark:text-purple-400">
-                                {extractionStatus.characters === 'loading' ? (
+                                {extractionStatus.characters === 'error' ? (
+                                  '人物提取中断，请点击重新提取'
+                                ) : extractionStatus.characters === 'loading' ? (
                                   <span className="flex items-center gap-2">
                                     <Loader2 className="w-4 h-4 animate-spin" />
-                                    正在提取人物...
+                                    正在自动提取全部人物...
                                   </span>
                                 ) : characterBatchInfo.hasMore ? (
-                                  '人物提取进度（未完成）'
+                                  '人物正在自动提取全部内容'
                                 ) : (
-                                  '人物提取完成'
+                                  '人物已全部提取完成'
                                 )}
                               </span>
                               <span className="text-sm text-purple-600 dark:text-purple-300">
-                                {characterBatchInfo.currentBatch} / {characterBatchInfo.totalBatches} 批
+                                {Math.round((characterBatchInfo.currentBatch / characterBatchInfo.totalBatches) * 100)}%
                               </span>
                             </div>
                             <div className="w-full bg-purple-200 dark:bg-purple-800 rounded-full h-2">
-                              <div 
+                              <div
                                 className={`bg-purple-600 h-2 rounded-full transition-all duration-300 ${extractionStatus.characters === 'loading' ? 'animate-pulse' : ''}`}
                                 style={{ width: `${(characterBatchInfo.currentBatch / characterBatchInfo.totalBatches) * 100}%` }}
                               />
@@ -7352,25 +11560,15 @@ export default function StoryboardGenerator() {
                             <div className="text-xs text-gray-600 dark:text-gray-400">
                               已提取 {characterBatchInfo.allCharacters?.length || 0} / {characterBatchInfo.characterMarkers?.length || 0} 个人物
                             </div>
-                            {characterBatchInfo.hasMore && extractionStatus.characters !== 'loading' && (
-                              <Button 
-                                className="w-full" 
-                                onClick={continueCharacterExtraction}
-                                disabled={isProcessing}
-                              >
-                                <ArrowRightCircle className="w-4 h-4 mr-2" />
-                                确认并继续提取下一批
-                              </Button>
-                            )}
                           </div>
                         )}
-                        
+
                         <div className={`space-y-2 ${expandedSections.characters ? '' : 'max-h-[400px]'} overflow-x-hidden overflow-y-auto transition-all duration-300`}>
                           {(() => {
                             const displayCharacters = (charactersData?.characters && charactersData.characters.length > 0)
                               ? charactersData.characters
                               : (characterBatchInfo?.allCharacters || []);
-                            
+
                             if (displayCharacters.length === 0) {
                               return (
                                 <div className="p-4 text-center text-gray-500">
@@ -7382,118 +11580,63 @@ export default function StoryboardGenerator() {
                                 </div>
                               );
                             }
-                            
+
                             return displayCharacters.map((char: Character, index: number) => {
-                            const assetData = getAssetImages('character', char.id);
+                            const assetData = getAssetImages('character', char.id, char.name);
                             const images = assetData?.images || [];
-                            const canAddMore = images.length < MAX_IMAGES_PER_ASSET;
-                            const isGenerating = images.some(img => img.isGenerating);
+                            const generationAssetId = `character-${char.name}`;
+                            const generatingImage = images.find(img => img.isGenerating);
+                            const generationStatus = assetGenerationStatuses[generationAssetId] || generatingImage?.generatingStatus || '';
+                            const isGenerating = Boolean(generationStatus || generatingImage);
+                            const completedImageCount = images.filter(img => Boolean(img.imageUrl) && !img.isGenerating).length;
+                            const primaryFaceImage = images.find(img => Boolean(img.imageUrl) && !img.isGenerating);
+                            const confirmedFaceImageUrl = getCharacterFaceReferenceImage(char);
+                            const isFaceIdentityConfirmed = Boolean(
+                              confirmedFaceImageUrl && primaryFaceImage?.imageUrl === confirmedFaceImageUrl
+                            );
                             const currentAssetId = assetData?.assetId || `character-${char.name}`;
                             const isAssetsConfirmed = stepConfirmed.assets; // 素材是否已确认
                             const displayAge = isUsefulText(char.age) ? (char.age.includes('岁') ? char.age : `${char.age}岁`) : '年龄未知';
                             const displayGender = isUsefulText(char.gender) ? char.gender : '性别待定';
-                            
+
                             return (
-                              <div key={`char-${char.name}-${index}`} className={`min-w-0 overflow-hidden p-3 border rounded-lg ${isAssetsConfirmed ? 'opacity-75' : ''}`}>
-                                <div className="flex min-w-0 gap-3">
-                                  {/* 人物图片区域 - 支持多张 */}
-                                  <div className="shrink-0">
-                                    <div className="grid grid-cols-2 gap-1 w-[104px]">
-                                      {images.map((img, imgIdx) => (
-                                        <div key={img.imageId || `char-${char.id}-img-${imgIdx}`} className="relative group cursor-pointer overflow-hidden rounded">
-                                          {img.isGenerating ? (
-                                            <div className="w-12 h-12 bg-gray-100 dark:bg-gray-800 rounded flex flex-col items-center justify-center gap-0.5">
-                                              <Loader2 className="w-3 h-3 animate-spin text-gray-400" />
-                                              <span className="text-[10px] leading-none text-gray-400">{img.generatingStatus || '生成中'}</span>
-                                            </div>
-                                          ) : img.imageUrl ? (
-                                            <>
-                                              <img
-                                                src={img.imageUrl}
-                                                alt={char.name}
-                                                className="w-12 h-12 object-cover rounded hover:opacity-80 transition-opacity"
-                                                onClick={() => openImagePreview(img.imageUrl, char.name, 'character')}
-                                              />
-                                              <div className={`absolute top-1 right-1 grid grid-cols-2 gap-0.5 transition-opacity ${isAssetsConfirmed ? 'hidden' : 'opacity-0 group-hover:opacity-100'}`}>
-                                                <Button
-                                                  size="icon"
-                                                  variant="secondary"
-                                                  className="h-5 w-5 min-w-0 p-0"
-                                                  title="预览"
-                                                  onClick={(e) => {
-                                                    e.stopPropagation();
-                                                    openImagePreview(img.imageUrl, char.name, 'character');
-                                                  }}
-                                                >
-                                                  <Eye className="size-2.5" />
-                                                </Button>
-                                                <Button
-                                                  size="icon"
-                                                  variant="secondary"
-                                                  className="h-5 w-5 min-w-0 p-0"
-                                                  title="以此图为参考生成新图"
-                                                  disabled={isAssetsConfirmed}
-                                                  onClick={(e) => {
-                                                    e.stopPropagation();
-                                                    if (!isAssetsConfirmed) generateImageFromImage('character', char, img.imageUrl);
-                                                  }}
-                                                >
-                                                  <Copy className="size-2.5" />
-                                                </Button>
-                                                <Button
-                                                  size="icon"
-                                                  variant="secondary"
-                                                  className="h-5 w-5 min-w-0 p-0"
-                                                  onClick={(e) => {
-                                                    e.stopPropagation();
-                                                    downloadImage(img.imageUrl, char.name);
-                                                  }}
-                                                >
-                                                  <Download className="size-2.5" />
-                                                </Button>
-                                                <Button
-                                                  size="icon"
-                                                  variant="destructive"
-                                                  className="h-5 w-5 min-w-0 p-0"
-                                                  disabled={isAssetsConfirmed}
-                                                  onClick={(e) => {
-                                                    e.stopPropagation();
-                                                    if (!isAssetsConfirmed) removeSelectedImage(currentAssetId, img.imageId);
-                                                  }}
-                                                  title={isAssetsConfirmed ? "素材已确认，无法删除" : "取消选中（图片仍在图片库中）"}
-                                                >
-                                                  <Trash2 className="size-2.5" />
-                                                </Button>
-                                              </div>
-                                              {img.isCustom && (
-                                                <Badge className="absolute bottom-0 left-0 text-xs" variant="secondary">
-                                                  自
-                                                </Badge>
-                                              )}
-                                            </>
-                                          ) : (
-                                            <div className="w-12 h-12 bg-gray-100 dark:bg-gray-800 rounded flex items-center justify-center">
-                                              <span className="text-xs text-gray-400">图片加载中</span>
-                                            </div>
-                                          )}
-                                        </div>
-                                      ))}
-                                      {/* 添加按钮 */}
-                                      {canAddMore && images.length < 4 && !isGenerating && !isAssetsConfirmed && (
-                                        <div className="flex gap-0.5">
+                              <div key={`char-${char.name}-${index}`} className={`min-w-0 overflow-hidden rounded-md border border-amber-400/20 bg-black/15 p-4 ${isAssetsConfirmed ? 'opacity-75' : ''}`}>
+                                <div className="grid min-w-0 gap-4 md:grid-cols-[220px_minmax(0,1fr)] xl:grid-cols-[240px_minmax(0,1fr)]">
+                                  {/* 人物图片区域 - 主图叠放选择 */}
+                                  <div className="mx-auto w-full max-w-[280px] md:mx-0 md:max-w-none">
+                                    <AssetImageStack
+                                      images={images}
+                                      name={char.name}
+                                      type="character"
+                                      generationStatus={generationStatus}
+                                      isGenerating={isGenerating}
+                                      isAssetsConfirmed={isAssetsConfirmed}
+                                      onOpenChooser={() => setAssetImageChooserTarget({ assetId: currentAssetId, type: 'character', name: char.name })}
+                                      onPreview={image => openImagePreview(image.imageUrl, char.name, 'character')}
+                                      onGenerateFromImage={image => generateImageFromImage('character', char, image.imageUrl)}
+                                      onDownload={image => downloadImage(image.imageUrl, char.name)}
+                                      onRemove={image => removeSelectedImage(currentAssetId, image.imageId)}
+                                    />
+                                    <div className="mt-2 flex min-h-8 items-center justify-between gap-2">
+                                      <span className="text-xs text-amber-100/55">
+                                        {isGenerating ? `处理中 · ${completedImageCount}/${MAX_IMAGES_PER_ASSET} 张` : `${completedImageCount}/${MAX_IMAGES_PER_ASSET} 张`}
+                                      </span>
+                                      {!isGenerating && !isAssetsConfirmed && (
+                                        <div className="flex items-center gap-1 rounded-md border border-amber-400/15 bg-black/20 p-1">
                                           <Button
-                                            size="sm"
+                                            size="icon"
                                             variant="ghost"
-                                            className="w-6 h-12 px-0"
+                                            className="h-7 w-7 min-w-0 p-0 text-amber-100/80 hover:bg-amber-400/15 hover:text-amber-50"
                                             onClick={() => generateAssetImage('character', char)}
-                                            title="AI生成图片"
+                                            title="文生图：生成人物正脸候选图"
+                                            aria-label="生成人物正脸候选图"
                                           >
-                                            <ImageIcon className="size-4" />
+                                            <Sparkles className="size-3.5" />
                                           </Button>
                                           <Button
-                                            size="sm"
+                                            size="icon"
                                             variant="ghost"
-                                            className="w-6 h-12 px-0"
+                                            className="h-7 w-7 min-w-0 p-0 text-amber-100/80 hover:bg-amber-400/15 hover:text-amber-50"
                                             onClick={() => {
                                               const input = document.createElement('input');
                                               input.type = 'file';
@@ -7505,24 +11648,55 @@ export default function StoryboardGenerator() {
                                               input.click();
                                             }}
                                             title="上传本地图片"
+                                            aria-label="上传人物图片"
                                           >
-                                            <ImagePlus className="size-4" />
+                                            <ImagePlus className="size-3.5" />
                                           </Button>
                                           <Button
-                                            size="sm"
+                                            size="icon"
                                             variant="ghost"
-                                            className="w-6 h-12 px-0"
+                                            className="h-7 w-7 min-w-0 p-0 text-amber-100/80 hover:bg-amber-400/15 hover:text-amber-50"
                                             onClick={() => openImageLibrary('character', char.id, char.name)}
                                             title="从图片库选择"
+                                            aria-label="从图片库选择人物图片"
                                           >
-                                            <FolderOpen className="size-4" />
+                                            <FolderOpen className="size-3.5" />
                                           </Button>
                                         </div>
                                       )}
                                     </div>
-                                    {images.length > 0 && (
-                                      <p className="text-xs text-gray-500 text-center mt-1">{images.length}/{MAX_IMAGES_PER_ASSET}</p>
-                                    )}
+                                    <div className={`mt-2 rounded-md border px-2.5 py-2 text-xs ${
+                                      isFaceIdentityConfirmed
+                                        ? 'border-emerald-400/30 bg-emerald-500/10 text-emerald-200'
+                                        : 'border-amber-400/25 bg-amber-500/10 text-amber-100/75'
+                                    }`}>
+                                      {isFaceIdentityConfirmed ? (
+                                        <div className="flex items-center gap-2">
+                                          <CheckCircle2 className="size-4 shrink-0 text-emerald-300" />
+                                          <span>正脸身份基准已确认，造型图生图已解锁</span>
+                                        </div>
+                                      ) : primaryFaceImage ? (
+                                        <div className="space-y-2">
+                                          <div className="flex items-start gap-2">
+                                            <AlertTriangle className="mt-0.5 size-4 shrink-0 text-amber-300" />
+                                            <span>请先确认当前正脸主图；确认前，所有时期、状态、变身和四视图均锁定。</span>
+                                          </div>
+                                          <Button
+                                            size="sm"
+                                            className="h-7 w-full bg-amber-400 text-black hover:bg-amber-300"
+                                            onClick={() => confirmCharacterFaceIdentity(char, primaryFaceImage.imageUrl)}
+                                          >
+                                            <Check className="mr-1.5 size-3.5" />
+                                            确认此图为身份基准
+                                          </Button>
+                                        </div>
+                                      ) : (
+                                        <div className="flex items-start gap-2">
+                                          <AlertCircle className="mt-0.5 size-4 shrink-0 text-amber-300" />
+                                          <span>先生成或上传人物正脸，其他一切变体暂不可生成。</span>
+                                        </div>
+                                      )}
+                                    </div>
                                   </div>
                                   {/* 人物信息 */}
                                   <div className="min-w-0 flex-1 overflow-hidden">
@@ -7542,7 +11716,7 @@ export default function StoryboardGenerator() {
                                           value={editingCharacterAppearance}
                                           onChange={(e) => setEditingCharacterAppearance(e.target.value)}
                                           className="text-xs min-h-[60px] resize-none"
-                                          placeholder="输入人物外貌描述..."
+                                          placeholder="输入正脸近景描述（发型、五官、肤色、皮肤质感）..."
                                         />
                                         <div className="flex gap-1">
                                           <Button
@@ -7550,12 +11724,12 @@ export default function StoryboardGenerator() {
                                             variant="default"
                                             className="h-6 text-xs"
                                             onClick={() => {
-                                              // 保存修改 - 使用函数式更新避免闭包过期
+                                              // 保存正脸描述；身体档案独立保留，不参与近景图。
                                               if (charactersData && Array.isArray(charactersData.characters)) {
                                                 setCharactersData((prev: any) => {
                                                   if (!prev || !Array.isArray(prev.characters)) return prev;
-                                                  const updatedCharacters = prev.characters.map((c: Character) => 
-                                                    c.id === char.id 
+                                                  const updatedCharacters = prev.characters.map((c: Character) =>
+                                                    c.id === char.id
                                                       ? { ...c, appearance: editingCharacterAppearance }
                                                       : c
                                                   );
@@ -7592,8 +11766,8 @@ export default function StoryboardGenerator() {
                                           setEditingCharacterAppearance(char.appearance || '');
                                         }}
                                       >
-                                        {/* 人物描述标签 */}
-                                        <div className="text-xs text-gray-500 mb-1 font-medium">人物描述：</div>
+                                        {/* 正脸近景描述标签 */}
+                                        <div className="text-xs text-gray-500 mb-1 font-medium">正脸近景描述：</div>
                                         <p
                                           className="line-clamp-3 break-words text-xs leading-5 text-gray-600 [overflow-wrap:anywhere] group-hover:text-blue-600 dark:text-gray-400 dark:group-hover:text-blue-400"
                                           title={normalizeDisplayText(char.appearance)}
@@ -7642,33 +11816,131 @@ export default function StoryboardGenerator() {
                                         </div>
                                       </div>
                                     )}
+                                    {/* 全身体态档案 */}
+                                    {hasCharacterBodyProfile(char.bodyProfile) && (
+                                      <div className="mt-2 min-w-0 overflow-hidden rounded border border-amber-400/20 bg-amber-400/[0.04] p-2">
+                                        <div className="flex min-w-0 flex-wrap items-center justify-between gap-1">
+                                          <span className="text-xs font-medium text-amber-100/75">身体档案（全身图使用）</span>
+                                          <span className="text-[10px] text-amber-100/40">正脸近景不读取</span>
+                                        </div>
+                                        <p
+                                          className="mt-1 line-clamp-2 break-words text-xs leading-5 text-gray-500 [overflow-wrap:anywhere]"
+                                          title={formatCharacterBodyProfile(char.bodyProfile)}
+                                        >
+                                          {compactDisplayText(formatCharacterBodyProfile(char.bodyProfile), 110)}
+                                        </p>
+                                      </div>
+                                    )}
                                     {/* 造型列表 */}
                                     {char.looks && char.looks.length > 0 && (
-                                      <div className="mt-2">
-                                        <span className="text-xs text-gray-500 font-medium">造型变化：</span>
-                                        <div className="mt-1 space-y-1 max-h-[200px] overflow-y-auto">
-                                          {char.looks.map((look: any, lookIndex: number) => (
-                                            <div key={look.id || lookIndex} className="min-w-0 overflow-hidden rounded border bg-purple-50 p-2 dark:bg-purple-900/20">
+                                      <div className="mt-4 border-t border-amber-400/20 pt-4">
+                                        <div className="flex flex-wrap items-start justify-between gap-3">
+                                          <div>
+                                            <div className="flex items-center gap-2 text-sm font-semibold text-amber-100">
+                                              <Layers3 className="size-4 text-amber-300" />
+                                              {char.name}的造型时间线
+                                            </div>
+                                            <p className="mt-1 text-[11px] text-amber-100/45">全部造型直接展开；按正脸与父级造型依次解锁生成</p>
+                                            {char.timelineAudit && (
+                                              <div className={`mt-1.5 inline-flex max-w-full items-center gap-1 rounded border px-1.5 py-0.5 text-[10px] ${
+                                                char.timelineAudit.status === 'complete'
+                                                  ? 'border-emerald-300/25 bg-emerald-500/10 text-emerald-100/80'
+                                                  : 'border-red-300/30 bg-red-500/10 text-red-100/85'
+                                              }`}>
+                                                {char.timelineAudit.status === 'complete' ? (
+                                                  <CheckCircle2 className="size-3 shrink-0" />
+                                                ) : (
+                                                  <AlertCircle className="size-3 shrink-0" />
+                                                )}
+                                                <span className="truncate">
+                                                  全文时间线已核验 {char.timelineAudit.coveredCount}/{char.timelineAudit.requiredCount}
+                                                  {char.timelineAudit.fallbackAddedCount > 0
+                                                    ? `，含 ${char.timelineAudit.fallbackAddedCount} 项保守补全`
+                                                    : ''}
+                                                </span>
+                                              </div>
+                                            )}
+                                          </div>
+                                          <div className="flex max-w-full flex-wrap justify-end gap-1 text-[10px]">
+                                            <span className="rounded border border-emerald-300/35 bg-emerald-500/10 px-1.5 py-0.5 text-emerald-100">P1 身份基础</span>
+                                            <span className="rounded border border-sky-300/35 bg-sky-500/10 px-1.5 py-0.5 text-sky-100">P2 年龄时期</span>
+                                            <span className="rounded border border-amber-300/35 bg-amber-500/10 px-1.5 py-0.5 text-amber-100">P3 场景换装</span>
+                                            <span className="rounded border border-orange-300/35 bg-orange-500/10 px-1.5 py-0.5 text-orange-100">P4 身体状态</span>
+                                            <span className="rounded border border-fuchsia-300/35 bg-fuchsia-500/10 px-1.5 py-0.5 text-fuchsia-100">P5 特殊/复合</span>
+                                          </div>
+                                        </div>
+                                        <div className="mt-3 space-y-3">
+                                          {char.looks.map((look: CharacterLook, lookIndex: number) => {
+                                            const lookReference = getCharacterLookReference(char, look);
+                                            const lookLocked = !lookReference.imageUrl;
+                                            const fourViewLocked = !isFaceIdentityConfirmed || !look.imageUrl || Boolean(look.identityNeedsReview);
+                                            const lookBodyProfileText = formatCharacterBodyProfile(look.bodyProfile || char.bodyProfile);
+                                            const priorityStyle = getCharacterLookPriorityStyle(look);
+                                            return (
+                                            <div
+                                              key={look.id || lookIndex}
+                                              className={`character-look-card min-w-0 overflow-hidden rounded-md border p-3 transition-all duration-300 ${
+                                                look.isGenerating
+                                                  ? 'border-amber-300/65 bg-amber-500/10 shadow-[0_0_24px_rgba(251,191,36,0.12)] ring-1 ring-amber-300/20'
+                                                  : priorityStyle.cardClass
+                                              }`}
+                                            >
+                                              <div className="character-look-card-layout">
+                                                <div className="character-look-card-details">
                                               <div className="mb-1 flex min-w-0 flex-wrap items-center justify-between gap-1">
                                                 <div className="flex min-w-0 flex-wrap items-center gap-2 overflow-hidden">
                                                   <CompactBadge text={look.scene || '造型'} maxChars={16} variant="secondary" />
+                                                  <CompactBadge text={look.changeType || '服装造型'} maxChars={10} className="border-amber-400/35 text-amber-200" />
+                                                  <CompactBadge text={priorityStyle.label} maxChars={12} className={priorityStyle.badgeClass} />
+                                                  {look.ageStage && (
+                                                    <CompactBadge text={look.ageStage} maxChars={10} />
+                                                  )}
+                                                  {look.physicalState && look.physicalState !== '正常状态' && (
+                                                    <CompactBadge text={look.physicalState} maxChars={10} className="border-red-400/35 text-red-200" />
+                                                  )}
+                                                  {look.transformationState && (
+                                                    <CompactBadge text={look.transformationState} maxChars={10} className="border-fuchsia-400/35 text-fuchsia-200" />
+                                                  )}
+                                                  {look.identityNeedsReview && (
+                                                    <CompactBadge text="需按新正脸重做" maxChars={12} className="border-red-400/40 text-red-200" />
+                                                  )}
+                                                  {look.fourViewIdentityNeedsReview && (
+                                                    <CompactBadge text="四视图已过期" maxChars={10} className="border-orange-400/40 text-orange-200" />
+                                                  )}
+                                                  {look.isLifecycleFallback && (
+                                                    <CompactBadge text="全文核验补齐" maxChars={10} className="border-cyan-300/35 bg-cyan-500/10 text-cyan-100" />
+                                                  )}
                                                   {look.stage && (
                                                     <CompactBadge text={look.stage} maxChars={12} />
                                                   )}
                                                   <span className="max-w-[80px] truncate text-xs text-gray-500" title={normalizeDisplayText(look.mood || '自然')}>{compactDisplayText(look.mood || '自然', 10)}</span>
                                                 </div>
                                                 {look.isGenerating ? (
-                                                  <Button
-                                                    size="sm"
-                                                    variant="destructive"
-                                                    className="h-6 text-xs"
-                                                    onClick={(e) => {
-                                                      e.stopPropagation();
-                                                      cancelLookGeneration(char, look.id);
-                                                    }}
-                                                  >
-                                                    ✕ 取消
-                                                  </Button>
+                                                  <div className="flex items-center gap-1.5">
+                                                    <Button
+                                                      size="sm"
+                                                      variant="outline"
+                                                      className="h-8 border-amber-300/55 bg-amber-400/15 px-3 text-xs font-semibold text-amber-100 opacity-100"
+                                                      disabled
+                                                      aria-live="polite"
+                                                    >
+                                                      <Loader2 className="mr-1.5 size-3.5 animate-spin" />
+                                                      造型生成中
+                                                    </Button>
+                                                    <Button
+                                                      size="sm"
+                                                      variant="ghost"
+                                                      className="h-8 px-2 text-xs text-red-200 hover:bg-red-500/15 hover:text-red-100"
+                                                      onClick={(e) => {
+                                                        e.stopPropagation();
+                                                        cancelLookGeneration(char, look.id);
+                                                      }}
+                                                      title="停止当前页面等待"
+                                                    >
+                                                      <X className="mr-1 size-3.5" />
+                                                      停止
+                                                    </Button>
+                                                  </div>
                                                 ) : look.isGeneratingFourView ? (
                                                   <Button
                                                     size="sm"
@@ -7680,34 +11952,86 @@ export default function StoryboardGenerator() {
                                                     四视图
                                                   </Button>
                                                 ) : (
-                                                  <div className="flex gap-1">
+                                                  <div className="flex gap-1.5">
                                                     <Button
                                                       size="sm"
-                                                      variant="ghost"
-                                                      className="h-6 text-xs"
+                                                      variant={lookLocked ? 'outline' : 'default'}
+                                                      className={`h-8 px-3 text-xs font-semibold ${
+                                                        lookLocked
+                                                          ? 'border-amber-400/20 text-amber-100/45'
+                                                          : 'border border-amber-200/70 bg-amber-400 text-black shadow-[0_0_16px_rgba(251,191,36,0.2)] hover:bg-amber-300'
+                                                      }`}
                                                       onClick={(e) => {
                                                         e.stopPropagation();
                                                         handleGenerateCharacterLookImage(char, look.id);
                                                       }}
-                                                      disabled={Boolean(look.isGenerating || isBatchAssetGenerating)}
+                                                      disabled={Boolean(lookLocked || look.isGenerating || isBatchAssetGenerating)}
+                                                      title={lookLocked ? lookReference.missingMessage : `图生图参考：${lookReference.label}`}
                                                     >
-                                                      换装
+                                                      {lookLocked ? (
+                                                        <>
+                                                          <AlertCircle className="mr-1.5 size-3.5" />
+                                                          待解锁
+                                                        </>
+                                                      ) : (
+                                                        <>
+                                                          <Sparkles className="mr-1.5 size-3.5" />
+                                                          {look.imageUrl ? '重新生成造型' : '生成造型'}
+                                                        </>
+                                                      )}
                                                     </Button>
                                                     <Button
                                                       size="sm"
                                                       variant="outline"
-                                                      className="h-6 text-xs"
+                                                      className="h-8 px-2.5 text-xs"
                                                       onClick={(e) => {
                                                         e.stopPropagation();
                                                         handleGenerateCharacterFourView(char, look.id);
                                                       }}
-                                                      disabled={Boolean(look.isGeneratingFourView || isBatchAssetGenerating)}
-                                                      title="一键生成该套衣服的四视图"
+                                                      disabled={Boolean(fourViewLocked || look.isGeneratingFourView || isBatchAssetGenerating)}
+                                                      title={look.identityNeedsReview
+                                                        ? '该造型基于旧正脸，请先重新生成造型图'
+                                                        : fourViewLocked
+                                                          ? '需先确认正脸并生成该造型图'
+                                                          : '以该造型图生成四视图'}
                                                     >
                                                       四视图
                                                     </Button>
                                                   </div>
                                                 )}
+                                              </div>
+                                              {look.isGenerating && (
+                                                <div
+                                                  className="mb-2 rounded-md border border-amber-300/30 bg-black/30 px-3 py-2.5"
+                                                  role="status"
+                                                  aria-live="polite"
+                                                >
+                                                  <div className="flex items-center gap-2 text-xs font-medium text-amber-100">
+                                                    <Loader2 className="size-4 shrink-0 animate-spin text-amber-200" />
+                                                    <span className="min-w-0 break-words">
+                                                      {look.generatingStatus || '请求已提交，正在生成造型图片...'}
+                                                    </span>
+                                                  </div>
+                                                  <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-amber-950/70">
+                                                    <div className="h-full w-2/3 animate-pulse rounded-full bg-gradient-to-r from-amber-500 via-yellow-200 to-amber-400" />
+                                                  </div>
+                                                </div>
+                                              )}
+                                              <div className={`mb-1.5 flex min-w-0 items-start gap-1.5 rounded px-2 py-1 text-[11px] ${
+                                                lookLocked
+                                                  ? 'bg-amber-500/10 text-amber-200/80'
+                                                  : 'bg-emerald-500/10 text-emerald-200/80'
+                                              }`}>
+                                                {lookLocked ? (
+                                                  <AlertCircle className="mt-0.5 size-3 shrink-0" />
+                                                ) : (
+                                                  <CheckCircle2 className="mt-0.5 size-3 shrink-0" />
+                                                )}
+                                                <span className="min-w-0 break-words">
+                                                  {lookLocked
+                                                    ? lookReference.missingMessage
+                                                    : `图生图参考：${lookReference.label}${look.referenceReason ? `；${look.referenceReason}` : ''}`}
+                                                </span>
                                               </div>
                                               {editingLookKey === `${char.id}-${look.id}` ? (
                                                 <div className="space-y-1 mb-1">
@@ -7780,6 +12104,18 @@ export default function StoryboardGenerator() {
                                                   </p>
                                                 </div>
                                               )}
+                                              {lookBodyProfileText && (
+                                                <div className="mb-1.5 min-w-0 rounded bg-black/10 px-2 py-1.5 text-[11px] leading-4 text-amber-100/55 dark:bg-black/20">
+                                                  <p className="line-clamp-2 break-words [overflow-wrap:anywhere]" title={lookBodyProfileText}>
+                                                    <span className="font-medium text-amber-100/70">全身体态：</span>
+                                                    {compactDisplayText(lookBodyProfileText, 100)}
+                                                  </p>
+                                                  <p className="mt-0.5 line-clamp-1 break-words [overflow-wrap:anywhere]" title={normalizeDisplayText(look.bodyChanges || '沿用人物身体档案')}>
+                                                    <span className="font-medium text-amber-100/70">当前变化：</span>
+                                                    {compactDisplayText(look.bodyChanges || '沿用人物身体档案', 70)}
+                                                  </p>
+                                                </div>
+                                              )}
                                               <div className="min-w-0 space-y-0.5 text-xs text-gray-500">
                                                 <div className="truncate" title={normalizeDisplayText(look.costume)}>服装：{compactDisplayText(look.costume || '待补充', 36)}</div>
                                                 <div className="truncate" title={normalizeDisplayText(look.hairstyle)}>发型：{compactDisplayText(look.hairstyle || '待补充', 36)}</div>
@@ -7787,63 +12123,70 @@ export default function StoryboardGenerator() {
                                                   <div className="truncate" title={normalizeDisplayText(look.accessories.join('、'))}>配饰：{compactDisplayText(look.accessories.join('、'), 36)}</div>
                                                 )}
                                                 <div className="truncate" title={normalizeDisplayText(look.makeup)}>化妆：{compactDisplayText(look.makeup || '淡妆', 36)}</div>
+                                                {look.episodeNumbers && look.episodeNumbers.length > 0 && (
+                                                  <div className="truncate" title={look.episodeNumbers.map(item => `第${item}集`).join('、')}>
+                                                    集数：{look.episodeNumbers.map(item => `第${item}集`).join('、')}
+                                                  </div>
+                                                )}
+                                                {look.sceneNames && look.sceneNames.length > 0 && (
+                                                  <div className="truncate" title={normalizeDisplayText(look.sceneNames.join('、'))}>
+                                                    场景：{compactDisplayText(look.sceneNames.join('、'), 36)}
+                                                  </div>
+                                                )}
                                               </div>
+                                                </div>
+                                                <div className="character-look-card-media">
                                               {/* 显示该造型的图片 */}
                                               {look.isGenerating ? (
-                                                <div className="mt-2">
-                                                  <div className="w-full h-24 bg-gray-100 dark:bg-gray-800 rounded flex items-center justify-center">
-                                                    <Loader2 className="w-6 h-6 animate-spin text-gray-400" />
-                                                  </div>
-                                                  {look.generatingStatus && (
-                                                    <p className="text-xs text-center text-gray-500 mt-1">{look.generatingStatus}</p>
-                                                  )}
+                                                <div className="min-h-[340px] overflow-hidden rounded-md border border-amber-300/35 bg-black/40">
+                                                  <AssetGenerationPlaceholder status={look.generatingStatus || '正在生成全身造型图'} />
                                                 </div>
                                               ) : look.imageUrl ? (
-                                                <div className="mt-2 relative group/look-image">
+                                                <div className="group/look-image relative flex min-h-[340px] items-center justify-center overflow-hidden rounded-md border border-amber-400/20 bg-black/25">
                                                   <img
                                                     src={look.imageUrl}
                                                     alt={`${char.name} - ${look.scene || look.id}`}
-                                                    className="w-full h-auto object-contain rounded max-h-64"
-                                                    onClick={() => openImagePreview(look.imageUrl, `${char.name} - ${look.scene || look.id}`, 'character')}
+                                                    className="block max-h-[560px] w-full cursor-zoom-in object-contain"
+                                                    onClick={() => openImagePreview(look.imageUrl!, `${char.name} - ${look.scene || look.id}`, 'character')}
                                                   />
                                                   {/* 操作按钮组 */}
-                                                  <div className={`absolute top-0 right-0 flex gap-0.5 transition-opacity ${isAssetsConfirmed ? 'hidden' : 'opacity-0 group-hover/look-image:opacity-100'}`}>
+                                                  <div className={`absolute right-2 top-2 flex gap-1 transition-opacity ${isAssetsConfirmed ? 'hidden' : 'opacity-0 group-hover/look-image:opacity-100'}`}>
                                                     <Button
                                                       size="icon"
                                                       variant="secondary"
-                                                      className="h-4 w-4 bg-white/90"
+                                                      className="h-8 w-8 bg-black/75 text-amber-100 hover:bg-black/90"
                                                       title="预览"
                                                       onClick={(e) => {
                                                         e.stopPropagation();
-                                                        openImagePreview(look.imageUrl, `${char.name} - ${look.scene || look.id}`, 'character');
+                                                        openImagePreview(look.imageUrl!, `${char.name} - ${look.scene || look.id}`, 'character');
                                                       }}
                                                     >
-                                                      <Eye className="w-2 h-2" />
+                                                      <Eye className="size-3.5" />
                                                     </Button>
                                                     <Button
                                                       size="icon"
                                                       variant="secondary"
-                                                      className="h-4 w-4 bg-white/90"
+                                                      className="h-8 w-8 bg-black/75 text-amber-100 hover:bg-black/90"
                                                       title="下载"
                                                       onClick={(e) => {
                                                         e.stopPropagation();
-                                                        downloadImage(look.imageUrl, `${char.name}_${look.scene || look.id}`);
+                                                        downloadImage(look.imageUrl!, `${char.name}_${look.scene || look.id}`);
                                                       }}
                                                     >
-                                                      <Download className="w-2 h-2" />
+                                                      <Download className="size-3.5" />
                                                     </Button>
                                                     <Button
                                                       size="icon"
                                                       variant="destructive"
-                                                      className="h-4 w-4 bg-white/90"
+                                                      className="h-8 w-8"
                                                       title="删除"
                                                       disabled={isAssetsConfirmed || isGeneratingImage}
                                                       onClick={(e) => {
                                                         e.stopPropagation();
-                                                        if (!isAssetsConfirmed) handleDeleteCharacterLookImage(char.id, look.id);
+                                                        if (!isAssetsConfirmed) handleDeleteCharacterLookImage(char, look.id);
                                                       }}
                                                     >
-                                                      <Trash2 className="w-2 h-2" />
+                                                      <Trash2 className="size-3.5" />
                                                     </Button>
                                                   </div>
                                                   {look.isCustom && (
@@ -7852,7 +12195,12 @@ export default function StoryboardGenerator() {
                                                     </Badge>
                                                   )}
                                                 </div>
-                                              ) : null}
+                                              ) : (
+                                                <div className="flex min-h-[340px] flex-col items-center justify-center gap-2 rounded-md border border-dashed border-amber-400/30 bg-black/20 text-amber-100/40">
+                                                  <ImagePlus className="size-9" />
+                                                  <span className="text-xs">尚未生成造型图</span>
+                                                </div>
+                                              )}
                                               {/* 显示该造型的四视图 */}
                                               {look.isGeneratingFourView ? (
                                                 <div className="mt-2">
@@ -7863,12 +12211,17 @@ export default function StoryboardGenerator() {
                                                 </div>
                                               ) : look.fourViewImageUrl ? (
                                                 <div className="mt-2 relative group/four-view">
-                                                  <div className="mb-1 text-xs font-medium text-gray-500">{char.name}的四视图</div>
+                                                  <div className="mb-1 flex items-center gap-2 text-xs font-medium text-gray-500">
+                                                    <span>{char.name}的四视图</span>
+                                                    {look.fourViewIdentityNeedsReview && (
+                                                      <span className="text-orange-300">旧参考图，建议重新生成</span>
+                                                    )}
+                                                  </div>
                                                   <img
                                                     src={look.fourViewImageUrl}
                                                     alt={`${char.name}的四视图`}
                                                     className="w-full h-auto object-contain rounded max-h-64"
-                                                    onClick={() => openImagePreview(look.fourViewImageUrl, `${char.name}的四视图`, 'character')}
+                                                    onClick={() => openImagePreview(look.fourViewImageUrl!, `${char.name}的四视图`, 'character')}
                                                   />
                                                   <div className={`absolute top-5 right-0 flex gap-0.5 transition-opacity ${isAssetsConfirmed ? 'hidden' : 'opacity-0 group-hover/four-view:opacity-100'}`}>
                                                     <Button
@@ -7878,7 +12231,7 @@ export default function StoryboardGenerator() {
                                                       title="预览"
                                                       onClick={(e) => {
                                                         e.stopPropagation();
-                                                        openImagePreview(look.fourViewImageUrl, `${char.name}的四视图`, 'character');
+                                                        openImagePreview(look.fourViewImageUrl!, `${char.name}的四视图`, 'character');
                                                       }}
                                                     >
                                                       <Eye className="w-2 h-2" />
@@ -7890,7 +12243,7 @@ export default function StoryboardGenerator() {
                                                       title="下载"
                                                       onClick={(e) => {
                                                         e.stopPropagation();
-                                                        downloadImage(look.fourViewImageUrl, `${char.name}的四视图`);
+                                                        downloadImage(look.fourViewImageUrl!, `${char.name}的四视图`);
                                                       }}
                                                     >
                                                       <Download className="w-2 h-2" />
@@ -7903,7 +12256,12 @@ export default function StoryboardGenerator() {
                                                       disabled={isAssetsConfirmed || isGeneratingImage}
                                                       onClick={(e) => {
                                                         e.stopPropagation();
-                                                        updateLookById(look.id, { fourViewImageUrl: undefined }, char);
+                                                        updateLookById(look.id, {
+                                                          fourViewImageUrl: undefined,
+                                                          fourViewIdentitySourceUrl: undefined,
+                                                          fourViewLookSourceUrl: undefined,
+                                                          fourViewIdentityNeedsReview: false,
+                                                        }, char);
                                                       }}
                                                     >
                                                       <Trash2 className="w-2 h-2" />
@@ -7928,15 +12286,19 @@ export default function StoryboardGenerator() {
                                                       };
                                                       input.click();
                                                     }}
-                                                    title="上传本地图片"
+                                                    disabled={!isFaceIdentityConfirmed}
+                                                    title={isFaceIdentityConfirmed ? '上传本地造型图片' : '需先确认人物正脸身份基准'}
                                                   >
                                                     <ImagePlus className="w-3 h-3 mr-1" />
                                                     上传
                                                   </Button>
                                                 </div>
                                               )}
+                                                </div>
+                                              </div>
                                             </div>
-                                          ))}
+                                            );
+                                          })}
                                         </div>
                                       </div>
                                     )}
@@ -8050,32 +12412,72 @@ export default function StoryboardGenerator() {
                     </Card>
                   )}
 
+                  {canShowExtractionResults && (characterVoiceData || effectiveExtractionStatus.voices !== 'pending') && (
+                    <CharacterVoiceLibrary
+                      data={characterVoiceData}
+                      library={voiceLibrary}
+                      status={effectiveExtractionStatus.voices}
+                      disabled={isProcessing}
+                      libraryLoading={voiceLibraryLoading}
+                      onRetry={() => void retryExtraction('voices')}
+                      onBind={bindCharacterVoice}
+                      onRefreshLibrary={() => syncVoiceLibrary(true)}
+                      onUploadVoice={uploadVoiceToLibrary}
+                      onDeleteVoice={deleteVoiceFromLibrary}
+                    />
+                  )}
+
                   {/* Props */}
-                  {propsData && (
+	                  {canShowExtractionResults && propsData && (
                     <Card>
                       <CardHeader>
                         <div className="flex items-center justify-between gap-3">
                           <CardTitle className="flex items-center gap-2 text-lg">
                             <Package className="w-5 h-5 text-orange-500" />
                             道具列表
-                            <Badge variant="secondary">{propBatchInfo?.propMarkers?.length || propsData.totalProps} 个道具</Badge>
+                            {(() => {
+                              const propsForCount = ((propBatchInfo?.allProps?.length ?? 0) > 0 ? propBatchInfo?.allProps : propsData.props) || [];
+                              const mainPropCount = new Set(propsForCount.map((prop: Prop) => getPropMainPropName(prop))).size;
+                              const stateCount = propsForCount.reduce((total: number, prop: Prop) => total + getPropStateCount(prop), 0);
+                              return (
+                                <Badge variant="secondary">
+                                  {mainPropCount || propsData.totalMainProps || propsData.totalProps || 0} 个物品 / {stateCount || propsData.totalPropStates || propsForCount.length || 0} 个状态
+                                </Badge>
+                              );
+                            })()}
                           </CardTitle>
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            onClick={() => generateAllAssetImages('prop')}
-                            disabled={isProcessing || isBatchAssetGenerating || stepConfirmed.assets || getBatchAssetList('prop').length === 0}
-                            title={stepConfirmed.assets ? '素材已确认，无法继续生成' : '一键为道具列表生成图片'}
-                          >
-                            {batchAssetGeneration.type === 'prop' ? (
-                              <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                            ) : (
-                              <Sparkles className="w-4 h-4 mr-2" />
-                            )}
-                            {batchAssetGeneration.type === 'prop'
-                              ? `生成中 ${batchAssetGeneration.current}/${batchAssetGeneration.total}`
-                              : '一键生成道具图'}
-                          </Button>
+                          <div className="flex shrink-0 flex-wrap justify-end gap-2">
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              onClick={() => exportAssetListPackage('prop')}
+                              disabled={exportingAssetListType !== null || getBatchAssetList('prop').length === 0}
+                              title="导出道具 Excel、缩略图和全部原图 ZIP"
+                            >
+                              {exportingAssetListType === 'prop' ? (
+                                <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                              ) : (
+                                <Download className="w-4 h-4 mr-2" />
+                              )}
+                              导出完整素材 ZIP
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              onClick={() => generateAllAssetImages('prop')}
+                              disabled={isProcessing || isBatchAssetGenerating || stepConfirmed.assets || getBatchAssetList('prop').length === 0}
+                              title={stepConfirmed.assets ? '素材已确认，无法继续生成' : '一键为道具列表生成图片'}
+                            >
+                              {batchAssetGeneration.type === 'prop' ? (
+                                <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                              ) : (
+                                <Sparkles className="w-4 h-4 mr-2" />
+                              )}
+                              {batchAssetGeneration.type === 'prop'
+                                ? `生成中 ${batchAssetGeneration.current}/${batchAssetGeneration.total}`
+                                : '一键生成道具图'}
+                            </Button>
+                          </div>
                         </div>
                         {batchAssetGeneration.type === 'prop' && (
                           <CardDescription>
@@ -8084,168 +12486,137 @@ export default function StoryboardGenerator() {
                         )}
                       </CardHeader>
                       <CardContent>
-                        {/* 道具分批提取进度和确认按钮 - 放在列表上方 */}
+                        {/* 道具整体提取进度 */}
                         {propBatchInfo && (
                           <div className="mb-4 p-3 bg-orange-50 dark:bg-orange-900/20 rounded-lg space-y-3">
                             <div className="flex items-center justify-between">
                               <span className="text-sm font-medium text-orange-700 dark:text-orange-400">
-                                {extractionStatus.props === 'loading' ? (
+                                {extractionStatus.props === 'error' ? (
+                                  '道具提取中断，请点击重新提取'
+                                ) : extractionStatus.props === 'loading' ? (
                                   <span className="flex items-center gap-2">
                                     <Loader2 className="w-4 h-4 animate-spin" />
-                                    正在提取道具...
+                                    正在通读全文并自动提取全部道具...
                                   </span>
                                 ) : propBatchInfo.hasMore ? (
-                                  '道具提取进度（未完成）'
+                                  '道具正在自动提取全部内容'
                                 ) : (
-                                  '道具提取完成'
+                                  '道具已全部提取完成'
                                 )}
                               </span>
                               <span className="text-sm text-orange-600 dark:text-orange-300">
-                                {propBatchInfo.currentBatch} / {propBatchInfo.totalBatches} 批
+                                {Math.round((propBatchInfo.currentBatch / propBatchInfo.totalBatches) * 100)}%
                               </span>
                             </div>
                             <div className="w-full bg-orange-200 dark:bg-orange-800 rounded-full h-2">
-                              <div 
+                              <div
                                 className={`bg-orange-600 h-2 rounded-full transition-all duration-300 ${extractionStatus.props === 'loading' ? 'animate-pulse' : ''}`}
                                 style={{ width: `${(propBatchInfo.currentBatch / propBatchInfo.totalBatches) * 100}%` }}
                               />
                             </div>
                             <div className="text-xs text-gray-600 dark:text-gray-400">
-                              已提取 {propBatchInfo.allProps?.length || 0} / {propBatchInfo.propMarkers?.length || 0} 个道具
+                              已提取 {new Set((propBatchInfo.allProps || []).map((prop: Prop) => getPropMainPropName(prop))).size} / {propBatchInfo.propMarkers?.length || 0} 个物品实体，
+                              形成 {propBatchInfo.allProps?.length || 0} 个独立状态制作项
                             </div>
-                            {propBatchInfo.hasMore && extractionStatus.props !== 'loading' && (
-                              <Button 
-                                className="w-full" 
-                                onClick={continuePropExtraction}
-                                disabled={isProcessing}
-                              >
-                                <ArrowRightCircle className="w-4 h-4 mr-2" />
-                                确认并继续提取下一批
-                              </Button>
-                            )}
                           </div>
                         )}
-                        
-                        <div className={`grid grid-cols-1 2xl:grid-cols-2 gap-3 ${expandedSections.props ? '' : 'max-h-[400px]'} overflow-x-hidden overflow-y-auto transition-all duration-300`}>
+
+                        <div className={`grid grid-cols-1 gap-3 ${expandedSections.props ? '' : 'max-h-[520px]'} overflow-x-hidden overflow-y-auto transition-all duration-300`}>
                           {(() => {
                             const propsToDisplay = (propBatchInfo?.allProps?.length ?? 0) > 0 ? propBatchInfo?.allProps : propsData.props;
-                            
+
                             if (!propsToDisplay || propsToDisplay.length === 0) {
                               return (
-                                <div className="col-span-2 text-center py-8 text-gray-400">
+                                <div className="col-span-full text-center py-8 text-gray-400">
                                   <Package className="w-12 h-12 mx-auto mb-2 opacity-50" />
-                                  <p className="text-sm">暂无道层数据</p>
+                                  <p className="text-sm">暂无道具数据</p>
                                 </div>
                               );
                             }
-                            
+
                             return propsToDisplay.map((prop: Prop, index: number) => {
-                            const assetData = getAssetImages('prop', prop.id);
+                            const mainPropName = getPropMainPropName(prop);
+                            const previousProp = index > 0 ? propsToDisplay[index - 1] as Prop : null;
+                            const shouldShowMainPropHeader = !previousProp || getPropMainPropName(previousProp) !== mainPropName;
+                            const siblingProps = propsToDisplay.filter((item: Prop) => getPropMainPropName(item) === mainPropName);
+                            const siblingStateCount = siblingProps.reduce((total: number, item: Prop) => total + getPropStateCount(item), 0);
+                            const siblingEpisodeNumbers = Array.from(new Set<number>(
+                              siblingProps.flatMap((item: Prop) => getPropEpisodeNumbers(item))
+                            )).sort((a, b) => a - b);
+                            const assetData = getAssetImages('prop', prop.id, prop.name);
                             const images = assetData?.images || [];
-                            const canAddMore = images.length < MAX_IMAGES_PER_ASSET;
-                            const isGenerating = images.some(img => img.isGenerating);
+                            const generationAssetId = `prop-${prop.name}`;
+                            const generatingImage = images.find(img => img.isGenerating);
+                            const generationStatus = assetGenerationStatuses[generationAssetId] || generatingImage?.generatingStatus || '';
+                            const isGenerating = Boolean(generationStatus || generatingImage);
+                            const completedImageCount = images.filter(img => Boolean(img.imageUrl) && !img.isGenerating).length;
                             const currentAssetId = assetData?.assetId || `prop-${prop.name}`;
+                            const referencePropAsset = prop.referencePropName
+                              ? getAssetImages('prop', prop.referencePropName)
+                              : undefined;
+                            const referencePropImage = referencePropAsset?.images.find(image => Boolean(image.imageUrl) && !image.isGenerating);
+                            const referencePropIsGenerating = referencePropAsset?.images.some(image => image.isGenerating);
                             const isAssetsConfirmed = stepConfirmed.assets; // 素材是否已确认
-                            
+
                             return (
-                              <div key={`prop-${prop.name}-${index}`} className={`min-w-0 overflow-hidden p-3 border rounded space-y-2 ${isAssetsConfirmed ? 'opacity-75' : ''}`}>
-                                {/* 道具图片区域 - 支持多张 */}
-                                <div className="grid grid-cols-3 gap-1.5 min-h-14">
-                                  {images.map((img, imgIdx) => (
-                                    <div key={img.imageId || `prop-${prop.id}-img-${imgIdx}`} className="relative group cursor-pointer overflow-hidden rounded border border-amber-400/10 bg-black/20">
-                                      {img.isGenerating ? (
-                                        <div className="w-full h-14 bg-gray-100 dark:bg-gray-800 rounded flex flex-col items-center justify-center gap-0.5">
-                                          <Loader2 className="size-3 animate-spin text-gray-400" />
-                                          <span className="text-[10px] leading-none text-gray-400">{img.generatingStatus || '生成中'}</span>
-                                        </div>
-                                      ) : img.imageUrl ? (
-                                        <>
-                                          <img
-                                            src={img.imageUrl}
-                                            alt={prop.name}
-                                            className="w-full h-14 object-cover rounded hover:opacity-80 transition-opacity"
-                                            onClick={() => openImagePreview(img.imageUrl, prop.name, 'prop')}
-                                          />
-                                          <div className={`absolute top-1 right-1 grid grid-cols-2 gap-0.5 transition-opacity ${isAssetsConfirmed ? 'hidden' : 'opacity-0 group-hover:opacity-100'}`}>
-                                            <Button
-                                              size="icon"
-                                              variant="secondary"
-                                              className="h-5 w-5 min-w-0 p-0"
-                                              title="预览"
-                                              onClick={(e) => {
-                                                e.stopPropagation();
-                                                openImagePreview(img.imageUrl, prop.name, 'prop');
-                                              }}
-                                            >
-                                              <Eye className="size-2.5" />
-                                            </Button>
-                                            <Button
-                                              size="icon"
-                                              variant="secondary"
-                                              className="h-5 w-5 min-w-0 p-0"
-                                              title="以此图为参考生成新图"
-                                              disabled={isAssetsConfirmed}
-                                              onClick={(e) => {
-                                                e.stopPropagation();
-                                                if (!isAssetsConfirmed) generateImageFromImage('prop', prop, img.imageUrl);
-                                              }}
-                                            >
-                                              <Copy className="size-2.5" />
-                                            </Button>
-                                            <Button
-                                              size="icon"
-                                              variant="secondary"
-                                              className="h-5 w-5 min-w-0 p-0"
-                                              onClick={(e) => {
-                                                e.stopPropagation();
-                                                downloadImage(img.imageUrl, prop.name);
-                                              }}
-                                            >
-                                              <Download className="size-2.5" />
-                                            </Button>
-                                            <Button
-                                              size="icon"
-                                              variant="destructive"
-                                              className="h-5 w-5 min-w-0 p-0"
-                                              disabled={isAssetsConfirmed}
-                                              onClick={(e) => {
-                                                e.stopPropagation();
-                                                if (!isAssetsConfirmed) removeSelectedImage(currentAssetId, img.imageId);
-                                              }}
-                                              title={isAssetsConfirmed ? "素材已确认，无法删除" : "取消选中（图片仍在图片库中）"}
-                                            >
-                                              <Trash2 className="size-2.5" />
-                                            </Button>
-                                          </div>
-                                          {img.isCustom && (
-                                            <Badge className="absolute bottom-0 left-0 text-xs" variant="secondary">
-                                              自定义
-                                            </Badge>
-                                          )}
-                                        </>
-                                      ) : (
-                                        <div className="w-full h-14 bg-gray-100 dark:bg-gray-800 rounded flex items-center justify-center">
-                                          <span className="text-xs text-gray-400">图片加载中</span>
-                                        </div>
-                                      )}
+                              <Fragment key={`prop-group-${mainPropName}-${prop.name}-${index}`}>
+                              {shouldShowMainPropHeader && (
+                                <div className="col-span-full rounded border border-amber-400/25 bg-amber-500/10 px-3 py-2">
+                                  <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
+                                    <div className="min-w-0">
+                                      <div className="flex min-w-0 flex-wrap items-center gap-2">
+                                        <span className="text-sm font-semibold text-amber-100" title={normalizeDisplayText(mainPropName)}>
+                                          {compactDisplayText(mainPropName, 34)}
+                                        </span>
+                                        <Badge variant="outline" className="border-amber-400/35 text-amber-100">
+                                          同一物品
+                                        </Badge>
+                                      </div>
+                                      <p className="mt-1 text-xs text-amber-100/65">
+                                        下含 {siblingStateCount} 个状态
+                                        {siblingEpisodeNumbers.length > 0 && `，关联 ${siblingEpisodeNumbers.slice(0, 5).map(item => `第${item}集`).join('、')}${siblingEpisodeNumbers.length > 5 ? ` 等${siblingEpisodeNumbers.length}集` : ''}`}
+                                      </p>
                                     </div>
-                                  ))}
-                                  {/* 添加按钮 */}
-                                  {canAddMore && !isGenerating && !isAssetsConfirmed && (
-                                    <div className="col-span-full grid grid-cols-3 gap-1.5">
+                                  </div>
+                                </div>
+                              )}
+                              <div key={`prop-${prop.name}-${index}`} className={`min-w-0 overflow-hidden rounded-md border border-amber-400/20 bg-black/15 p-3 ${isAssetsConfirmed ? 'opacity-75' : ''}`}>
+                                <div className="grid min-w-0 gap-4 lg:grid-cols-[minmax(320px,44%)_minmax(0,1fr)] lg:items-start">
+                                <div className="min-w-0 space-y-2">
+                                {/* 道具图片区域 - 主图叠放选择 */}
+                                <AssetImageStack
+                                  images={images}
+                                  name={prop.name}
+                                  type="prop"
+                                  generationStatus={generationStatus}
+                                  isGenerating={isGenerating}
+                                  isAssetsConfirmed={isAssetsConfirmed}
+                                  onOpenChooser={() => setAssetImageChooserTarget({ assetId: currentAssetId, type: 'prop', name: prop.name })}
+                                  onPreview={image => openImagePreview(image.imageUrl, prop.name, 'prop')}
+                                  onGenerateFromImage={image => generateImageFromImage('prop', prop, image.imageUrl)}
+                                  onDownload={image => downloadImage(image.imageUrl, prop.name)}
+                                  onRemove={image => removeSelectedImage(currentAssetId, image.imageId)}
+                                />
+                                <div className="flex min-h-8 items-center justify-between gap-2">
+                                  <span className="text-xs text-amber-100/55">
+                                    {isGenerating ? `处理中 · ${completedImageCount}/${MAX_IMAGES_PER_ASSET} 张` : `${completedImageCount}/${MAX_IMAGES_PER_ASSET} 张`}
+                                  </span>
+                                  {!isGenerating && !isAssetsConfirmed && (
+                                    <div className="flex items-center gap-1 rounded-md border border-amber-400/15 bg-black/20 p-1">
                                       <Button
-                                        size="sm"
+                                        size="icon"
                                         variant="ghost"
-                                        className="h-10 min-w-0 px-0"
+                                        className="h-7 w-7 min-w-0 p-0 text-amber-100/80 hover:bg-amber-400/15 hover:text-amber-50"
                                         onClick={() => generateAssetImage('prop', prop)}
                                         title="AI生成图片"
+                                        aria-label="生成道具图片"
                                       >
-                                        <ImageIcon className="size-4" />
+                                        <Sparkles className="size-3.5" />
                                       </Button>
                                       <Button
-                                        size="sm"
+                                        size="icon"
                                         variant="ghost"
-                                        className="h-10 min-w-0 px-0"
+                                        className="h-7 w-7 min-w-0 p-0 text-amber-100/80 hover:bg-amber-400/15 hover:text-amber-50"
                                         onClick={() => {
                                           const input = document.createElement('input');
                                           input.type = 'file';
@@ -8257,24 +12628,25 @@ export default function StoryboardGenerator() {
                                           input.click();
                                         }}
                                         title="上传本地图片"
+                                        aria-label="上传道具图片"
                                       >
-                                        <ImagePlus className="size-4" />
+                                        <ImagePlus className="size-3.5" />
                                       </Button>
                                       <Button
-                                        size="sm"
+                                        size="icon"
                                         variant="ghost"
-                                        className="h-10 min-w-0 px-0"
+                                        className="h-7 w-7 min-w-0 p-0 text-amber-100/80 hover:bg-amber-400/15 hover:text-amber-50"
                                         onClick={() => openImageLibrary('prop', prop.id, prop.name)}
                                         title="从图片库选择"
+                                        aria-label="从图片库选择道具图片"
                                       >
-                                        <FolderOpen className="size-4" />
+                                        <FolderOpen className="size-3.5" />
                                       </Button>
                                     </div>
                                   )}
                                 </div>
-                                {images.length > 0 && (
-                                  <p className="text-xs text-gray-500">{images.length}/{MAX_IMAGES_PER_ASSET} 张</p>
-                                )}
+                                </div>
+                                <div className="min-w-0 space-y-3">
                                 <div className="flex min-w-0 max-w-full flex-wrap items-center gap-2 overflow-hidden">
                                   <span className="min-w-0 max-w-full truncate text-sm font-medium" title={normalizeDisplayText(prop.name)}>
                                     {compactDisplayText(prop.name, 24)}
@@ -8283,10 +12655,40 @@ export default function StoryboardGenerator() {
                                   {prop.importance && (
                                     <CompactBadge text={prop.importance} maxChars={8} variant="default" />
                                   )}
+                                  {prop.stateLabel && (
+                                    <CompactBadge text={prop.stateLabel} maxChars={10} variant="secondary" />
+                                  )}
+                                  {prop.isStateUnit && prop.totalStates && prop.totalStates > 1 && (
+                                    <CompactBadge text={`状态 ${prop.stateSequence || 1}/${prop.totalStates}`} maxChars={10} variant="outline" />
+                                  )}
+                                  {!prop.isStateUnit && Array.isArray(prop.stateVariants) && prop.stateVariants.length > 1 && (
+                                    <CompactBadge text={`${prop.stateVariants.length}种状态`} maxChars={8} variant="secondary" />
+                                  )}
                                 </div>
+                                <div className="flex min-w-0 flex-wrap items-center gap-1 text-xs text-amber-100/75">
+                                  <span className="shrink-0">关联集数：</span>
+                                  <span className="min-w-0 truncate" title={normalizeDisplayText(formatPropEpisodeText(prop))}>
+                                    {compactDisplayText(formatPropEpisodeText(prop), 42)}
+                                  </span>
+                                </div>
+                                {Array.isArray(prop.occurrences) && prop.occurrences.length > 0 && (
+                                  <div className="flex min-w-0 flex-wrap gap-1">
+                                    {prop.occurrences.slice(0, 2).map((occurrence, occurrenceIndex) => (
+                                      <CompactBadge
+                                        key={`prop-${prop.id}-occurrence-${occurrenceIndex}`}
+                                        text={`${occurrence.episodeLabel || '未标注'} ${occurrence.sceneName || occurrence.heading || prop.name}`}
+                                        maxChars={28}
+                                        variant="outline"
+                                      />
+                                    ))}
+                                    {prop.occurrences.length > 2 && (
+                                      <span className="text-xs text-gray-400">+{prop.occurrences.length - 2}</span>
+                                    )}
+                                  </div>
+                                )}
                                 {prop.description && (
-                                  <p className="line-clamp-2 break-words text-xs leading-5 text-gray-600 [overflow-wrap:anywhere] dark:text-gray-400" title={normalizeDisplayText(prop.description)}>
-                                    {compactDisplayText(prop.description, 90)}
+                                  <p className="line-clamp-3 break-words text-xs leading-5 text-gray-600 [overflow-wrap:anywhere] dark:text-gray-400" title={normalizeDisplayText(prop.description)}>
+                                    {compactDisplayText(prop.description, 150)}
                                   </p>
                                 )}
                                 {prop.function && (
@@ -8294,6 +12696,64 @@ export default function StoryboardGenerator() {
                                 )}
                                 {prop.owner && (
                                   <p className="truncate text-xs text-gray-500" title={normalizeDisplayText(prop.owner)}>归属：{compactDisplayText(prop.owner, 42)}</p>
+                                )}
+                                {prop.isStateUnit ? (
+                                  <div className="space-y-1.5 rounded border border-amber-400/15 bg-amber-500/5 px-2.5 py-2 text-xs text-amber-100/75">
+                                    <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+                                      <CompactBadge
+                                        text={prop.referencePropName ? '图生图状态' : '基准文生图'}
+                                        maxChars={12}
+                                        variant={prop.referencePropName ? 'secondary' : 'outline'}
+                                      />
+                                      {prop.referencePropName && (
+                                        <span
+                                          className="min-w-0 truncate"
+                                          title={`图生图参考：${normalizeDisplayText(prop.referencePropName)}`}
+                                        >
+                                          参考：{compactDisplayText(prop.referencePropName, 28)} · {referencePropImage ? '已关联' : referencePropIsGenerating ? '生成中' : '待生成'}
+                                        </span>
+                                      )}
+                                    </div>
+                                    {prop.stateVisualChange && prop.stateVisualChange !== '基准状态' && (
+                                      <p className="line-clamp-2 break-words leading-5" title={normalizeDisplayText(prop.stateVisualChange)}>
+                                        状态变化：{compactDisplayText(prop.stateVisualChange, 90)}
+                                      </p>
+                                    )}
+                                    {prop.stateTransitionEvent && prop.stateTransitionEvent !== '基准状态' && (
+                                      <p className="line-clamp-2 break-words leading-5" title={normalizeDisplayText(prop.stateTransitionEvent)}>
+                                        形成原因：{compactDisplayText(prop.stateTransitionEvent, 90)}
+                                      </p>
+                                    )}
+                                    {prop.stateNarrativeFunction && (
+                                      <p className="line-clamp-2 break-words leading-5 text-amber-100/85" title={normalizeDisplayText(prop.stateNarrativeFunction)}>
+                                        剧情作用：{compactDisplayText(prop.stateNarrativeFunction, 100)}
+                                      </p>
+                                    )}
+                                    {prop.stateEvidence && (
+                                      <p className="line-clamp-2 break-words text-amber-100/55" title={normalizeDisplayText(prop.stateEvidence)}>
+                                        剧本依据：{compactDisplayText(prop.stateEvidence, 90)}
+                                      </p>
+                                    )}
+                                  </div>
+                                ) : Array.isArray(prop.stateVariants) && prop.stateVariants.length > 0 && (
+                                  <div className="flex min-w-0 flex-wrap gap-1">
+                                    {prop.stateVariants.slice(0, 3).map((state, i) => (
+                                      <CompactBadge
+                                        key={`prop-${prop.id}-state-${state.id || i}`}
+                                        text={`${state.stateName || state.stage || `状态${i + 1}`}${state.imageMode === 'image-to-image' ? ' · 图生图' : ''}`}
+                                        maxChars={18}
+                                        variant="secondary"
+                                      />
+                                    ))}
+                                    {prop.stateVariants.length > 3 && (
+                                      <span className="text-xs text-gray-400">+{prop.stateVariants.length - 3}</span>
+                                    )}
+                                  </div>
+                                )}
+                                {!prop.isStateUnit && Array.isArray(prop.stateVariants) && prop.stateVariants.some(state => state.referenceFromStateId) && (
+                                  <p className="truncate text-xs text-amber-200/70">
+                                    后续状态会参考前一状态图片生成，保持同一道具一致性
+                                  </p>
                                 )}
                                 {prop.appearanceScenes && prop.appearanceScenes.length > 0 && (
                                   <div className="flex min-w-0 flex-wrap gap-1">
@@ -8305,14 +12765,17 @@ export default function StoryboardGenerator() {
                                     )}
                                   </div>
                                 )}
+                                </div>
+                                </div>
                               </div>
+                              </Fragment>
                             );
                           });
                           })()}
                         </div>
                         <div className="text-center mt-2">
                           <Button variant="ghost" size="sm" className="text-xs text-gray-500" onClick={() => toggleSection('props')}>
-                            {expandedSections.props ? '收起' : '展开全部'} {propBatchInfo?.propMarkers?.length || propsData?.totalProps || 0} 个道具
+                            {expandedSections.props ? '收起' : '展开全部'} {new Set((((propBatchInfo?.allProps?.length ?? 0) > 0 ? propBatchInfo?.allProps : propsData?.props) || []).map((prop: Prop) => getPropMainPropName(prop))).size} 个物品 / {((propBatchInfo?.allProps?.length ?? 0) > 0 ? propBatchInfo?.allProps : propsData?.props)?.length || 0} 个状态
                             <ChevronDown className={`w-3 h-3 ml-1 transition-transform ${expandedSections.props ? 'rotate-180' : ''}`} />
                           </Button>
                         </div>
@@ -8321,12 +12784,28 @@ export default function StoryboardGenerator() {
                   )}
 
                   {/* Empty State */}
-                  {!scenesData && !charactersData && !propsData && (
-                    <Card>
+	                  {!canShowExtractionResults ? (
+	                    <Card>
+	                      <CardContent className="flex items-center justify-center h-64">
+	                        <div className="max-w-md text-center text-gray-500">
+	                          <FileText className="w-16 h-16 mx-auto mb-4 opacity-50" />
+	                          <p className="font-medium text-amber-100">
+	                            {!executionScriptReady ? '请先拉执行剧本' : '请先确认创作圣经'}
+	                          </p>
+	                          <p className="mt-2 text-sm">
+	                            {!executionScriptReady
+	                              ? '新流程会先用 DeepSeek 生成执行剧本，再进入创作圣经确认。'
+	                              : '确认创作圣经后，系统会按该方向提取场景、人物、人物音色、道具和大纲。'}
+	                          </p>
+	                        </div>
+	                      </CardContent>
+	                    </Card>
+	                  ) : !scenesData && !charactersData && !propsData && (
+	                    <Card>
                       <CardContent className="flex items-center justify-center h-64">
                         <div className="text-center text-gray-500">
                           <Sparkles className="w-16 h-16 mx-auto mb-4 opacity-50" />
-                          <p>上传文件后将自动提取场景、人物、道具、大纲</p>
+                          <p>上传文件后将自动提取场景、人物、人物音色、道具和大纲</p>
                         </div>
                       </CardContent>
                     </Card>
@@ -8343,7 +12822,7 @@ export default function StoryboardGenerator() {
                     {generationTasks.filter(t => t.type === 'storyboard').slice(-8).length > 0 && (
                       <div className="space-y-2">
                         {generationTasks.filter(t => t.type === 'storyboard').slice(-8).map(task => (
-                          <div 
+                          <div
                             key={task.taskId}
                             className={`p-3 rounded-lg text-sm ${
                               task.status === 'generating' ? 'bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800' :
@@ -8357,7 +12836,7 @@ export default function StoryboardGenerator() {
                                 {task.status === 'generating' && <Loader2 className="w-4 h-4 animate-spin text-blue-500" />}
                                 {task.status === 'success' && <CheckCircle2 className="w-4 h-4 text-green-500" />}
                                 {task.status === 'error' && <AlertCircle className="w-4 h-4 text-red-500" />}
-                                <span className="font-medium">第 {task.chapterNumber} 章</span>
+                                <span className="font-medium">第 {task.chapterNumber} 集</span>
                               </div>
                               <Badge variant={task.status === 'success' ? 'default' : task.status === 'error' ? 'destructive' : 'secondary'}>
                                 {task.status === 'generating' ? '生成中' : task.status === 'success' ? '完成' : task.status === 'error' ? '失败' : '等待中'}
@@ -8373,9 +12852,9 @@ export default function StoryboardGenerator() {
                         ))}
                       </div>
                     )}
-                    
-                    <Button 
-                      className="w-full" 
+
+                    <Button
+                      className="w-full"
                       onClick={generateAllStoryboards}
                       disabled={isProcessing}
                     >
@@ -8387,7 +12866,7 @@ export default function StoryboardGenerator() {
                       ) : batchInfo.active ? (
                         <>
                           <ArrowRightCircle className="w-4 h-4 mr-2" />
-                          继续生成第 {batchInfo.completedBatches + 1}/{batchInfo.totalBatches} 批（第 {batchInfo.completedBatches * batchInfo.batchSize + 1}-{Math.min((batchInfo.completedBatches + 1) * batchInfo.batchSize, outline?.chapters?.length || 0)} 章）
+                          继续生成第 {batchInfo.completedBatches + 1}/{batchInfo.totalBatches} 批（第 {batchInfo.completedBatches * batchInfo.batchSize + 1}-{Math.min((batchInfo.completedBatches + 1) * batchInfo.batchSize, outline?.chapters?.length || 0)} 集）
                         </>
                       ) : (
                         <>
@@ -8396,12 +12875,12 @@ export default function StoryboardGenerator() {
                             const totalChapters = outline?.chapters?.length || 0;
                             const successCount = Object.values(chapterStoryboards).filter(cs => cs.status === 'success' && !!cs.storyboard?.shots?.length).length;
                             if (successCount > 0 && successCount < totalChapters) {
-                              return `继续生成未完成章节文字分镜（已完成 ${successCount}/${totalChapters}）`;
+                              return `继续生成未完成分集文字分镜（已完成 ${successCount}/${totalChapters}）`;
                             }
                             if (successCount >= totalChapters && totalChapters > 0) {
-                              return '全部章节文字分镜已生成';
+                              return '全部分集文字分镜已生成';
                             }
-                            return '一键生成所有章节文字分镜';
+                            return '一键生成所有分集文字分镜';
                           })()}
                         </>
                       )}
@@ -8416,17 +12895,17 @@ export default function StoryboardGenerator() {
                         停止生成并解锁按钮
                       </Button>
                     )}
-                    
+
                     {/* 显示已生成的章节分镜状态 */}
                     {Object.keys(chapterStoryboards).length > 0 && (
                       <div className="space-y-2">
                         <p className="text-sm font-medium text-gray-700 dark:text-gray-300">已生成的文字分镜：</p>
                         {Object.values(chapterStoryboards).map(cs => (
-                          <div 
+                          <div
                             key={`storyboard-status-${cs.chapterNumber}`}
                             className={`flex items-center justify-between p-2 rounded ${
-                              cs.status === 'error' 
-                                ? 'bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800' 
+                              cs.status === 'error'
+                                ? 'bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800'
                                 : 'bg-gray-50 dark:bg-gray-800'
                             }`}
                           >
@@ -8440,7 +12919,7 @@ export default function StoryboardGenerator() {
                               ) : (
                                 <Circle className="w-4 h-4 text-gray-400" />
                               )}
-                              <span className="text-sm">第 {cs.chapterNumber} 章：{cs.chapterTitle}</span>
+                              <span className="text-sm">{getCanonicalEpisodeTitle(cs.chapterNumber)}</span>
                             </div>
                             <div className="flex items-center gap-2">
                               {cs.storyboard && (
@@ -8487,7 +12966,7 @@ export default function StoryboardGenerator() {
                         <CardHeader>
                           <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                             <div>
-                              <CardTitle>第 {cs.chapterNumber} 章：{cs.chapterTitle}</CardTitle>
+                              <CardTitle>{getCanonicalEpisodeTitle(cs.chapterNumber)}</CardTitle>
                               <CardDescription>
                                 已生成 {cs.storyboard?.shots.length || 0} 个分镜
                               </CardDescription>
@@ -8537,7 +13016,7 @@ export default function StoryboardGenerator() {
                               <div className="flex flex-col gap-3 rounded-lg border border-dashed border-gray-300 p-4 text-sm text-gray-600 dark:border-gray-700 dark:text-gray-400 sm:flex-row sm:items-center sm:justify-between">
                                 <div>
                                   <div className="font-medium text-gray-900 dark:text-gray-100">
-                                    第 {cs.chapterNumber} 章文字分镜已收起
+                                    第 {cs.chapterNumber} 集文字分镜已收起
                                   </div>
                                   <div className="text-xs">
                                     共 {cs.storyboard?.shots.length || 0} 个镜头，可随时展开查看或继续修改。
@@ -8563,7 +13042,7 @@ export default function StoryboardGenerator() {
                                     <AlertCircle className="w-6 h-6 text-red-500" />
                                   </div>
                                   <h4 className="text-base font-semibold text-red-600 dark:text-red-400 mb-1">
-                                    第 {cs.chapterNumber} 章分镜生成失败
+                                    第 {cs.chapterNumber} 集分镜生成失败
                                   </h4>
                                   <p className="text-sm text-gray-500 dark:text-gray-400 mb-4">
                                     请检查网络连接后点击下方按钮重新生成
@@ -8603,7 +13082,7 @@ export default function StoryboardGenerator() {
                                       <Badge variant="destructive">{shot.emotionalBeat}</Badge>
                                     )}
                                   </div>
-                                  
+
                                   <p className="text-sm">{shot.description}</p>
 
                                   {(shot.actorBlocking || shot.actionChange || shot.continuity) && (
@@ -8619,7 +13098,7 @@ export default function StoryboardGenerator() {
                                       )}
                                     </div>
                                   )}
-                                  
+
                                   {shot.characters && shot.characters.length > 0 && (
                                     <div className="space-y-2 bg-gray-50 dark:bg-gray-800 p-3 rounded">
                                       {shot.characters.map((char, i) => (
@@ -8634,7 +13113,7 @@ export default function StoryboardGenerator() {
                                               {char.position}
                                             </div>
                                           )}
-                                          
+
                                           {char.dialogue && (
                                             <div className="text-sm pl-3 border-l-2 border-purple-300">
                                               <span className="text-gray-500 text-xs">
@@ -8643,21 +13122,21 @@ export default function StoryboardGenerator() {
                                               <span className="italic">"{char.dialogue}"</span>
                                             </div>
                                           )}
-                                          
+
                                           {char.reaction && (
                                             <div className="text-sm pl-3 text-gray-600 dark:text-gray-400">
                                               <span className="text-gray-500 text-xs">反应：</span>
                                               {char.reaction}
                                             </div>
                                           )}
-                                          
+
                                           {char.performance && (
                                             <div className="text-sm pl-3 text-gray-600 dark:text-gray-400">
                                               <span className="text-gray-500 text-xs">表演：</span>
                                               {char.performance}
                                             </div>
                                           )}
-                                          
+
                                           {(char.action || char.expression || char.facialAction) && (
                                             <div className="text-sm pl-3 text-gray-600 dark:text-gray-400">
                                               {char.action && <span>动作：{char.action}</span>}
@@ -8665,7 +13144,7 @@ export default function StoryboardGenerator() {
                                               {char.facialAction && <span className="ml-2">脸部：{char.facialAction}</span>}
                                             </div>
                                           )}
-                                          
+
                                           {char.gesture && (
                                             <div className="text-sm pl-3 text-gray-600 dark:text-gray-400">
                                               <span className="text-gray-500 text-xs">手势：</span>
@@ -8683,7 +13162,7 @@ export default function StoryboardGenerator() {
                                       ))}
                                     </div>
                                   )}
-                                  
+
                                   {shot.scene && (
                                     <div className="text-sm text-gray-600 dark:text-gray-400 space-y-1">
                                       <div>
@@ -8699,14 +13178,14 @@ export default function StoryboardGenerator() {
                                       )}
                                     </div>
                                   )}
-                                  
+
                                   {shot.cameraMovement && (
                                     <div className="text-sm text-gray-600 dark:text-gray-400">
                                       <span className="font-medium">镜头运动：</span>
                                       {shot.cameraMovement}
                                     </div>
                                   )}
-                                  
+
                                   {shot.notes && (
                                     <div className="text-xs text-gray-500 italic">
                                       备注：{shot.notes}
@@ -8793,7 +13272,7 @@ export default function StoryboardGenerator() {
                       </Card>
                         );
                       })}
-                    
+
                     {/* 移除全局确认按钮 - 每个章节单独确认 */}
                   </div>
                 ) : (
@@ -8803,7 +13282,7 @@ export default function StoryboardGenerator() {
                         {!stepConfirmed.extraction ? (
                           <>
                             <BookOpen className="w-16 h-16 mx-auto mb-4 opacity-50" />
-                            <p>请先在"提取结果"标签页确认大纲和章节选择</p>
+                            <p>请先在“提取结果”标签页确认大纲和分集选择</p>
                             <Button
                               variant="outline"
                               size="sm"
@@ -8846,7 +13325,7 @@ export default function StoryboardGenerator() {
                         确认素材后可在提示词标签页查看和生成提示词
                       </span>
                     </div>
-                    
+
                     {Object.values(chapterStoryboards)
                       .filter(cs => cs.storyboardConfirmed)
                       .sort((a, b) => a.chapterNumber - b.chapterNumber)
@@ -8855,7 +13334,7 @@ export default function StoryboardGenerator() {
                         <CardHeader>
                           <div className="flex items-center justify-between">
                             <div>
-                              <CardTitle>第 {cs.chapterNumber} 章：{cs.chapterTitle}</CardTitle>
+                              <CardTitle>{getCanonicalEpisodeTitle(cs.chapterNumber)}</CardTitle>
                               <CardDescription>
                                 素材确认
                               </CardDescription>
@@ -8897,17 +13376,39 @@ export default function StoryboardGenerator() {
 
                               {!cs.assetsConfirmed && (() => {
                                 const assets = getChapterRelatedAssets(cs.chapterNumber);
+                                const chapterReferences = getChapterAssetReferences(cs);
+                                const missingReferences = chapterReferences.filter(reference => !reference.imageUrl);
                                 const hasAnyAssets = assets.characters.length > 0 || assets.scenes.length > 0 || assets.props.length > 0;
-                                
+
                                 return (
                                   <div className="space-y-3 pl-8">
+                                    {chapterReferences.length > 0 && (
+                                      <div className={`rounded-md border px-3 py-2 text-xs ${
+                                        missingReferences.length === 0
+                                          ? 'border-emerald-400/30 bg-emerald-500/10 text-emerald-200'
+                                          : 'border-amber-400/30 bg-amber-500/10 text-amber-100/80'
+                                      }`}>
+                                        <div className="flex flex-wrap items-center justify-between gap-2">
+                                          <span className="font-medium">第 {cs.chapterNumber} 集素材关联校验</span>
+                                          <span>
+                                            已匹配 {chapterReferences.length - missingReferences.length}/{chapterReferences.length} 项
+                                          </span>
+                                        </div>
+                                        {missingReferences.length > 0 && (
+                                          <p className="mt-1 break-words">
+                                            尚无图片：{missingReferences.slice(0, 6).map(reference => reference.label).join('、')}
+                                            {missingReferences.length > 6 ? ` 等 ${missingReferences.length} 项` : ''}
+                                          </p>
+                                        )}
+                                      </div>
+                                    )}
                                     {!hasAnyAssets && (
                                       <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-lg text-sm text-gray-500">
                                         <p>暂未找到本章涉及的素材信息。</p>
                                         <p className="text-xs mt-1">请确保已完成"并行提取"步骤，且分镜中包含人物、场景或道具信息。</p>
                                       </div>
                                     )}
-                                    
+
                                     {/* 人物 */}
                                     {assets.characters.length > 0 && (
                                       <div className="space-y-2">
@@ -8917,10 +13418,14 @@ export default function StoryboardGenerator() {
                                         </h5>
                                         <div className="grid grid-cols-1 gap-2">
                                           {assets.characters.map((char: any) => {
-                                            const assetData = getAssetImages('character', char.id);
+                                            const assetData = getAssetImages('character', char.id, char.name);
                                             const images = assetData?.images || [];
                                             const currentAssetId = assetData?.assetId || `character-${char.id}`;
-                                            
+                                            const linkedCharacterReferences = chapterReferences.filter(reference => (
+                                              reference.type === 'character' &&
+                                              normalizeAssetIdentity(reference.entityName) === normalizeAssetIdentity(char.name)
+                                            ));
+
                                             return (
                                               <div key={`character-${char.id}`} className="p-2 border rounded">
                                                 <div className="flex items-center justify-between mb-1">
@@ -8938,14 +13443,39 @@ export default function StoryboardGenerator() {
                                                     选图
                                                   </Button>
                                                 </div>
-                                                <div className="flex gap-1 flex-wrap">
-                                                  {images.length > 0 ? (
+                                                <div className="flex gap-2 flex-wrap">
+                                                  {linkedCharacterReferences.length > 0 ? (
+                                                    linkedCharacterReferences.map(reference => (
+                                                      <div key={`character-reference-${reference.entityName}-${reference.variantId || reference.label}`} className="min-w-[132px] rounded border border-amber-400/20 bg-black/10 p-1.5">
+                                                        <div className="flex items-center gap-2">
+                                                          {reference.imageUrl ? (
+                                                            <img
+                                                              src={reference.imageUrl}
+                                                              alt={reference.label}
+                                                              className="h-10 w-10 shrink-0 cursor-pointer rounded object-cover hover:opacity-80"
+                                                              onClick={() => openImagePreview(reference.imageUrl, reference.label, 'character')}
+                                                            />
+                                                          ) : (
+                                                            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded border border-dashed border-amber-400/30 text-amber-200/45">
+                                                              <ImageIcon className="size-4" />
+                                                            </div>
+                                                          )}
+                                                          <div className="min-w-0">
+                                                            <p className="max-w-[150px] truncate text-[11px]" title={reference.label}>{reference.label}</p>
+                                                            <p className={`text-[10px] ${reference.imageUrl ? 'text-emerald-400' : 'text-orange-400'}`}>
+                                                              {reference.imageUrl ? '已关联本集造型图' : '本集造型图待生成'}
+                                                            </p>
+                                                          </div>
+                                                        </div>
+                                                      </div>
+                                                    ))
+                                                  ) : images.length > 0 ? (
                                                     images.map((img: any, idx: number) => (
                                                       img.imageUrl ? (
                                                         <div key={`img-${img.imageId}-${idx}`} className="relative group">
-                                                          <img 
-                                                            src={img.imageUrl} 
-                                                            className="w-10 h-10 object-cover rounded cursor-pointer hover:opacity-80" 
+                                                          <img
+                                                            src={img.imageUrl}
+                                                            className="w-10 h-10 object-cover rounded cursor-pointer hover:opacity-80"
                                                             onClick={() => openImagePreview(img.imageUrl, char.name, 'character')}
                                                           />
                                                           <div className="absolute -top-1 -right-1 opacity-0 group-hover:opacity-100 transition-opacity">
@@ -8981,10 +13511,10 @@ export default function StoryboardGenerator() {
                                         </h5>
                                         <div className="grid grid-cols-1 gap-2">
                                           {assets.scenes.map((scene: any) => {
-                                            const assetData = getAssetImages('scene', scene.id);
+                                            const assetData = getAssetImages('scene', scene.id, scene.name);
                                             const images = assetData?.images || [];
                                             const currentAssetId = assetData?.assetId || `scene-${scene.id}`;
-                                            
+
                                             return (
                                               <div key={`scene-${scene.id}`} className="p-2 border rounded">
                                                 <div className="flex items-center justify-between mb-1">
@@ -9004,9 +13534,9 @@ export default function StoryboardGenerator() {
                                                     images.map((img: any, idx: number) => (
                                                       img.imageUrl ? (
                                                         <div key={`scene-img-${img.imageId}-${idx}`} className="relative group">
-                                                          <img 
-                                                            src={img.imageUrl} 
-                                                            className="w-10 h-10 object-cover rounded cursor-pointer hover:opacity-80" 
+                                                          <img
+                                                            src={img.imageUrl}
+                                                            className="w-10 h-10 object-cover rounded cursor-pointer hover:opacity-80"
                                                             onClick={() => openImagePreview(img.imageUrl, scene.name, 'scene')}
                                                           />
                                                           <div className="absolute -top-1 -right-1 opacity-0 group-hover:opacity-100 transition-opacity">
@@ -9042,10 +13572,10 @@ export default function StoryboardGenerator() {
                                         </h5>
                                         <div className="grid grid-cols-2 gap-2">
                                           {assets.props.map((prop: any) => {
-                                            const assetData = getAssetImages('prop', prop.id);
+                                            const assetData = getAssetImages('prop', prop.id, prop.name);
                                             const images = assetData?.images || [];
                                             const currentAssetId = assetData?.assetId || `prop-${prop.id}`;
-                                            
+
                                             return (
                                               <div key={`prop-${prop.id}`} className="p-2 border rounded">
                                                 <div className="flex items-center justify-between mb-1">
@@ -9064,9 +13594,9 @@ export default function StoryboardGenerator() {
                                                     images.map((img: any, idx: number) => (
                                                       img.imageUrl ? (
                                                         <div key={`prop-img-${img.imageId}-${idx}`} className="relative group">
-                                                          <img 
-                                                            src={img.imageUrl} 
-                                                            className="w-8 h-8 object-cover rounded cursor-pointer hover:opacity-80" 
+                                                          <img
+                                                            src={img.imageUrl}
+                                                            className="w-8 h-8 object-cover rounded cursor-pointer hover:opacity-80"
                                                             onClick={() => openImagePreview(img.imageUrl, prop.name, 'prop')}
                                                           />
                                                           <div className="absolute -top-1 -right-1 opacity-0 group-hover:opacity-100 transition-opacity">
@@ -9097,7 +13627,15 @@ export default function StoryboardGenerator() {
                                       <span className="text-xs text-gray-500">点击"选图"从图片库选择，或去"素材管理"标签页生成图片</span>
                                       <Button
                                         size="sm"
-                                        onClick={() => confirmChapterAssets(cs.chapterNumber)}
+                                        onClick={() => {
+                                          if (missingReferences.length > 0) {
+                                            toast.warning(`第 ${cs.chapterNumber} 集还有 ${missingReferences.length} 项素材图片未生成`, {
+                                              description: '仍可继续，后续会使用已关联图片和文字描述；建议先补齐关键人物造型、主场景和关键道具。',
+                                            });
+                                          }
+                                          confirmChapterAssets(cs.chapterNumber);
+                                        }}
+                                        title={missingReferences.length > 0 ? `还有 ${missingReferences.length} 项图片未生成` : '本集素材已全部关联'}
                                       >
                                         <CheckCircle2 className="w-4 h-4 mr-1" />
                                         确认素材
@@ -9134,7 +13672,7 @@ export default function StoryboardGenerator() {
                       分镜提示词设置
                     </CardTitle>
                     <CardDescription>
-                      设置故事版面板描述的画面比例、风格和光影效果（全局设置，应用于所有章节）
+                      设置故事版面板描述的画面比例、风格和光影效果（全局设置，应用于所有分集）
                     </CardDescription>
                   </CardHeader>
                   <CardContent>
@@ -9246,12 +13784,12 @@ export default function StoryboardGenerator() {
                           const hasShots = cs.storyboard?.shots && cs.storyboard.shots.length > 0;
                           const isPromptChapterCollapsed = collapsedPromptChapters[String(cs.chapterNumber)] ?? true;
                           const hasExportablePrompts = (cs.videoPrompts?.length ?? 0) > 0 || (cs.promptGroups?.length ?? 0) > 0;
-                          
+
                           return (
                             <div key={`prompts-section-${cs.chapterNumber}`} className="mb-4 last:mb-0">
                               <div className="flex items-center justify-between mb-3">
                                 <div className="flex items-center gap-2">
-                                  <Badge variant="secondary">第 {cs.chapterNumber} 章</Badge>
+                                  <Badge variant="secondary">第 {cs.chapterNumber} 集</Badge>
                                   <span className="text-sm font-medium">{cs.chapterTitle}</span>
                                   {cs.videoPrompts && cs.videoPrompts.length > 0 && (
                                     <span className="text-xs text-gray-500">({cs.videoPrompts.length} 个镜头)</span>
@@ -9295,7 +13833,7 @@ export default function StoryboardGenerator() {
                                   )}
                                 </div>
                               </div>
-                              
+
                               {/* 显示当前章节应用的分镜提示词设置 */}
                               <div className={`mb-3 p-2 bg-blue-50 dark:bg-blue-900/20 rounded-lg border border-blue-200 dark:border-blue-800 ${isPromptChapterCollapsed ? 'hidden' : ''}`}>
                                 <div className="flex items-center gap-2 text-xs">
@@ -9318,7 +13856,7 @@ export default function StoryboardGenerator() {
                                   </div>
                                 </div>
                               </div>
-                              
+
                               {/* 检查是否有分镜数据 */}
                               {isPromptChapterCollapsed ? (
                                 <div className="p-3 rounded-lg border bg-gray-50 text-sm text-gray-500 dark:bg-gray-900 dark:text-gray-400">
@@ -9327,7 +13865,7 @@ export default function StoryboardGenerator() {
                               ) : !hasShots ? (
                                 <div className="p-4 bg-yellow-50 dark:bg-yellow-900/20 rounded-lg text-center">
                                   <AlertTriangle className="w-5 h-5 mx-auto mb-2 text-yellow-500" />
-                                  <p className="text-yellow-700 dark:text-yellow-400 text-sm mb-2">该章节没有分镜数据</p>
+                                  <p className="text-yellow-700 dark:text-yellow-400 text-sm mb-2">该分集没有分镜数据</p>
                                   <p className="text-xs text-yellow-600 dark:text-yellow-500">请先在"文字分镜"标签页重新生成分镜</p>
                                 </div>
 	                              ) : cs.videoPrompts && cs.videoPrompts.length > 0 ? (
@@ -9338,7 +13876,7 @@ export default function StoryboardGenerator() {
                                   <div className="flex items-center gap-2 mb-2">
                                     <Film className="w-4 h-4 text-purple-500" />
                                     <h4 className="text-sm font-semibold text-purple-700 dark:text-purple-400">
-                                      故事板分组（{(cs.promptGroups?.length ?? 0)}组 · 每组4个镜头 · ~15秒连冠段落）
+                                      故事板分组（{(cs.promptGroups?.length ?? 0)}组 · 按连续镜头实际时长分组 · 单组不超过15秒）
                                     </h4>
                                   </div>
                                   {(cs.promptGroups ?? []).map((pg, gi) => (
@@ -9351,7 +13889,7 @@ export default function StoryboardGenerator() {
                                               镜头 {pg.shotNumbers.join('、')}
                                             </Badge>
                                             <Badge variant="outline" className="text-xs">
-                                              {pg.shotNumbers.length * 4}秒连冠
+                                              {formatStoryboardDurationSeconds(getPromptGroupDurationSeconds(cs, pg))}秒
                                             </Badge>
                                           </div>
                                           <div className="flex items-center gap-1">
@@ -9378,11 +13916,12 @@ export default function StoryboardGenerator() {
                                                     body: JSON.stringify({
                                                       chapterTitle: cs.chapterTitle,
                                                       groupIndex: pg.groupIndex,
-                                                      shots: pg.shotNumbers.map(sn => 
+                                                      shots: pg.shotNumbers.map(sn =>
                                                         cs.storyboard?.shots.find(s => s.shotNumber === sn)
                                                       ).filter(Boolean),
                                                       referenceImages: refImages,
                                                       imageSettings: globalImageSettings,
+                                                      creationBible: getCreationBiblePayload(),
                                                     }),
                                                   });
                                                   const data = await resp.json();
@@ -9422,7 +13961,7 @@ export default function StoryboardGenerator() {
                                       <CardContent className="pb-2">
                                         {/* 合并提示词 */}
                                         <div className="mb-3">
-                                          <label className="block text-xs font-medium text-gray-500 mb-1">连冠故事版面板描述</label>
+                                          <label className="block text-xs font-medium text-gray-500 mb-1">连贯故事版面板描述</label>
                                           <Textarea
                                             value={pg.combinedPrompt}
                                             onChange={(e) => {
@@ -9439,7 +13978,7 @@ export default function StoryboardGenerator() {
                                             className="min-h-[80px] text-xs"
                                           />
                                         </div>
-                                        
+
                                         {/* 故事板总控图出图入口在独立「故事板」标签页，这里只保留提示词正文。 */}
                                         {false && (
                                         <div className="mb-2">
@@ -9484,12 +14023,13 @@ export default function StoryboardGenerator() {
                                                       body: JSON.stringify({
                                                         chapterTitle: cs.chapterTitle,
                                                         groupIndex: pg.groupIndex,
-                                                        shots: pg.shotNumbers.map(sn => 
+                                                        shots: pg.shotNumbers.map(sn =>
                                                           cs.storyboard?.shots.find(s => s.shotNumber === sn)
                                                         ).filter(Boolean),
                                                         referenceImages: refImages,
                                                         imageSettings: globalImageSettings,
                                                         customPrompt: pg.storyboardPromptText,
+                                                        creationBible: getCreationBiblePayload(),
                                                       }),
                                                     });
                                                     const data = await resp.json();
@@ -9620,12 +14160,13 @@ export default function StoryboardGenerator() {
                                                         body: JSON.stringify({
                                                           chapterTitle: cs.chapterTitle,
                                                           groupIndex: pg.groupIndex,
-                                                          shots: pg.shotNumbers.map(sn => 
+                                                          shots: pg.shotNumbers.map(sn =>
                                                             cs.storyboard?.shots.find(s => s.shotNumber === sn)
                                                           ).filter(Boolean),
                                                           referenceImages: refImages,
                                                           imageSettings: globalImageSettings,
                                                           customPrompt: pg.storyboardPromptText,
+                                                          creationBible: getCreationBiblePayload(),
                                                         }),
                                                       });
                                                       const data = await resp.json();
@@ -9686,11 +14227,12 @@ export default function StoryboardGenerator() {
                                                         body: JSON.stringify({
                                                           chapterTitle: cs.chapterTitle,
                                                           groupIndex: pg.groupIndex,
-                                                          shots: pg.shotNumbers.map(sn => 
+                                                          shots: pg.shotNumbers.map(sn =>
                                                             cs.storyboard?.shots.find(s => s.shotNumber === sn)
                                                           ).filter(Boolean),
                                                           referenceImages: refImages,
                                                           imageSettings: globalImageSettings,
+                                                          creationBible: getCreationBiblePayload(),
                                                         }),
                                                       });
                                                       const data = await resp.json();
@@ -9760,11 +14302,12 @@ export default function StoryboardGenerator() {
                                                       body: JSON.stringify({
                                                         chapterTitle: cs.chapterTitle,
                                                         groupIndex: pg.groupIndex,
-                                                        shots: pg.shotNumbers.map(sn => 
+                                                        shots: pg.shotNumbers.map(sn =>
                                                           cs.storyboard?.shots.find(s => s.shotNumber === sn)
                                                         ).filter(Boolean),
                                                         referenceImages: refImages2,
                                                         imageSettings: globalImageSettings,
+                                                        creationBible: getCreationBiblePayload(),
                                                       }),
                                                     });
                                                     const data = await resp.json();
@@ -9818,7 +14361,7 @@ export default function StoryboardGenerator() {
                                   ))}
                                 </div>
                               )}
-                              
+
 
 
                               {/* 确认按钮 */}
@@ -9835,31 +14378,31 @@ export default function StoryboardGenerator() {
                                           promptsConfirmed: true,
                                         }
                                       };
-                                      
+
                                       // 检查是否所有已确认素材的章节都确认了提示词
                                       const allAssetsConfirmed = Object.values(updated).filter(c => c.assetsConfirmed);
                                       const allPromptsConfirmed = allAssetsConfirmed.every(c => c.promptsConfirmed);
-                                      
+
                                       // 只要确认了提示词就前进到生成视频步骤
                                       setCurrentStep(5);
                                       setProgress(80);
-                                      
+
                                       // 如果所有章节提示词都已确认，更新全局确认状态
                                       if (allPromptsConfirmed && allAssetsConfirmed.length > 0) {
                                         setStepConfirmed(prevState => ({ ...prevState, prompts: true }));
                                         setProgress(90);
                                       }
-                                      
+
                                       return updated;
                                     });
-                                    toast.success(`第 ${cs.chapterNumber} 章故事版面板描述已确认`);
+                                    toast.success(`第 ${cs.chapterNumber} 集故事版面板描述已确认`);
                                   }}
                                 >
                                   <CheckCircle2 className="w-4 h-4 mr-1" />
                                   确认本章故事版面板描述
                                 </Button>
                               )}
-                              
+
                               {/* 重新生成按钮 */}
                               <AlertDialog>
                                 <AlertDialogTrigger asChild>
@@ -9877,7 +14420,7 @@ export default function StoryboardGenerator() {
                                   <AlertDialogHeader>
                                     <AlertDialogTitle>确认重新生成故事版面板描述？</AlertDialogTitle>
                                     <AlertDialogDescription>
-                                      此操作将清空当前章节的故事版面板描述数据并重新生成。已生成的视频不会受影响。此操作不可撤销。
+                                      此操作将清空当前分集的故事版面板描述数据并重新生成。已生成的视频不会受影响。此操作不可撤销。
                                     </AlertDialogDescription>
                                   </AlertDialogHeader>
                                   <AlertDialogFooter>
@@ -9889,7 +14432,7 @@ export default function StoryboardGenerator() {
                                           toast.error('没有分镜数据');
                                           return;
                                         }
-                                        
+
                                         // 清空现有提示词
                                         setChapterStoryboards(prev => ({
                                           ...prev,
@@ -9899,26 +14442,26 @@ export default function StoryboardGenerator() {
                                             promptsConfirmed: false,
                                           }
                                         }));
-                                        
+
                                         // 添加当前章节到生成中列表
-                                        setGeneratingPromptsChapters(prev => 
+                                        setGeneratingPromptsChapters(prev =>
                                           prev.includes(cs.chapterNumber) ? prev : [...prev, cs.chapterNumber]
                                         );
-                                        toast.info(`正在重新生成第 ${cs.chapterNumber} 章故事版面板描述...`);
-                                        
+                                        toast.info(`正在重新生成第 ${cs.chapterNumber} 集故事版面板描述...`);
+
                                         try {
                                           // 设置 10 分钟超时（大于 API maxDuration，让 API 优先返回 504）
                                           const controller = new AbortController();
                                           const timeoutId = setTimeout(() => {
                                             controller.abort();
                                           }, 10 * 60 * 1000);
-                                          
+
                                           // 获取本章相关的素材图片
                                           const chapterAssetImages = getChapterAssetImages(cs.chapterNumber);
-                                          
+
                                           // 获取章节故事内容
                                           const chapterInfo = outline?.chapters?.find(c => c.chapterNumber === cs.chapterNumber);
-                                          
+
                                           const response = await fetch('/api/generate-connecting-prompts', {
                                             method: 'POST',
                                             headers: { 'Content-Type': 'application/json' },
@@ -9934,19 +14477,21 @@ export default function StoryboardGenerator() {
                                               scenesData,
                                               charactersData,
                                               propsData,
+                                              chapterNumber: cs.chapterNumber,
+                                              creationBible: getCreationBiblePayload(),
                                             }),
                                             signal: controller.signal,
                                           }).finally(() => {
                                             clearTimeout(timeoutId);
                                           });
-                                          
+
                                           if (!response.ok) {
                                             if (response.status === 504) {
                                               throw new Error('请求超时，故事版面板描述生成需要较长时间。\n\n建议：\n1. 请等待 30 秒后重新点击生成按钮\n2. 如果问题持续，请尝试减少分镜数量\n3. 或者联系技术支持');
                                             }
                                             throw new Error(`API 请求失败: ${response.status}`);
                                           }
-                                          
+
                                           const data = await response.json();
                                           if (data.success && data.connectingPrompts) {
                                             setChapterStoryboards(prev => ({
@@ -9955,9 +14500,12 @@ export default function StoryboardGenerator() {
                                                 ...prev[cs.chapterNumber],
                                                 videoPrompts: data.connectingPrompts.shotPrompts.map((sp: any) => ({ ...sp, videoPrompt: sp.panelDescription || sp.videoPrompt || '' })),
                                                 promptGroups: groupShotsIntoPromptGroups(data.connectingPrompts.shotPrompts.map((sp: any) => ({ ...sp, videoPrompt: sp.panelDescription || sp.videoPrompt || '' })), shots),
+                                                promptsConfirmed: false,
+                                                // 分组边界已变化，旧负数索引的视频不能继续挂到同序号的新分组。
+                                                shotVideos: (prev[cs.chapterNumber].shotVideos || []).filter(shotVideo => shotVideo.shotNumber >= 0),
                                               }
                                             }));
-                                            toast.success(`第 ${cs.chapterNumber} 章故事版面板描述重新生成成功`);
+                                            toast.success(`第 ${cs.chapterNumber} 集故事版面板描述重新生成成功`);
                                           } else {
                                             toast.error(data.error || '生成失败');
                                           }
@@ -9966,7 +14514,7 @@ export default function StoryboardGenerator() {
                                           const errorMessage = getNetworkErrorMessage(error, '重新生成故事版面板描述');
                                           toast.error(errorMessage);
                                         } finally {
-                                          setGeneratingPromptsChapters(prev => 
+                                          setGeneratingPromptsChapters(prev =>
                                             prev.filter(n => n !== cs.chapterNumber)
                                           );
                                         }
@@ -9988,25 +14536,25 @@ export default function StoryboardGenerator() {
                                   toast.error('没有分镜数据');
                                   return;
                                 }
-                                
+
                                 // 添加当前章节到生成中列表
-                                setGeneratingPromptsChapters(prev => 
+                                setGeneratingPromptsChapters(prev =>
                                   prev.includes(cs.chapterNumber) ? prev : [...prev, cs.chapterNumber]
                                 );
-                                toast.info(`正在生成第 ${cs.chapterNumber} 章故事版面板描述...`);
+                                toast.info(`正在生成第 ${cs.chapterNumber} 集故事版面板描述...`);
                                 try {
                                   // 设置 10 分钟超时（大于 API maxDuration，让 API 优先返回 504）
                                   const controller = new AbortController();
                                   const timeoutId = setTimeout(() => {
                                     controller.abort();
                                   }, 10 * 60 * 1000);
-                                  
+
                                   // 获取本章相关的素材图片
                                   const chapterAssetImages = getChapterAssetImages(cs.chapterNumber);
-                                  
+
                                   // 获取章节故事内容
                                   const chapterInfo = outline?.chapters?.find(c => c.chapterNumber === cs.chapterNumber);
-                                  
+
                                   const response = await fetch('/api/generate-connecting-prompts', {
                                     method: 'POST',
                                     headers: { 'Content-Type': 'application/json' },
@@ -10022,12 +14570,14 @@ export default function StoryboardGenerator() {
                                       scenesData,   // 传递场景数据（用于匹配 ID）
                                       charactersData, // 传递人物数据（用于匹配 ID）
                                       propsData,    // 传递道具数据（用于匹配 ID）
+                                      chapterNumber: cs.chapterNumber,
+                                      creationBible: getCreationBiblePayload(),
                                     }),
                                     signal: controller.signal,
                                   }).finally(() => {
                                     clearTimeout(timeoutId);
                                   });
-                                  
+
                                   // 检查响应状态
                                   if (!response.ok) {
                                     const errorText = await response.text().catch(() => '');
@@ -10036,7 +14586,7 @@ export default function StoryboardGenerator() {
                                     }
                                     throw new Error(`API 请求失败: ${response.status}`);
                                   }
-                                  
+
                                   const data = await response.json();
                                   if (data.success && data.connectingPrompts) {
                                     setChapterStoryboards(prev => ({
@@ -10045,9 +14595,11 @@ export default function StoryboardGenerator() {
                                         ...prev[cs.chapterNumber],
                                         videoPrompts: data.connectingPrompts.shotPrompts.map((sp: any) => ({ ...sp, videoPrompt: sp.panelDescription || sp.videoPrompt || '' })),
                                         promptGroups: groupShotsIntoPromptGroups(data.connectingPrompts.shotPrompts.map((sp: any) => ({ ...sp, videoPrompt: sp.panelDescription || sp.videoPrompt || '' })), shots),
+                                        promptsConfirmed: false,
+                                        shotVideos: (prev[cs.chapterNumber].shotVideos || []).filter(shotVideo => shotVideo.shotNumber >= 0),
                                       }
                                     }));
-                                    toast.success(`第 ${cs.chapterNumber} 章故事版面板描述生成成功`);
+                                    toast.success(`第 ${cs.chapterNumber} 集故事版面板描述生成成功`);
                                   } else {
                                     toast.error(data.error || '生成失败');
                                   }
@@ -10057,7 +14609,7 @@ export default function StoryboardGenerator() {
                                   toast.error(errorMessage);
                                 } finally {
                                   // 从生成中列表移除当前章节
-                                  setGeneratingPromptsChapters(prev => 
+                                  setGeneratingPromptsChapters(prev =>
                                     prev.filter(n => n !== cs.chapterNumber)
                                   );
                                 }
@@ -10102,7 +14654,7 @@ export default function StoryboardGenerator() {
                     <h3 className="text-base font-semibold">故事板总控图</h3>
                   </div>
                   <Badge variant="secondary">
-                    {Object.values(chapterStoryboards).reduce((sum, cs) => 
+                    {Object.values(chapterStoryboards).reduce((sum, cs) =>
                       sum + (cs.promptGroups?.length ?? 0), 0
                     )} 组分镜
                   </Badge>
@@ -10161,7 +14713,7 @@ export default function StoryboardGenerator() {
                                         镜头 {pg.shotNumbers.join('、')}
                                       </Badge>
                                       <Badge variant="outline" className="text-xs">
-                                        {pg.shotNumbers.length * 4}秒连冠
+                                        {formatStoryboardDurationSeconds(getPromptGroupDurationSeconds(cs, pg))}秒
                                       </Badge>
                                     </div>
                                     <Button
@@ -10187,11 +14739,12 @@ export default function StoryboardGenerator() {
                                             body: JSON.stringify({
                                               chapterTitle: cs.chapterTitle,
                                               groupIndex: pg.groupIndex,
-                                              shots: pg.shotNumbers.map(sn => 
+                                              shots: pg.shotNumbers.map(sn =>
                                                 cs.storyboard?.shots.find(s => s.shotNumber === sn)
                                               ).filter(Boolean),
                                               referenceImages: refImages,
                                               imageSettings: globalImageSettings,
+                                              creationBible: getCreationBiblePayload(),
                                             }),
                                           });
                                           const data = await resp.json();
@@ -10226,7 +14779,7 @@ export default function StoryboardGenerator() {
                                       <RotateCcw className={`w-3 h-3 ${pg.isGeneratingPrompt ? 'animate-spin' : ''}`} />
                                     </Button>
                                   </div>
-                                  
+
                                   {/* 故事板图片 */}
                                   <div className="mb-2">
                                     {pg.storyboardImageUrl ? (
@@ -10279,7 +14832,7 @@ export default function StoryboardGenerator() {
                                                 body: JSON.stringify({
                                                   chapterTitle: cs.chapterTitle,
                                                   groupIndex: pg.groupIndex,
-                                                  shots: pg.shotNumbers.map(sn => 
+                                                  shots: pg.shotNumbers.map(sn =>
                                                     cs.storyboard?.shots.find(s => s.shotNumber === sn)
                                                   ).filter(Boolean),
                                                   referenceImages: refImages,
@@ -10289,6 +14842,7 @@ export default function StoryboardGenerator() {
                                                     lighting: globalImageSettings.lighting,
                                                   },
                                                   customPrompt: pg.storyboardPromptText,
+                                                  creationBible: getCreationBiblePayload(),
                                                 }),
                                               });
                                               const data = await resp.json();
@@ -10436,7 +14990,7 @@ export default function StoryboardGenerator() {
                                                       body: JSON.stringify({
                                                         chapterTitle: cs.chapterTitle,
                                                         groupIndex: pg.groupIndex,
-                                                        shots: pg.shotNumbers.map(sn => 
+                                                        shots: pg.shotNumbers.map(sn =>
                                                           cs.storyboard?.shots.find(s => s.shotNumber === sn)
                                                         ).filter(Boolean),
                                                         referenceImages: refImages,
@@ -10446,6 +15000,7 @@ export default function StoryboardGenerator() {
                                                           lighting: globalImageSettings.lighting,
                                                         },
                                                         customPrompt: pg.storyboardPromptText,
+                                                        creationBible: getCreationBiblePayload(),
                                                       }),
                                                     });
                                                     const data = await resp.json();
@@ -10505,11 +15060,12 @@ export default function StoryboardGenerator() {
                                                       body: JSON.stringify({
                                                         chapterTitle: cs.chapterTitle,
                                                         groupIndex: pg.groupIndex,
-                                                        shots: pg.shotNumbers.map(sn => 
+                                                        shots: pg.shotNumbers.map(sn =>
                                                           cs.storyboard?.shots.find(s => s.shotNumber === sn)
                                                         ).filter(Boolean),
                                                         referenceImages: refImages,
                                                         imageSettings: globalImageSettings,
+                                                        creationBible: getCreationBiblePayload(),
                                                       }),
                                                     });
                                                     const data = await resp.json();
@@ -10581,11 +15137,12 @@ export default function StoryboardGenerator() {
                                                     body: JSON.stringify({
                                                       chapterTitle: cs.chapterTitle,
                                                       groupIndex: pg.groupIndex,
-                                                      shots: pg.shotNumbers.map(sn => 
+                                                      shots: pg.shotNumbers.map(sn =>
                                                         cs.storyboard?.shots.find(s => s.shotNumber === sn)
                                                       ).filter(Boolean),
                                                       referenceImages: refImages,
                                                       imageSettings: globalImageSettings,
+                                                      creationBible: getCreationBiblePayload(),
                                                     }),
                                                   });
                                                   const data = await resp.json();
@@ -10714,9 +15271,9 @@ export default function StoryboardGenerator() {
                             <CardHeader className="pb-2">
                               <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                                 <div>
-                                  <CardTitle className="text-base">第 {cs.chapterNumber} 章：{cs.chapterTitle}</CardTitle>
+                                  <CardTitle className="text-base">{getCanonicalEpisodeTitle(cs.chapterNumber)}</CardTitle>
                                   <CardDescription>
-                                    按故事板分组生成视频，每组使用故事版提示词、故事版总控图和最多9张关联素材图
+                                    按连续镜头实际时长分组生成视频，单组不超过15秒，并使用故事版提示词、故事版总控图和最多9张关联素材图
                                   </CardDescription>
                                 </div>
                                 <div className="text-sm text-gray-500">
@@ -10751,6 +15308,7 @@ export default function StoryboardGenerator() {
                                           <div className="flex flex-wrap items-center gap-2">
                                             <Badge>第 {pg.groupIndex} 组</Badge>
                                             <Badge variant="outline">镜头 {pg.shotNumbers.join('、')}</Badge>
+                                            <Badge variant="outline">{formatStoryboardDurationSeconds(getPromptGroupDurationSeconds(cs, pg))}秒</Badge>
                                             <Badge variant="secondary">参考图 {referenceImages.length}/9</Badge>
                                             <Badge variant="outline">关联实体 {linkedEntityCount}</Badge>
                                             {pg.storyboardImageUrl ? (
@@ -10873,7 +15431,7 @@ export default function StoryboardGenerator() {
                       })}
                   </div>
                 )}
-                
+
                 {Object.values(chapterStoryboards).some(cs => cs.promptsConfirmed || (cs.shotVideos && cs.shotVideos.length > 0)) ? (
                   Object.values(chapterStoryboards)
                     .filter(cs => (cs.promptsConfirmed || (cs.shotVideos && cs.shotVideos.length > 0)) && (cs.promptGroups?.length ?? 0) === 0)
@@ -10886,13 +15444,13 @@ export default function StoryboardGenerator() {
                       const totalDuration = allVideos
                         .filter(v => v.status === 'success')
                         .reduce((sum, v) => sum + v.duration, 0);
-                      
+
                       return (
                         <Card key={`videos-card-${cs.chapterNumber}`} className="mb-4">
                           <CardHeader className="pb-2">
                             <div className="flex items-center justify-between">
                               <div className="flex items-center gap-2">
-                                <CardTitle className="text-base">第 {cs.chapterNumber} 章</CardTitle>
+                                <CardTitle className="text-base">第 {cs.chapterNumber} 集</CardTitle>
                                 <span className="text-sm font-normal text-gray-500">{cs.chapterTitle}</span>
                               </div>
                               <div className="flex items-center gap-3">
@@ -10919,9 +15477,9 @@ export default function StoryboardGenerator() {
                                   </AlertDialogTrigger>
                                   <AlertDialogContent>
                                     <AlertDialogHeader>
-                                      <AlertDialogTitle>确认清空章节内容？</AlertDialogTitle>
+                                      <AlertDialogTitle>确认清空本集内容？</AlertDialogTitle>
                                       <AlertDialogDescription>
-                                        此操作将清空第 {cs.chapterNumber} 章的所有视频和提示词数据，您可以重新生成故事版面板描述。此操作不可撤销。
+                                        此操作将清空第 {cs.chapterNumber} 集的所有视频和提示词数据，您可以重新生成故事版面板描述。此操作不可撤销。
                                       </AlertDialogDescription>
                                     </AlertDialogHeader>
                                     <AlertDialogFooter>
@@ -10938,7 +15496,7 @@ export default function StoryboardGenerator() {
                                               promptsConfirmed: false,
                                             }
                                           }));
-                                          toast.success(`第 ${cs.chapterNumber} 章内容已清空`);
+                                          toast.success(`第 ${cs.chapterNumber} 集内容已清空`);
                                         }}
                                       >
                                         确认清空
@@ -10964,7 +15522,7 @@ export default function StoryboardGenerator() {
                                   const videos = shotVideo?.videos || [];
                                   const successVideosCount = videos.filter(v => v.status === 'success').length;
                                   const generatingVideosCount = videos.filter(v => v.status === 'generating').length;
-                                  
+
                                   return (
                                   <div key={`vp-${cs.chapterNumber}-shot-${shot.shotNumber}`} className="border rounded-lg p-3">
                                     <div className="flex items-center gap-2 mb-3">
@@ -10975,7 +15533,7 @@ export default function StoryboardGenerator() {
                                         {generatingVideosCount > 0 && ` (${generatingVideosCount}个生成中)`}
                                       </span>
                                     </div>
-                                    
+
                                     <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
                                       {videos.map(video => (
                                         <div key={video.videoId} className="relative group">
@@ -10995,6 +15553,11 @@ export default function StoryboardGenerator() {
                                                 variant="outline"
                                                 className="mt-2"
                                                 onClick={async () => {
+                                                  if (shotVideoPayload.voiceResolution.missingCharacters.length > 0) {
+                                                    toast.error(`请先为以下说话人物捆绑音色：${shotVideoPayload.voiceResolution.missingCharacters.join('、')}`);
+                                                    setActiveTab('extraction');
+                                                    return;
+                                                  }
                                                   // 重新生成
                                                   setChapterStoryboards(prev => ({
                                                     ...prev,
@@ -11014,7 +15577,7 @@ export default function StoryboardGenerator() {
                                                       ),
                                                     }
                                                   }));
-                                                  
+
                                                   try {
                                                     const generatedVideo = await createAndWaitForManfeiVideo({
                                                         prompt: shotVideoPayload.prompt,
@@ -11029,6 +15592,8 @@ export default function StoryboardGenerator() {
                                                           name: item.name,
                                                         })),
                                                         linkedEntities: shotVideoPayload.referenceSelection.entities,
+                                                        speakingCharacters: shotVideoPayload.voiceResolution.speakingCharacters,
+                                                        voiceAssignments: shotVideoPayload.voiceResolution.assignments,
                                                         imageUrlEndFrame: cs.imageStoryboards?.find(s => s.shotNumber === shot.shotNumber)?.imageUrlEndFrame || "",
                                                       }, (taskId) => {
                                                         setChapterStoryboards(prev => ({
@@ -11051,7 +15616,7 @@ export default function StoryboardGenerator() {
                                                       // 保存视频到 S3
                                                       let s3VideoUrl = generatedVideo.url;
                                                       let s3VideoKey = generatedVideo.key;
-                                                      
+
                                                       try {
                                                         const saveResponse = await fetch('/api/save-video-to-s3', {
                                                           method: 'POST',
@@ -11064,7 +15629,7 @@ export default function StoryboardGenerator() {
                                                           }),
                                                         });
                                                         const saveData = await saveResponse.json();
-                                                        
+
                                                         if (saveData.success) {
                                                           s3VideoUrl = saveData.url;
                                                           s3VideoKey = saveData.key;
@@ -11073,10 +15638,10 @@ export default function StoryboardGenerator() {
                                                       } catch (saveError) {
                                                         console.warn('保存视频到 S3 失败，使用原始 URL:', saveError);
                                                       }
-                                                      
+
                                                       const finalVideoUrl = s3VideoUrl;
                                                       const finalVideoKey = s3VideoKey;
-                                                      
+
                                                       setChapterStoryboards(prev => ({
                                                         ...prev,
                                                         [cs.chapterNumber]: {
@@ -11120,7 +15685,7 @@ export default function StoryboardGenerator() {
                                                         ),
                                                       }
                                                     }));
-                                                    toast.error('视频重新生成失败');
+                                                    toast.error(error instanceof Error ? error.message : '视频重新生成失败');
                                                   }
                                                 }}
                                               >
@@ -11135,7 +15700,7 @@ export default function StoryboardGenerator() {
                                                 className="w-full aspect-video rounded"
                                                 style={{ aspectRatio: videoRatio === '16:9' ? '16/9' : '9/16' }}
                                               />
-                                              
+
                                               {/* 操作按钮 */}
                                               <div className="absolute top-2 right-2 flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
                                                 <Button
@@ -11174,23 +15739,28 @@ export default function StoryboardGenerator() {
                                               </div>
                                             </div>
                                           )}
-                                          
+
                                           {/* 视频时长 */}
                                           <div className="mt-1 text-xs text-gray-500 text-center">
                                             {video.duration}秒
                                           </div>
                                         </div>
                                       ))}
-                                      
+
                                       {/* 添加更多视频按钮 */}
                                       {videos.length < 3 && (() => {
                                         const generating = videos.some(v => v.status === 'generating');
-                                        
+
                                         return (
                                           <button
                                             className="aspect-video border-2 border-dashed border-gray-300 dark:border-gray-700 rounded flex items-center justify-center hover:border-gray-400 dark:hover:border-gray-600 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                                             disabled={generating}
                                             onClick={async () => {
+                                              if (shotVideoPayload.voiceResolution.missingCharacters.length > 0) {
+                                                toast.error(`请先为以下说话人物捆绑音色：${shotVideoPayload.voiceResolution.missingCharacters.join('、')}`);
+                                                setActiveTab('extraction');
+                                                return;
+                                              }
                                               const videoId = `video-${cs.chapterNumber}-${shot.shotNumber}-${Date.now()}`;
                                               const newVideo: VideoItem = {
                                                 videoId,
@@ -11201,12 +15771,12 @@ export default function StoryboardGenerator() {
                                                 status: 'generating',
                                                 createdAt: Date.now(),
                                               };
-                                              
+
                                               // 初始化或更新 shotVideos
                                               setChapterStoryboards(prev => {
                                                 const existing = prev[cs.chapterNumber].shotVideos || [];
                                                 const existingShot = existing.find(sv => sv.shotNumber === shot.shotNumber);
-                                                
+
                                                 let newShotVideos: ShotVideos[];
                                                 if (existingShot) {
                                                   newShotVideos = existing.map(sv =>
@@ -11217,7 +15787,7 @@ export default function StoryboardGenerator() {
                                                 } else {
                                                   newShotVideos = [...existing, { shotNumber: shot.shotNumber, videos: [newVideo] }];
                                                 }
-                                                
+
                                                 return {
                                                   ...prev,
                                                   [cs.chapterNumber]: {
@@ -11226,9 +15796,9 @@ export default function StoryboardGenerator() {
                                                   }
                                                 };
                                               });
-                                              
+
                                               toast.info(`镜头 ${shot.shotNumber} 视频生成中...`);
-                                              
+
                                               try {
                                                 const generatedVideo = await createAndWaitForManfeiVideo({
                                                     prompt: shotVideoPayload.prompt,
@@ -11243,6 +15813,8 @@ export default function StoryboardGenerator() {
                                                       name: item.name,
                                                     })),
                                                     linkedEntities: shotVideoPayload.referenceSelection.entities,
+                                                    speakingCharacters: shotVideoPayload.voiceResolution.speakingCharacters,
+                                                    voiceAssignments: shotVideoPayload.voiceResolution.assignments,
                                                     imageUrlEndFrame: cs.imageStoryboards?.find(s => s.shotNumber === shot.shotNumber)?.imageUrlEndFrame || "",
                                                   }, (taskId) => {
                                                     setChapterStoryboards(prev => ({
@@ -11265,11 +15837,11 @@ export default function StoryboardGenerator() {
                                                   // 保存视频到 S3
                                                   let s3VideoUrl = generatedVideo.url;
                                                   let s3VideoKey = generatedVideo.key;
-                                                  
+
                                                   // 获取当前视频索引
                                                   const currentShotVideos = cs.shotVideos?.find(sv => sv.shotNumber === shot.shotNumber);
                                                   const videoIndex = currentShotVideos?.videos.length || 0;
-                                                  
+
                                                   try {
                                                     const saveResponse = await fetch('/api/save-video-to-s3', {
                                                       method: 'POST',
@@ -11282,7 +15854,7 @@ export default function StoryboardGenerator() {
                                                       }),
                                                     });
                                                     const saveData = await saveResponse.json();
-                                                    
+
                                                     if (saveData.success) {
                                                       s3VideoUrl = saveData.url;
                                                       s3VideoKey = saveData.key;
@@ -11291,10 +15863,10 @@ export default function StoryboardGenerator() {
                                                   } catch (saveError) {
                                                     console.warn('保存视频到 S3 失败，使用原始 URL:', saveError);
                                                   }
-                                                  
+
                                                   const finalVideoUrl = s3VideoUrl;
                                                   const finalVideoKey = s3VideoKey;
-                                                  
+
                                                   setChapterStoryboards(prev => ({
                                                     ...prev,
                                                     [cs.chapterNumber]: {
@@ -11352,7 +15924,7 @@ export default function StoryboardGenerator() {
                                         );
                                       })()}
                                     </div>
-                                    
+
                                     {/* 提示词显示 */}
                                     <div className="mt-3 pt-3 border-t">
                                       <p className="text-xs text-gray-500 line-clamp-2">
@@ -11399,38 +15971,43 @@ export default function StoryboardGenerator() {
 
       {/* 图片预览模态框 */}
       {previewImage && (
-        <div 
-          className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/90"
+        <div
+          className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/90 p-1 sm:p-2"
           onClick={closeImagePreview}
+          role="dialog"
+          aria-modal="true"
+          aria-label="图片预览"
         >
-          <div 
-            className="relative w-[90vw] h-[90vh] flex flex-col bg-gray-900 rounded-lg overflow-hidden"
+          <div
+            className="relative flex h-[calc(100vh-0.5rem)] w-[calc(100vw-0.5rem)] max-w-[1920px] flex-col overflow-hidden rounded-md border border-amber-400/30 bg-gray-900 shadow-2xl sm:h-[calc(100vh-1rem)] sm:w-[calc(100vw-1rem)]"
             onClick={(e) => e.stopPropagation()}
           >
             {/* 工具栏 */}
-            <div className="flex items-center justify-between p-3 bg-gray-800 border-b border-gray-700 shrink-0">
-              <div className="flex items-center gap-2 text-white">
-                <Eye className="w-4 h-4" />
-                <span className="text-sm truncate max-w-[300px]" title={previewImage.name}>
+            <div className="flex shrink-0 items-center justify-between gap-2 border-b border-gray-700 bg-gray-800 px-2 py-2 sm:px-3">
+              <div className="flex min-w-0 flex-1 items-center gap-2 text-white">
+                <Eye className="h-4 w-4 shrink-0" />
+                <span className="min-w-0 truncate text-sm" title={previewImage.name}>
                   {previewImage.name}
                 </span>
-                <Badge variant="secondary" className="text-xs">
+                <Badge variant="secondary" className="hidden shrink-0 text-xs sm:inline-flex">
                   {previewImage.type === 'scene' ? '场景' : previewImage.type === 'character' ? '人物' : previewImage.type === 'prop' ? '道具' : '故事版'}
                 </Badge>
               </div>
-              <div className="flex items-center gap-2">
+              <div className="flex shrink-0 items-center gap-1 sm:gap-2">
                 {/* 缩放控制 */}
-                <div className="flex items-center gap-1 mr-2">
+                <div className="mr-1 flex items-center gap-1 sm:mr-2">
                   <Button
                     variant="ghost"
                     size="sm"
                     onClick={handlePreviewZoomOut}
                     className="text-white hover:bg-white/20 h-8 w-8 p-0"
                     disabled={previewZoom <= 0.25}
+                    title="缩小"
+                    aria-label="缩小图片"
                   >
                     <ZoomOut className="w-4 h-4" />
                   </Button>
-                  <span className="text-white text-xs w-12 text-center">
+                  <span className="w-10 text-center text-xs text-white sm:w-12">
                     {Math.round(previewZoom * 100)}%
                   </span>
                   <Button
@@ -11439,6 +16016,8 @@ export default function StoryboardGenerator() {
                     onClick={handlePreviewZoomIn}
                     className="text-white hover:bg-white/20 h-8 w-8 p-0"
                     disabled={previewZoom >= 3}
+                    title="放大"
+                    aria-label="放大图片"
                   >
                     <ZoomIn className="w-4 h-4" />
                   </Button>
@@ -11449,6 +16028,8 @@ export default function StoryboardGenerator() {
                   size="sm"
                   onClick={() => downloadImage(previewImage.url, previewImage.name)}
                   className="text-white hover:bg-white/20 h-8 w-8 p-0"
+                  title="下载图片"
+                  aria-label="下载图片"
                 >
                   <Download className="w-4 h-4" />
                 </Button>
@@ -11458,14 +16039,16 @@ export default function StoryboardGenerator() {
                   size="sm"
                   onClick={closeImagePreview}
                   className="text-white hover:bg-white/20 h-8 w-8 p-0"
+                  title="关闭预览"
+                  aria-label="关闭预览"
                 >
                   <X className="w-4 h-4" />
                 </Button>
               </div>
             </div>
-            
+
             {/* 图片容器 */}
-            <div className="flex-1 overflow-auto flex items-center justify-center p-4">
+            <div className="flex min-h-0 flex-1 items-center justify-center overflow-auto p-2 sm:p-3">
               {previewImage.url ? (
                 <img
                   src={getDisplayImageUrl(previewImage.url)}

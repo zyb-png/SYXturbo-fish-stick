@@ -549,6 +549,91 @@ body {
   background: rgba(48, 37, 18, 0.28);
 }
 
+/* The execution-script card lives in a narrow sidebar on wide screens, so its
+   controls must respond to the card width instead of the viewport width. */
+.execution-script-card {
+  container-name: execution-script;
+  container-type: inline-size;
+}
+
+.execution-script-copy {
+  overflow-wrap: anywhere;
+  text-wrap: pretty;
+}
+
+.execution-script-actions {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0.5rem;
+}
+
+.execution-script-action {
+  min-width: 0;
+  min-height: 2.75rem;
+  height: auto;
+  gap: 0.5rem;
+  padding: 0.625rem 0.875rem;
+  font-size: 0.875rem;
+  line-height: 1.25rem;
+  white-space: nowrap;
+}
+
+@container execution-script (min-width: 28rem) {
+  .execution-script-actions {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .execution-script-action-primary {
+    grid-column: 1 / -1;
+  }
+}
+
+@container execution-script (min-width: 46rem) {
+  .execution-script-actions {
+    grid-template-columns: minmax(0, 1.35fr) repeat(2, minmax(0, 1fr));
+  }
+
+  .execution-script-action-primary {
+    grid-column: auto;
+  }
+}
+
+/* Character look cards use their own width so the media and copy stay side by
+   side inside the character panel, even when the surrounding page is wider. */
+.character-look-card {
+  container-name: character-look;
+  container-type: inline-size;
+}
+
+.character-look-card-layout {
+  display: grid;
+  min-width: 0;
+  grid-template-areas:
+    "media"
+    "details";
+  grid-template-columns: minmax(0, 1fr);
+  align-items: start;
+  gap: 1rem;
+}
+
+.character-look-card-media {
+  grid-area: media;
+  min-width: 0;
+}
+
+.character-look-card-details {
+  grid-area: details;
+  min-width: 0;
+}
+
+@container character-look (min-width: 44rem) {
+  .character-look-card-layout {
+    grid-template-areas: "media details";
+    grid-template-columns: minmax(17.5rem, 42%) minmax(0, 1fr);
+    gap: 1.25rem;
+  }
+}
+
 @media (max-width: 767px) {
   .black-mirror-shell {
     padding-top: 0.75rem;

@@ -3,7 +3,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { requireUserLoginResponse } from '@/lib/auth-guard';
-import { getAccountAssetsPath } from '@/lib/account-assets';
+import { resolveAccountAssetFilePath } from '@/lib/account-assets';
 import type { PublicAccount } from '@/lib/account-store';
 
 export const runtime = 'nodejs';
@@ -67,16 +67,15 @@ function resolveLocalAssetPath(imageUrl: string, account: PublicAccount) {
   const filename = parsed.searchParams.get('filename');
   if (!folder || !filename) return null;
 
-  const safeFolder = folder.replace(/\.\./g, '');
-  const safeFilename = filename.replace(/\.\./g, '');
-  const sourcePath = path.join(getAccountAssetsPath(account), safeFolder, safeFilename);
-  const ext = path.extname(safeFilename).toLowerCase();
+  const sourcePath = resolveAccountAssetFilePath(account, folder, filename);
+  if (!sourcePath) throw new Error('无效的资产路径');
+  const ext = path.extname(filename).toLowerCase();
 
   if (!ALLOWED_EXTENSIONS.has(ext)) {
     throw new Error('不支持的文件类型');
   }
 
-  return { sourcePath, fileName: safeFilename };
+  return { sourcePath, fileName: filename };
 }
 
 export async function POST(request: NextRequest) {

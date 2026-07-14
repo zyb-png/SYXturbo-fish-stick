@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import fs from 'fs';
 import path from 'path';
 import { requireUserLoginResponse } from '@/lib/auth-guard';
-import { getAccountAssetsPath } from '@/lib/account-assets';
+import { resolveAccountAssetFilePath } from '@/lib/account-assets';
 
 // 下载资产文件
 export async function GET(request: NextRequest) {
@@ -21,15 +21,15 @@ export async function GET(request: NextRequest) {
       }, { status: 400 });
     }
     
-    // 安全检查：防止路径遍历攻击
-    const safeFolder = folder.replace(/\.\./g, '');
-    const safeFilename = filename.replace(/\.\./g, '');
+    const filePath = resolveAccountAssetFilePath(auth.account, folder, filename);
+    if (!filePath) {
+      return NextResponse.json({
+        success: false,
+        error: '无效的资产路径',
+      }, { status: 400 });
+    }
     
-    const assetsPath = getAccountAssetsPath(auth.account);
-    
-    const filePath = path.join(assetsPath, safeFolder, safeFilename);
-    
-    if (!fs.existsSync(filePath)) {
+    if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {
       return NextResponse.json({
         success: false,
         error: '文件不存在',
@@ -40,7 +40,7 @@ export async function GET(request: NextRequest) {
     const fileBuffer = fs.readFileSync(filePath);
     
     // 确定文件类型
-    const ext = path.extname(safeFilename).toLowerCase();
+    const ext = path.extname(filename).toLowerCase();
     const contentTypes: Record<string, string> = {
       '.png': 'image/png',
       '.jpg': 'image/jpeg',
@@ -56,7 +56,7 @@ export async function GET(request: NextRequest) {
     return new NextResponse(fileBuffer, {
       headers: {
         'Content-Type': contentType,
-        'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(safeFilename)}`,
+        'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`,
         'Content-Length': fileBuffer.length.toString(),
       },
     });

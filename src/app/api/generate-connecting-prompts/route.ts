@@ -28,6 +28,170 @@ interface ImageStoryboardSettings {
   lighting: string[];
 }
 
+interface CreationBiblePayload {
+  creationType?: string;
+  subjectRegion?: string;
+  creationBackground?: string;
+}
+
+function cleanText(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function normalizeIdentity(value: unknown): string {
+  return String(value || '')
+    .trim()
+    .toLocaleLowerCase()
+    .replace(/[\s_<>:"/\\|?*\[\]【】()（）]+/g, '');
+}
+
+function toArray(value: any, keys: string[]): any[] {
+  if (Array.isArray(value)) return value;
+  if (!value || typeof value !== 'object') return [];
+  for (const key of keys) {
+    if (Array.isArray(value[key])) return value[key];
+  }
+  return [];
+}
+
+function getEpisodeNumbers(value: any): number[] {
+  const direct = Array.isArray(value?.episodeNumbers) ? value.episodeNumbers : [];
+  const occurrences = Array.isArray(value?.occurrences)
+    ? value.occurrences.map((item: any) => item?.episodeNumber)
+    : [];
+  return Array.from(new Set([...direct, ...occurrences]
+    .map(item => Number(item))
+    .filter(item => Number.isFinite(item) && item > 0)));
+}
+
+function scoreName(query: unknown, labels: unknown[]): number {
+  const normalizedQuery = normalizeIdentity(query);
+  if (!normalizedQuery) return 0;
+  return labels.reduce((best: number, label) => {
+    const normalizedLabel = normalizeIdentity(label);
+    if (!normalizedLabel) return best;
+    if (normalizedLabel === normalizedQuery) return Math.max(best, 120);
+    if (normalizedLabel.includes(normalizedQuery) || normalizedQuery.includes(normalizedLabel)) {
+      return Math.max(best, 75 - Math.min(Math.abs(normalizedLabel.length - normalizedQuery.length), 20));
+    }
+    return best;
+  }, 0);
+}
+
+function getSceneTimeBucket(value: unknown): 'day' | 'night' | '' {
+  const text = String(value || '');
+  if (/夜|晚|凌晨|黄昏|傍晚/.test(text)) return 'night';
+  if (/日|昼|白天|清晨|早晨|上午|中午|下午/.test(text)) return 'day';
+  return '';
+}
+
+function findCharacter(charactersData: any, name: string): any {
+  const identity = normalizeIdentity(name);
+  return toArray(charactersData, ['characters', 'allCharacters'])
+    .find(character => (
+      normalizeIdentity(character?.name) === identity ||
+      (Array.isArray(character?.aliases) ? character.aliases : [])
+        .some((alias: string) => normalizeIdentity(alias) === identity)
+    ));
+}
+
+function findCharacterLook(character: any, shotCharacter: any, shot: any, chapterNumber: number): any {
+  const looks = Array.isArray(character?.looks) ? character.looks : [];
+  const explicitLookId = String(shotCharacter?.lookId || '').trim();
+  const explicitLook = explicitLookId ? looks.find((look: any) => String(look?.id || '') === explicitLookId) : undefined;
+  if (explicitLook) return explicitLook;
+
+  const shotText = normalizeIdentity(JSON.stringify(shot || {}));
+  const location = normalizeIdentity(shot?.scene?.location);
+  const rankedLooks = looks.map((look: any) => {
+    const episodes = getEpisodeNumbers(look);
+    const episodeScore = episodes.includes(chapterNumber) ? 90 : episodes.length > 0 ? -20 : 0;
+    const sceneScore = (look?.sceneNames || []).some((sceneName: string) => {
+      const normalizedScene = normalizeIdentity(sceneName);
+      return normalizedScene && location && (normalizedScene.includes(location) || location.includes(normalizedScene));
+    }) ? 35 : 0;
+    const stateScore = [look?.ageStage, look?.physicalState, look?.transformationState, look?.scene, look?.stage]
+      .filter(Boolean)
+      .reduce((score: number, value: unknown) => score + (shotText.includes(normalizeIdentity(value)) ? 18 : 0), 0);
+    return { look, score: episodeScore + sceneScore + stateScore + (look?.isBaseLook ? 5 : 0) };
+  }).sort((a: any, b: any) => b.score - a.score);
+  return rankedLooks[0]?.score > 0
+    ? rankedLooks[0].look
+    : (looks.find((look: any) => look?.isBaseLook) || looks[0]);
+}
+
+function findSceneState(scenesData: any, shot: any, chapterNumber: number): any {
+  const location = shot?.scene?.location || '';
+  const shotTimeBucket = getSceneTimeBucket(shot?.scene?.time || shot?.scene?.location);
+  return toArray(scenesData, ['scenes', 'allScenes']).map(scene => {
+    const nameScore = scoreName(location, [
+      scene?.name,
+      scene?.mainSceneName,
+      scene?.physicalLocation,
+      scene?.location,
+      ...(Array.isArray(scene?.aliases) ? scene.aliases : []),
+    ]);
+    const episodes = getEpisodeNumbers(scene);
+    const episodeScore = episodes.includes(chapterNumber) ? 80 : episodes.length > 0 ? -25 : 0;
+    const sceneTimeBucket = getSceneTimeBucket([scene?.timeOfDay, scene?.stateLabel, scene?.name].filter(Boolean).join(' '));
+    const timeScore = shotTimeBucket && sceneTimeBucket
+      ? (shotTimeBucket === sceneTimeBucket ? 25 : -20)
+      : 0;
+    return { scene, nameScore, score: nameScore + episodeScore + timeScore };
+  }).filter(candidate => candidate.nameScore > 0).sort((a, b) => b.score - a.score)[0]?.scene;
+}
+
+function findPropState(propsData: any, propName: string, shot: any, chapterNumber: number): any {
+  const shotText = normalizeIdentity(JSON.stringify(shot || {}));
+  return toArray(propsData, ['props', 'allProps']).map(prop => {
+    const nameScore = scoreName(propName, [
+      prop?.name,
+      prop?.mainPropName,
+      prop?.sourcePropName,
+      ...(Array.isArray(prop?.aliases) ? prop.aliases : []),
+    ]);
+    const episodes = getEpisodeNumbers(prop);
+    const episodeScore = episodes.includes(chapterNumber) ? 80 : episodes.length > 0 ? -25 : 0;
+    const stateScore = [prop?.stateLabel, prop?.stateEvidence, prop?.stateTransitionEvent]
+      .filter(Boolean)
+      .some(value => shotText.includes(normalizeIdentity(value))) ? 15 : 0;
+    return { prop, nameScore, score: nameScore + episodeScore + stateScore };
+  }).filter(candidate => candidate.nameScore > 0).sort((a, b) => b.score - a.score)[0]?.prop;
+}
+
+function buildCreationBibleInstruction(creationBible?: CreationBiblePayload): string {
+  const creationType = cleanText(creationBible?.creationType);
+  const subjectRegion = cleanText(creationBible?.subjectRegion);
+  const creationBackground = cleanText(creationBible?.creationBackground);
+  if (!creationType && !subjectRegion && !creationBackground) return '';
+
+  const lines = ['【重要】创作圣经（必须应用于所有故事版面板描述和视频提示词）：'];
+  if (creationType === '仿真人') {
+    lines.push('- 创作类型：仿真人。所有画面描述必须符合真人短剧/电影实拍质感，真实人物、真实空间、自然皮肤、真实材质与电影光影。');
+  } else if (creationType === '3D') {
+    lines.push('- 创作类型：3D。所有画面描述必须符合3D/CG动画质感，角色模型结构、材质分区、渲染方式和美术风格统一。');
+  } else if (creationType === '动漫') {
+    lines.push('- 创作类型：动漫。所有画面描述必须符合动漫/动画电影质感，角色造型、线条、色彩、表情和镜头美术统一。');
+  }
+
+  if (subjectRegion === '国内') {
+    lines.push('- 创作题材：国内。人物服饰、空间陈设、社会关系、生活细节、标识文字和环境语境必须符合中国本土环境。');
+  } else if (subjectRegion === '国外') {
+    lines.push('- 创作题材：国外。人物服饰、建筑空间、生活方式、标识文字和文化细节必须符合海外/国际化环境。');
+  }
+
+  if (creationBackground === '近代') {
+    lines.push('- 创作背景：近代。人物服饰、建筑、陈设、交通、通讯、标识和器物必须保持近代年代质感。');
+  } else if (creationBackground === '现代') {
+    lines.push('- 创作背景：现代。人物服饰、建筑、陈设、交通、通讯、设备和生活细节必须符合现代社会语境。');
+  } else if (creationBackground === '古代') {
+    lines.push('- 创作背景：古代。人物服饰形制、发式、建筑、陈设、交通、照明、器物和礼仪必须符合古代语境，禁止无剧情依据的现代元素。');
+  }
+
+  lines.push('- 创作圣经只约束视觉风格、题材语境和时代背景，不能修改原剧情、台词、人物关系和镜头事件；剧本明确的回忆、年代跳转或穿越仍按原剧情呈现。');
+  return lines.join('\n');
+}
+
 export async function POST(request: NextRequest) {
   const auth = await requireUserLoginResponse();
   if (auth.response) return auth.response;
@@ -39,13 +203,18 @@ export async function POST(request: NextRequest) {
       chapterSummary,  // 新增：章节故事概要
       storyTitle,      // 新增：整体故事标题
       storySummary,    // 新增：整体故事概要
+      chapterNumber,
       storyboard, 
       assetImages,  // 新增：素材图片数据
       scenesData,   // 新增：场景数据（用于匹配场景 ID）
       charactersData, // 新增：人物数据（用于匹配人物 ID）
       propsData,    // 新增：道具数据（用于匹配道具 ID）
       imageSettings,  // 新增：分镜图像设置（比例、风格、光影）
+      creationBible,
     } = await request.json();
+    const resolvedChapterNumber = Number(chapterNumber)
+      || Number(String(chapterTitle || '').match(/第\s*(\d+)\s*[集章]/)?.[1])
+      || 0;
 
     // 支持两种输入方式：
     // 1. imageStoryboards: 图片分镜数据（兼容旧流程）
@@ -80,6 +249,8 @@ export async function POST(request: NextRequest) {
 3. 光影效果与用户选择的设置匹配
 ` : '';
 
+    const creationBibleDesc = buildCreationBibleInstruction(creationBible);
+
     // 构建故事背景描述
     const storyBackgroundDesc = storyTitle || storySummary ? `
 【重要】故事背景（请深入理解并融入视频提示词）：
@@ -111,6 +282,7 @@ ${chapterSummary ? `本章概要：${chapterSummary}` : ''}
 
 ${storyBackgroundDesc}
 ${imageSettingsDesc}
+${creationBibleDesc}
 
 【Skill 5 影视级字段利用规范】
 每个分镜提供了 6 个专业字段（focalLength/aperture/cameraPosition/composition/cameraMovement/actionAndDialogue），你必须：
@@ -239,6 +411,7 @@ ${imageSettingsDesc}
         content: `请为以下章节的分镜生成串联提示词和视频生成提示词。
 
 章节标题：${chapterTitle}
+${creationBibleDesc ? `\n${creationBibleDesc}\n` : ''}
 
 分镜内容：
 ${shotsDescription}
@@ -488,12 +661,18 @@ ${shotsDescription}
             const shot = hasImageStoryboards ? (shotData as any)?.originalShot : shotData;
             const sceneName = shot?.scene?.location;
             if (sceneName) {
-              // 先尝试通过 ID 查找
-              const sceneId = sceneNameToId.get(sceneName);
-              if (sceneId) {
-                sceneImageUrl = assetImageMap.get(`scene-${sceneId}`);
+              const sceneState = findSceneState(scenesData, shot, resolvedChapterNumber);
+              if (sceneState) {
+                sceneImageUrl = assetImageMap.get(`scene-${sceneState.name}`)
+                  || assetImageMap.get(`scene-${sceneState.id}`);
+                if (!sceneImageUrl && sceneState.referenceSceneName) {
+                  sceneImageUrl = assetImageMap.get(`scene-${sceneState.referenceSceneName}`);
+                }
               }
-              // 如果没找到，尝试通过名称查找
+              if (!sceneImageUrl) {
+                const sceneId = sceneNameToId.get(sceneName);
+                if (sceneId) sceneImageUrl = assetImageMap.get(`scene-${sceneId}`);
+              }
               if (!sceneImageUrl) {
                 sceneImageUrl = assetImageMap.get(`scene-${sceneName}`);
               }
@@ -504,10 +683,16 @@ ${shotsDescription}
             characters.forEach((char: any) => {
               const charName = char.name;
               if (charName) {
+                const characterData = findCharacter(charactersData, charName);
+                const characterLook = characterData
+                  ? findCharacterLook(characterData, char, shot, resolvedChapterNumber)
+                  : undefined;
                 const charId = characterNameToId.get(charName);
-                let charImageUrl: string | undefined;
+                let charImageUrl: string | undefined = cleanText(characterLook?.imageUrl)
+                  || cleanText(characterData?.confirmedFaceImageUrl)
+                  || undefined;
                 if (charId) {
-                  charImageUrl = assetImageMap.get(`character-${charId}`);
+                  charImageUrl ||= assetImageMap.get(`character-${charId}`);
                 }
                 if (!charImageUrl) {
                   charImageUrl = assetImageMap.get(`character-${charName}`);
@@ -522,10 +707,16 @@ ${shotsDescription}
             const propNames = shot?.scene?.props || [];
             propNames.forEach((propName: string) => {
               if (propName) {
+                const propState = findPropState(propsData, propName, shot, resolvedChapterNumber);
+                let propImageUrl: string | undefined = propState
+                  ? assetImageMap.get(`prop-${propState.name}`) || assetImageMap.get(`prop-${propState.id}`)
+                  : undefined;
+                if (!propImageUrl && propState?.referencePropName) {
+                  propImageUrl = assetImageMap.get(`prop-${propState.referencePropName}`);
+                }
                 const propId = propNameToId.get(propName);
-                let propImageUrl: string | undefined;
                 if (propId) {
-                  propImageUrl = assetImageMap.get(`prop-${propId}`);
+                  propImageUrl ||= assetImageMap.get(`prop-${propId}`);
                 }
                 if (!propImageUrl) {
                   propImageUrl = assetImageMap.get(`prop-${propName}`);

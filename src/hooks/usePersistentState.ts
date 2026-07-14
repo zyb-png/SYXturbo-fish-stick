@@ -8,6 +8,7 @@ const SAVE_DEBOUNCE_MS = 2000;
 const PERSISTENCE_DEBUG = false;
 const ACTIVE_ACCOUNT_KEY = 'storyboard_active_account_id';
 const ACCOUNT_KEY_PREFIX = 'storyboard_account_';
+const ACCOUNT_SCOPE_CHANGED_EVENT = 'manfei:persistence-account-changed';
 const PROTECTED_NON_EMPTY_KEYS = new Set<string>([
   'storyboard_file_content',
   'storyboard_scenes_data',
@@ -18,6 +19,8 @@ const PROTECTED_NON_EMPTY_KEYS = new Set<string>([
   'storyboard_scene_batch_info',
   'storyboard_character_batch_info',
   'storyboard_prop_batch_info',
+  'storyboard_character_voice_data',
+  'storyboard_voice_library',
   'storyboard_chapter_storyboards',
   'storyboard_asset_images',
 ]);
@@ -32,6 +35,9 @@ function persistenceDebugLog(...args: unknown[]): void {
 export const STORAGE_KEYS = {
   UPLOADED_FILE: 'storyboard_uploaded_file',
   FILE_CONTENT: 'storyboard_file_content',
+  EXECUTION_SCRIPT: 'storyboard_execution_script',
+  EXECUTION_SCRIPT_SOURCE_SIGNATURE: 'storyboard_execution_script_source_signature',
+  CREATION_BIBLE: 'storyboard_creation_bible',
   SCENES_DATA: 'storyboard_scenes_data',
   CHARACTERS_DATA: 'storyboard_characters_data',
   PROPS_DATA: 'storyboard_props_data',
@@ -40,6 +46,9 @@ export const STORAGE_KEYS = {
   SCENE_BATCH_INFO: 'storyboard_scene_batch_info',
   CHARACTER_BATCH_INFO: 'storyboard_character_batch_info',
   PROP_BATCH_INFO: 'storyboard_prop_batch_info',
+  CHARACTER_VOICE_DATA: 'storyboard_character_voice_data',
+  VOICE_LIBRARY: 'storyboard_voice_library',
+  EXTRACTION_REVIEW: 'storyboard_extraction_review',
   STORYBOARD_BATCH_INFO: 'storyboard_storyboard_batch_info',
   SELECTED_CHAPTER: 'storyboard_selected_chapter',
   STORYBOARD: 'storyboard_storyboard',
@@ -52,6 +61,7 @@ export const STORAGE_KEYS = {
   PROGRESS: 'storyboard_progress',
   VIDEO_RATIO: 'storyboard_video_ratio',
   ASSET_IMAGES: 'storyboard_asset_images',
+  BATCH_ASSET_GENERATION_HISTORY: 'storyboard_batch_asset_generation_history',
   EXTRACTION_STATUS: 'storyboard_extraction_status',
   TOKEN_USAGE: 'storyboard_token_usage',
   CHAPTER_STORYBOARDS: 'storyboard_chapter_storyboards',
@@ -67,8 +77,10 @@ export const STORAGE_KEYS = {
 export interface TokenUsage {
   // 各步骤的token消耗
   upload: { input: number; output: number; timestamp: number };
+  executionScript: { input: number; output: number; timestamp: number };
   extractScenes: { input: number; output: number; timestamp: number };
   extractCharacters: { input: number; output: number; timestamp: number };
+  extractVoices: { input: number; output: number; timestamp: number };
   extractProps: { input: number; output: number; timestamp: number };
   extractOutline: { input: number; output: number; timestamp: number };
   generateStoryboard: { input: number; output: number; timestamp: number };
@@ -83,8 +95,10 @@ export interface TokenUsage {
 // Token 使用统计初始值
 export const INITIAL_TOKEN_USAGE: TokenUsage = {
   upload: { input: 0, output: 0, timestamp: 0 },
+  executionScript: { input: 0, output: 0, timestamp: 0 },
   extractScenes: { input: 0, output: 0, timestamp: 0 },
   extractCharacters: { input: 0, output: 0, timestamp: 0 },
+  extractVoices: { input: 0, output: 0, timestamp: 0 },
   extractProps: { input: 0, output: 0, timestamp: 0 },
   extractOutline: { input: 0, output: 0, timestamp: 0 },
   generateStoryboard: { input: 0, output: 0, timestamp: 0 },
@@ -103,7 +117,7 @@ export function calculateTotalTokens(usage: TokenUsage): { input: number; output
 
   // 单次调用的步骤
   const singleSteps: (keyof TokenUsage)[] = [
-    'upload', 'extractScenes', 'extractCharacters', 'extractProps',
+    'upload', 'executionScript', 'extractScenes', 'extractCharacters', 'extractVoices', 'extractProps',
     'extractOutline', 'generateStoryboard', 'generatePrompts'
   ];
 
@@ -192,6 +206,13 @@ function isLegacyRawStoryboardStateKey(key: string): boolean {
 }
 
 let accountIdPromise: Promise<string | null> | null = null;
+
+export function notifyPersistenceAccountChanged(): void {
+  accountIdPromise = null;
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent(ACCOUNT_SCOPE_CHANGED_EVENT));
+  }
+}
 
 async function resolvePersistenceAccountId(): Promise<string | null> {
   if (typeof window === 'undefined') return null;
@@ -352,9 +373,26 @@ export function usePersistentState<T>(
   const hasPendingSaveRef = useRef(false);
   const accountIdRef = useRef<string | null>(null);
   const scopedKeyRef = useRef(key);
+  const [accountScopeVersion, setAccountScopeVersion] = useState(0);
 
   // 始终保持 ref 指向最新 state
   stateRef.current = state;
+
+  useEffect(() => {
+    const handleAccountScopeChanged = () => {
+      if (saveTimerRef.current) {
+        clearTimeout(saveTimerRef.current);
+        saveTimerRef.current = null;
+      }
+      pendingSaveRef.current = null;
+      hasPendingSaveRef.current = false;
+      hasHydratedRef.current = false;
+      setAccountScopeVersion((version) => version + 1);
+    };
+
+    window.addEventListener(ACCOUNT_SCOPE_CHANGED_EVENT, handleAccountScopeChanged);
+    return () => window.removeEventListener(ACCOUNT_SCOPE_CHANGED_EVENT, handleAccountScopeChanged);
+  }, []);
 
   // 客户端 hydration：优先从项目本地文件备份恢复；备份不存在时使用 localStorage
   useEffect(() => {
@@ -362,11 +400,14 @@ export function usePersistentState<T>(
 
     const hydrate = async () => {
       try {
+        const previousAccountId = accountIdRef.current;
+        const previousActiveAccountId = window.localStorage.getItem(ACTIVE_ACCOUNT_KEY);
         const accountId = await resolvePersistenceAccountId();
         accountIdRef.current = accountId;
         scopedKeyRef.current = getScopedStorageKey(key, accountId);
 
         if (!accountId) {
+          window.localStorage.removeItem(ACTIVE_ACCOUNT_KEY);
           persistenceDebugLog(`[持久化] 未登录，跳过账号状态恢复: ${key}`);
           return;
         }
@@ -381,7 +422,9 @@ export function usePersistentState<T>(
 
         const scopedKey = scopedKeyRef.current;
         const item = window.localStorage.getItem(scopedKey);
-        const legacyItem = item ? null : window.localStorage.getItem(key);
+        const legacyItem = item || previousActiveAccountId
+          ? null
+          : window.localStorage.getItem(key);
         const backup = backupResult.value;
         const serialized = backup || item || legacyItem;
 
@@ -404,6 +447,7 @@ export function usePersistentState<T>(
           } else if (item || legacyItem) {
             if (legacyItem) {
               window.localStorage.setItem(scopedKey, legacyItem);
+              window.localStorage.removeItem(key);
               persistenceDebugLog(`[持久化] 已将旧浏览器缓存迁入当前账号: ${key}`);
             }
             backupStateToServer(key, item || legacyItem || '');
@@ -414,6 +458,20 @@ export function usePersistentState<T>(
             setState(parsed);
           }
           return;
+        }
+
+        if (
+          previousAccountId === null &&
+          !previousActiveAccountId &&
+          !isEmptyValue(stateRef.current)
+        ) {
+          const currentSerialized = compressData(stateRef.current);
+          const currentSize = new Blob([currentSerialized]).size;
+          backupStateToServer(key, currentSerialized);
+          if (currentSize <= MAX_LOCAL_STORAGE_VALUE_SIZE && checkStorageSpace(currentSize)) {
+            window.localStorage.setItem(scopedKey, currentSerialized);
+          }
+          persistenceDebugLog(`[持久化] 已将登录前的当前状态保存到账号: ${key}`);
         }
 
         persistenceDebugLog(`[持久化] 无数据: ${key}，使用默认值`);
@@ -447,7 +505,7 @@ export function usePersistentState<T>(
     return () => {
       cancelled = true;
     };
-  }, [key]);
+  }, [key, accountScopeVersion]);
 
   // 保存到 localStorage，并同步写入项目本地文件备份
   const saveToStorage = useCallback((value: T, options?: { keepalive?: boolean }) => {
@@ -620,7 +678,7 @@ export function usePersistentStateManager() {
   const exportData = useCallback(() => {
     if (typeof window === 'undefined') return null;
 
-    const data: Record<string, any> = {};
+    const data: Record<string, unknown> = {};
     const accountId = window.localStorage.getItem(ACTIVE_ACCOUNT_KEY);
     const scopedPrefix = accountId ? `${ACCOUNT_KEY_PREFIX}${safeAccountKey(accountId)}_` : '';
     for (let i = 0; i < window.localStorage.length; i++) {
@@ -636,7 +694,7 @@ export function usePersistentStateManager() {
             const rawKey = scopedPrefix ? key.slice(scopedPrefix.length) : key;
             data[rawKey] = decompressData(raw);
           }
-        } catch (e) {
+        } catch {
           // ignore
         }
       }
@@ -645,7 +703,7 @@ export function usePersistentStateManager() {
   }, []);
 
   // 导入数据
-  const importData = useCallback((data: Record<string, any>) => {
+  const importData = useCallback((data: Record<string, unknown>) => {
     if (typeof window === 'undefined') return;
 
     Object.entries(data).forEach(([key, value]) => {

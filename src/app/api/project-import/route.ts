@@ -5,8 +5,25 @@ import AdmZip from 'adm-zip';
 import { requireUserLoginResponse } from '@/lib/auth-guard';
 import { getAccountAssetsPath } from '@/lib/account-assets';
 
-// 项目版本号
-const PROJECT_VERSION = '1.0.0';
+const ASSET_FOLDERS = new Set(['场景图片', '人物图片', '道具图片', '分镜图片', '视频文件']);
+
+function resolveSafeImportedAssetPath(assetsPath: string, entryName: string) {
+  const normalizedEntryName = entryName.replace(/\\/g, '/');
+  if (!normalizedEntryName.startsWith('assets/') || normalizedEntryName.includes('\0')) return null;
+
+  const relativePath = normalizedEntryName.slice('assets/'.length);
+  const segments = relativePath.split('/').filter(Boolean);
+  if (segments.length < 2 || segments.some(segment => segment === '.' || segment === '..')) return null;
+
+  const folderName = segments[0];
+  if (!ASSET_FOLDERS.has(folderName)) return null;
+
+  const assetsRoot = path.resolve(assetsPath);
+  const targetPath = path.resolve(assetsRoot, ...segments);
+  if (!targetPath.startsWith(`${assetsRoot}${path.sep}`)) return null;
+
+  return { folderName, targetPath };
+}
 
 export async function POST(request: NextRequest) {
   const auth = await requireUserLoginResponse();
@@ -75,8 +92,6 @@ export async function POST(request: NextRequest) {
     };
 
     // 解压资产文件
-    const assetFolders = ['场景图片', '人物图片', '道具图片', '分镜图片', '视频文件'];
-    
     for (const entry of zipEntries) {
       // 跳过元数据和配置文件
       if (entry.entryName === 'project.json' || 
@@ -87,30 +102,22 @@ export async function POST(request: NextRequest) {
 
       // 处理资产文件
       if (entry.entryName.startsWith('assets/')) {
-        const relativePath = entry.entryName.replace('assets/', '');
-        const folderName = relativePath.split('/')[0];
-        
-        if (assetFolders.includes(folderName)) {
-          const targetPath = path.join(assetsPath, relativePath);
-          const targetDir = path.dirname(targetPath);
-          
-          // 创建目录
-          if (!fs.existsSync(targetDir)) {
-            fs.mkdirSync(targetDir, { recursive: true });
-          }
-          
-          // 写入文件
-          if (!entry.isDirectory) {
-            fs.writeFileSync(targetPath, entry.getData());
-            
-            // 统计
-            if (folderName === '场景图片') stats.scenes++;
-            else if (folderName === '人物图片') stats.characters++;
-            else if (folderName === '道具图片') stats.props++;
-            else if (folderName === '分镜图片') stats.storyboards++;
-            else if (folderName === '视频文件') stats.videos++;
-          }
+        const safeAsset = resolveSafeImportedAssetPath(assetsPath, entry.entryName);
+        if (!safeAsset) {
+          console.warn('跳过不安全的项目资产路径:', entry.entryName);
+          continue;
         }
+        if (entry.isDirectory) continue;
+
+        const targetDir = path.dirname(safeAsset.targetPath);
+        fs.mkdirSync(targetDir, { recursive: true });
+        fs.writeFileSync(safeAsset.targetPath, entry.getData());
+
+        if (safeAsset.folderName === '场景图片') stats.scenes++;
+        else if (safeAsset.folderName === '人物图片') stats.characters++;
+        else if (safeAsset.folderName === '道具图片') stats.props++;
+        else if (safeAsset.folderName === '分镜图片') stats.storyboards++;
+        else if (safeAsset.folderName === '视频文件') stats.videos++;
       }
     }
 

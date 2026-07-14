@@ -361,6 +361,11 @@ textarea:focus {
   min-width: 0;
 }
 
+.workspace {
+  container-name: handcraft-workspace;
+  container-type: inline-size;
+}
+
 .side-panel {
   display: flex;
   flex-direction: column;
@@ -498,13 +503,13 @@ textarea:focus {
 }
 
 .topbar {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(320px, 1fr) auto;
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  min-height: 84px;
+  gap: clamp(18px, 2.2cqw, 30px);
+  min-height: 104px;
   margin-bottom: 12px;
-  padding: 14px 22px;
+  padding: 18px 22px;
   background:
     linear-gradient(165deg, transparent 0 60%, rgba(218, 154, 44, 0.11) 60.4%, transparent 61%),
     linear-gradient(180deg, rgba(12, 14, 11, 0.98), rgba(5, 7, 5, 0.98));
@@ -513,19 +518,28 @@ textarea:focus {
 .brand {
   display: flex;
   align-items: center;
-  gap: 16px;
+  gap: 14px;
+  min-width: 0;
+}
+
+.brand-copy {
+  min-width: 0;
 }
 
 .account-badge {
   display: inline-flex;
   align-items: center;
-  min-height: 34px;
+  min-width: 0;
+  min-height: 36px;
+  max-width: 280px;
   border: 1px solid rgba(var(--theme-rgb), 0.3);
   border-radius: 6px;
   background: rgba(var(--theme-rgb), 0.07);
   color: var(--text-secondary);
-  padding: 0 10px;
-  font-size: 11px;
+  padding: 0 12px;
+  overflow: hidden;
+  font-size: 12px;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
@@ -637,6 +651,20 @@ h1 {
   text-shadow: 0 0 22px rgba(215, 160, 61, 0.12);
 }
 
+.brand h1 {
+  font-size: clamp(28px, 3.4cqw, 38px);
+  line-height: 1.1;
+  white-space: nowrap;
+}
+
+.brand p {
+  max-width: 48rem;
+  margin-top: 7px;
+  font-size: clamp(12px, 1.25cqw, 14px);
+  line-height: 1.55;
+  text-wrap: balance;
+}
+
 h2 {
   color: #e9dfcc;
   font-size: 17px;
@@ -659,14 +687,88 @@ h3 {
 .top-actions {
   align-items: center;
   justify-content: flex-end;
-  flex-wrap: nowrap;
+  flex-wrap: wrap;
+  min-width: 0;
+  row-gap: 8px;
+}
+
+.top-action-cluster {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+.top-action-cluster + .top-action-cluster {
+  margin-left: 2px;
+  padding-left: 10px;
+  border-left: 1px solid rgba(var(--theme-rgb), 0.22);
+}
+
+.top-actions .icon-button {
+  width: 36px;
+  min-width: 36px;
+  height: 36px;
+  min-height: 36px;
 }
 
 .top-actions button:not(.icon-button) {
-  min-height: 34px;
-  padding: 7px 11px;
+  flex: 0 0 auto;
+  min-width: max-content;
+  min-height: 36px;
+  padding: 7px 13px;
   font-size: 12px;
   line-height: 1;
+  white-space: nowrap;
+}
+
+@container handcraft-workspace (max-width: 62rem) {
+  .topbar {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 14px;
+    min-height: 0;
+    padding: 17px 20px;
+  }
+
+  .top-actions {
+    justify-content: flex-start;
+    padding-top: 12px;
+    border-top: 1px solid rgba(var(--theme-rgb), 0.2);
+  }
+}
+
+@container handcraft-workspace (max-width: 40rem) {
+  .brand {
+    align-items: flex-start;
+  }
+
+  .brand-mark {
+    width: 48px;
+    min-width: 48px;
+    height: 48px;
+  }
+
+  .brand-mark span {
+    font-size: 26px;
+  }
+
+  .brand h1 {
+    font-size: clamp(24px, 7cqw, 30px);
+  }
+
+  .account-badge {
+    flex-basis: 100%;
+    width: 100%;
+    max-width: none;
+  }
+
+  .top-actions {
+    align-items: center;
+  }
+
+  .top-action-cluster + .top-action-cluster {
+    margin-left: 0;
+  }
 }
 
 .panel {
@@ -3055,11 +3157,9 @@ html[data-theme] .toggle input[type="checkbox"]:checked::after {
     padding: 8px;
   }
 
-  .topbar,
   .side-header,
   .section-head,
   .prompt-head,
-  .top-actions,
   .submit-row,
   .right-tools {
     align-items: stretch;
@@ -3068,10 +3168,6 @@ html[data-theme] .toggle input[type="checkbox"]:checked::after {
 
   .topbar {
     padding: 14px;
-  }
-
-  .brand {
-    align-items: flex-start;
   }
 
   h1 {

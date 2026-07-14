@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import fs from 'fs';
 import path from 'path';
 import { requireUserLoginResponse } from '@/lib/auth-guard';
-import { getAccountAssetsPath } from '@/lib/account-assets';
+import { getAccountAssetsPath, readAssetFoldersConfig } from '@/lib/account-assets';
 
 // 获取资产文件列表
 export async function GET(request: NextRequest) {
@@ -12,11 +12,17 @@ export async function GET(request: NextRequest) {
   try {
     const { searchParams } = new URL(request.url);
     const folder = searchParams.get('folder') || '';
-    
     const assetsPath = getAccountAssetsPath(auth.account);
+    const folderMap = readAssetFoldersConfig();
     
     // 如果指定了文件夹，则列出该文件夹内容
     if (folder) {
+      if (!Object.values(folderMap).includes(folder)) {
+        return NextResponse.json({
+          success: false,
+          error: '未知资产类别',
+        }, { status: 400 });
+      }
       const folderPath = path.join(assetsPath, folder);
       
       if (!fs.existsSync(folderPath)) {
@@ -50,14 +56,6 @@ export async function GET(request: NextRequest) {
     }
     
     // 否则返回所有文件夹的概览
-    const folderMap: Record<string, string> = {
-      scenes: '场景图片',
-      characters: '人物图片',
-      props: '道具图片',
-      storyboards: '分镜图片',
-      videos: '视频文件',
-    };
-    
     const result: Record<string, { count: number; size: number; files: Array<{ name: string; size: number; modifiedAt: Date }> }> = {};
     
     for (const [key, folderName] of Object.entries(folderMap)) {
@@ -95,7 +93,6 @@ export async function GET(request: NextRequest) {
     
     return NextResponse.json({
       success: true,
-      assetsPath,
       folders: result,
     });
   } catch (error) {

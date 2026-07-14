@@ -57,6 +57,11 @@ export function calculateDeepSeekCreationPoints(usage: DeepSeekBillableUsage): n
   return cachedInputTokens + uncachedInputTokens + outputTokens > 0 ? Math.max(1, points) : 0;
 }
 
+// 文字分镜切换模型时仍沿用当前产品侧 Token 售价，避免模型切换造成用户余额突变。
+export function calculateStoryboardTokenCreationPoints(usage: DeepSeekBillableUsage): number {
+  return calculateDeepSeekCreationPoints(usage);
+}
+
 export function calculateImageCreationPoints(input: {
   mode: ImageGenerationMode;
   quality: ImageQuality;
@@ -74,3 +79,6 @@ export function calculateManfeiVideoCreationPoints(actualCostRmb: number): numbe
 
 export const DEEPSEEK_PRICING_DESCRIPTION =
   '缓存输入 4 点/百万 Token，未缓存输入 200 点/百万 Token，输出 400 点/百万 Token';
+
+export const STORYBOARD_TOKEN_PRICING_DESCRIPTION =
+  '按文字分镜实际 Token 用量：缓存输入 4 点/百万，未缓存输入 200 点/百万，输出 400 点/百万';

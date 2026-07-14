@@ -4,6 +4,10 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { requireUserLoginResponse } from '@/lib/auth-guard';
+import {
+  formatStoryboardDurationSeconds,
+  sumStoryboardDurations,
+} from '@/lib/storyboard-duration-groups';
 
 export const runtime = 'nodejs';
 
@@ -18,6 +22,7 @@ type VideoPromptItem = {
 type PromptGroup = {
   groupIndex?: number;
   shotNumbers?: number[];
+  totalDuration?: number;
   combinedPrompt?: string;
   storyboardPromptText?: string;
 };
@@ -111,12 +116,23 @@ function buildDocumentXml(payload: ExportPayload): string {
   if (promptGroups.length === 0) {
     parts.push(paragraph('暂无分组提示词。', 'Body'));
   } else {
+    const durationByShotNumber = new Map(
+      videoPrompts.map(item => [item.shotNumber, item.duration]),
+    );
     promptGroups
       .slice()
       .sort((a, b) => (a.groupIndex ?? 0) - (b.groupIndex ?? 0))
       .forEach((group) => {
         const shots = Array.isArray(group.shotNumbers) ? group.shotNumbers.join('、') : '-';
-        parts.push(paragraph(`第${group.groupIndex ?? '-'}组｜镜头 ${shots}`, 'Heading2'));
+        const calculatedDuration = typeof group.totalDuration === 'number' && group.totalDuration > 0
+          ? group.totalDuration
+          : sumStoryboardDurations(
+              (group.shotNumbers || []).map(shotNumber => durationByShotNumber.get(shotNumber)),
+            );
+        parts.push(paragraph(
+          `第${group.groupIndex ?? '-'}组｜镜头 ${shots}｜总时长：${formatStoryboardDurationSeconds(calculatedDuration)}秒`,
+          'Heading2',
+        ));
         parts.push(paragraph(cleanText(group.combinedPrompt, '无连贯提示词内容'), 'Body'));
         if (cleanText(group.storyboardPromptText)) {
           parts.push(paragraph('故事板专用提示词', 'Heading2'));

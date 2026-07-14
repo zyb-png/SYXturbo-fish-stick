@@ -10,7 +10,7 @@
     }
     document.documentElement.dataset.theme = localStorage.getItem('manfei_ui_theme') || 'gold';
   </script>
-  <link rel="stylesheet" href="./styles.css?v=20260630-brand-1">
+  <link rel="stylesheet" href="./styles.css?v=20260712-topbar-1">
 </head>
 <body>
   <main class="app">
@@ -61,18 +61,22 @@
           <div class="brand-mark" aria-hidden="true">
             <span>钰</span>
           </div>
-          <div>
+          <div class="brand-copy">
             <h1>宋钰汐视频生成</h1>
-            <p>Seedance2.0和Seedance2.5满血版，支持30秒，支持真人人脸。</p>
+            <p>Seedance 2.0 / 2.5 满血版 · 最长 30 秒 · 支持真人人脸</p>
           </div>
         </div>
         <div class="top-actions">
           <span id="accountBadge" class="account-badge">加载账号…</span>
-          <button id="guideBtn" class="icon-button" type="button" title="使用指导" aria-label="打开使用指导">?</button>
-          <button id="themeSettingsBtn" class="icon-button" type="button" title="界面设置" aria-label="界面设置">◐</button>
-          <button id="soundToggleBtn" class="icon-button sound-toggle" type="button" title="关闭完成提示音" aria-label="关闭完成提示音" aria-pressed="true">♪</button>
-          <button id="balanceBtn" type="button">费用余额</button>
-          <button id="usageBtn" type="button">使用记录</button>
+          <div class="top-action-cluster top-action-icons" aria-label="页面工具">
+            <button id="guideBtn" class="icon-button" type="button" title="使用指导" aria-label="打开使用指导">?</button>
+            <button id="themeSettingsBtn" class="icon-button" type="button" title="界面设置" aria-label="界面设置">◐</button>
+            <button id="soundToggleBtn" class="icon-button sound-toggle" type="button" title="关闭完成提示音" aria-label="关闭完成提示音" aria-pressed="true">♪</button>
+          </div>
+          <div class="top-action-cluster top-action-ledger" aria-label="费用工具">
+            <button id="balanceBtn" type="button">费用余额</button>
+            <button id="usageBtn" type="button">使用记录</button>
+          </div>
           <a id="loginLink" class="button-link primary-link" href="#login">登录</a>
           <a id="logoutLink" class="button-link" href="#wallet" hidden>退出</a>
         </div>

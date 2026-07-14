@@ -32,8 +32,10 @@ interface TokenUsageStatsProps {
 // 步骤名称映射
 const STEP_NAMES: Record<string, string> = {
   upload: '文件上传',
+  executionScript: '拉执行剧本',
   extractScenes: '场景提取',
   extractCharacters: '人物提取',
+  extractVoices: '人物音色提取',
   extractProps: '道具提取',
   extractOutline: '大纲提取',
   generateStoryboard: '分镜生成',
@@ -78,7 +80,7 @@ export function TokenUsageStats({ tokenUsage, onClear, onRefresh }: TokenUsageSt
 
     // 单次调用的步骤
     const singleSteps: (keyof TokenUsage)[] = [
-      'upload', 'extractScenes', 'extractCharacters', 'extractProps', 
+      'upload', 'executionScript', 'extractScenes', 'extractCharacters', 'extractVoices', 'extractProps',
       'extractOutline', 'generateStoryboard', 'generatePrompts'
     ];
 

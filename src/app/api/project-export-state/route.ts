@@ -33,12 +33,10 @@ function addProjectEntries(
   {
     metadata,
     state,
-    configPath,
     assetsPath,
   }: {
     metadata: Record<string, unknown>;
     state: unknown;
-    configPath: string;
     assetsPath: string;
   },
 ) {
@@ -47,11 +45,6 @@ function addProjectEntries(
 
   // 添加项目状态
   archive.append(JSON.stringify(state, null, 2), { name: 'state/project-state.json' });
-
-  // 添加资产配置
-  if (fs.existsSync(configPath)) {
-    archive.file(configPath, { name: 'config/assets-config.json' });
-  }
 
   // 添加资产文件夹
   const assetFolders = ['场景图片', '人物图片', '道具图片', '分镜图片', '视频文件'];
@@ -84,7 +77,6 @@ export async function POST(request: NextRequest) {
       }, { status: 400 });
     }
 
-    const configPath = path.join(process.cwd(), 'assets-config.json');
     const assetsPath = getAccountAssetsPath(auth.account);
 
     const safeProjectName = sanitizeFileBaseName(projectName);
@@ -113,7 +105,7 @@ export async function POST(request: NextRequest) {
       });
 
       archive.pipe(output);
-      addProjectEntries(archive, { metadata, state, configPath, assetsPath });
+      addProjectEntries(archive, { metadata, state, assetsPath });
       archive.finalize();
       const zipSize = await archivePromise;
 
@@ -140,7 +132,7 @@ export async function POST(request: NextRequest) {
       archive.on('error', reject);
     });
 
-    addProjectEntries(archive, { metadata, state, configPath, assetsPath });
+    addProjectEntries(archive, { metadata, state, assetsPath });
     archive.finalize();
 
     const zipBuffer = await archivePromise;

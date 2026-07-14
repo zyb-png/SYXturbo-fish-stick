@@ -129,7 +129,7 @@ export const CREATION_POINT_PRICING: CreationPointPricing[] = [
     name: '文字分镜',
     unit: '动态',
     unitPoints: 0,
-    pricingDescription: '按 DeepSeek 实际 Token 用量：缓存输入 4 点/百万，未缓存输入 200 点/百万，输出 400 点/百万',
+    pricingDescription: '按文字分镜实际 Token 用量：缓存输入 4 点/百万，未缓存输入 200 点/百万，输出 400 点/百万',
     billingEnabled: true,
   },
   {

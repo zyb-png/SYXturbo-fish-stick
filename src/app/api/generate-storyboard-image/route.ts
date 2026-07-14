@@ -12,6 +12,11 @@ import {
 import { calculateImageCreationPoints } from '@/lib/provider-pricing';
 import { getAccountAssetsPath, getAccountRemoteKey } from '@/lib/account-assets';
 import type { PublicAccount } from '@/lib/account-store';
+import {
+  formatStoryboardDurationSeconds,
+  sumStoryboardDurations,
+  STORYBOARD_GROUP_MAX_SECONDS,
+} from '@/lib/storyboard-duration-groups';
 import fs from 'fs';
 import path from 'path';
 
@@ -50,6 +55,46 @@ function cleanText(value: unknown, fallback = ''): string {
   return typeof value === 'string' && value.trim() ? value.trim() : fallback;
 }
 
+type CreationBiblePayload = {
+  creationType?: string;
+  subjectRegion?: string;
+  creationBackground?: string;
+};
+
+function buildCreationBibleVisualText(creationBible?: CreationBiblePayload): string {
+  const creationType = cleanText(creationBible?.creationType);
+  const subjectRegion = cleanText(creationBible?.subjectRegion);
+  const creationBackground = cleanText(creationBible?.creationBackground);
+  if (!creationType && !subjectRegion && !creationBackground) return '';
+
+  const parts: string[] = [];
+  if (creationType === '仿真人') {
+    parts.push('创作类型为仿真人，画面必须是真人短剧/电影实拍质感，真实人物、真实空间、真实材质、自然皮肤与电影光影');
+  } else if (creationType === '3D') {
+    parts.push('创作类型为3D，画面必须是统一的3D/CG动画质感，角色模型结构清晰，材质和渲染风格一致');
+  } else if (creationType === '动漫') {
+    parts.push('创作类型为动漫，画面必须是统一动漫/动画电影质感，角色线条、色块、表情和美术风格一致');
+  }
+
+  if (subjectRegion === '国内') {
+    parts.push('题材语境为国内，人物服饰、空间陈设、标识、生活细节符合中国本土环境');
+  } else if (subjectRegion === '国外') {
+    parts.push('题材语境为国外，人物服饰、建筑空间、标识和生活方式符合海外/国际化环境');
+  }
+
+  if (creationBackground === '近代') {
+    parts.push('创作背景为近代，服化道、建筑、交通、通讯、标识和器物保持近代年代质感');
+  } else if (creationBackground === '现代') {
+    parts.push('创作背景为现代，服化道、建筑、交通、通讯、设备和生活细节符合现代社会语境');
+  } else if (creationBackground === '古代') {
+    parts.push('创作背景为古代，服饰形制、发式、建筑、交通、照明、器物和礼仪符合古代语境，禁止无剧情依据的现代元素');
+  }
+
+  return parts.length > 0
+    ? `${parts.join('；')}；不要改变剧情、台词和人物关系；剧本明确的回忆、年代跳转或穿越按原剧情呈现`
+    : '';
+}
+
 function oneLine(value: unknown, maxLength = 140): string {
   const text = cleanText(value).replace(/\s+/g, ' ');
   return text.length > maxLength ? `${text.slice(0, maxLength)}...` : text;
@@ -60,8 +105,10 @@ function buildLocalVisualPrompt(
   groupIndex: number,
   shots: any[],
   referenceImageCount: number,
-  imageSettings: any
+  imageSettings: any,
+  creationBible?: CreationBiblePayload
 ): string {
+  const totalDuration = sumStoryboardDurations(shots.map(shot => shot?.duration));
   const shotLines = shots.map((shot, index) => {
     const scene = shot.scene || {};
     const characters = Array.isArray(shot.characters) ? shot.characters : [];
@@ -79,8 +126,9 @@ function buildLocalVisualPrompt(
 
   const styles = Array.isArray(imageSettings?.styles) && imageSettings.styles.length > 0 ? imageSettings.styles.join('、') : '电影感、写实';
   const lighting = Array.isArray(imageSettings?.lighting) && imageSettings.lighting.length > 0 ? imageSettings.lighting.join('、') : '自然电影光';
+  const bibleText = buildCreationBibleVisualText(creationBible);
 
-  return `横向超宽电影工业级分镜故事板总控图，章节「${chapterTitle || '未命名章节'}」第${groupIndex}组，包含${shots.length}个连续镜头格。顶部中文项目信息栏，上方角色设定、场景设定、运镜方案，主体为时间分镜表，底部镜头说明/色彩指南/灯光参考。${shotLines}。画面风格：${styles}；光影：${lighting}。中文印刷级标注，清晰边框，真实导演工作板，不要水印，不要涂鸦，不要手写批注。${referenceImageCount > 0 ? `参考${referenceImageCount}张素材图，继承角色外观、场景质感和色彩光影。` : ''}`;
+  return `横向超宽电影工业级分镜故事板总控图，章节「${chapterTitle || '未命名章节'}」第${groupIndex}组，包含${shots.length}个连续镜头格，总时长${formatStoryboardDurationSeconds(totalDuration)}秒。${bibleText ? `${bibleText}。` : ''}顶部中文项目信息栏，上方角色设定、场景设定、运镜方案，主体为时间分镜表，底部镜头说明/色彩指南/灯光参考。${shotLines}。画面风格：${styles}；光影：${lighting}。中文印刷级标注，清晰边框，真实导演工作板，不要水印，不要涂鸦，不要手写批注。${referenceImageCount > 0 ? `参考${referenceImageCount}张素材图，继承角色外观、场景质感和色彩光影。` : ''}`;
 }
 
 function prepareImagePrompt(
@@ -89,14 +137,16 @@ function prepareImagePrompt(
   groupIndex: number,
   shots: any[],
   referenceImageCount: number,
-  imageSettings: any
+  imageSettings: any,
+  creationBible?: CreationBiblePayload
 ): string {
-  const fallbackPrompt = buildLocalVisualPrompt(chapterTitle, groupIndex, shots, referenceImageCount, imageSettings);
+  const fallbackPrompt = buildLocalVisualPrompt(chapterTitle, groupIndex, shots, referenceImageCount, imageSettings, creationBible);
+  const bibleText = buildCreationBibleVisualText(creationBible);
   const prompt = cleanText(customPrompt);
   if (!prompt) return fallbackPrompt;
 
   const normalized = prompt.replace(/\s+/g, ' ').trim();
-  if (normalized.length <= 1200) return normalized;
+  if (normalized.length <= 1200) return [bibleText, normalized].filter(Boolean).join('。');
 
   return `${fallbackPrompt}\n用户确认提示词关键要求：${normalized.slice(0, 520)}`;
 }
@@ -543,14 +593,18 @@ export async function POST(request: NextRequest) {
       referenceImages,
       imageSettings,
       customPrompt,   // 可选的用户确认后的自定义提示词
+      creationBible,
     } = await request.json();
 
     if (!shots || !Array.isArray(shots) || shots.length === 0) {
       return NextResponse.json({ error: '请提供分镜数据' }, { status: 400 });
     }
 
-    if (shots.length > 6) {
-      return NextResponse.json({ error: '每组分镜最多6个' }, { status: 400 });
+    const groupDuration = sumStoryboardDurations(shots.map(shot => shot?.duration));
+    if (groupDuration > STORYBOARD_GROUP_MAX_SECONDS) {
+      return NextResponse.json({
+        error: `本组分镜总时长为${formatStoryboardDurationSeconds(groupDuration)}秒，不能超过15秒，请重新按时长分组`,
+      }, { status: 400 });
     }
 
     const runninghubConfig = getRunningHubConfigSync();
@@ -584,7 +638,7 @@ export async function POST(request: NextRequest) {
     // 第一步：准备出图 prompt。默认用本地结构化提示词，避免额外模型调用拉长等待。
     let concisePrompt: string;
     if (customPrompt) {
-      concisePrompt = prepareImagePrompt(customPrompt, chapterTitle, groupIndex, shots, referenceImages?.length || 0, imageSettings);
+      concisePrompt = prepareImagePrompt(customPrompt, chapterTitle, groupIndex, shots, referenceImages?.length || 0, imageSettings, creationBible);
       console.log(`📝 使用用户确认的自定义提示词（已做出图长度优化）: ${concisePrompt.substring(0, 200)}...`);
     } else if (ENABLE_LLM_IMAGE_PROMPT) {
       try {
@@ -595,13 +649,15 @@ export async function POST(request: NextRequest) {
           shots,
           referenceImages?.length || 0
         );
+        const bibleText = buildCreationBibleVisualText(creationBible);
+        concisePrompt = [bibleText, concisePrompt].filter(Boolean).join('。');
         console.log(`📝 GPT-5 视觉描述: ${concisePrompt.substring(0, 200)}...`);
       } catch (promptError) {
         console.warn('GPT-5 视觉描述生成失败，改用本地快速提示词:', promptError);
-        concisePrompt = buildLocalVisualPrompt(chapterTitle, groupIndex, shots, referenceImages?.length || 0, imageSettings);
+        concisePrompt = buildLocalVisualPrompt(chapterTitle, groupIndex, shots, referenceImages?.length || 0, imageSettings, creationBible);
       }
     } else {
-      concisePrompt = buildLocalVisualPrompt(chapterTitle, groupIndex, shots, referenceImages?.length || 0, imageSettings);
+      concisePrompt = buildLocalVisualPrompt(chapterTitle, groupIndex, shots, referenceImages?.length || 0, imageSettings, creationBible);
       console.log(`📝 使用本地快速视觉描述: ${concisePrompt.substring(0, 200)}...`);
     }
 

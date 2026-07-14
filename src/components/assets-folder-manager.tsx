@@ -355,6 +355,15 @@ export function AssetsFolderManager({ refreshTrigger }: AssetsFolderManagerProps
     setPreviewZoom(1);
   }, [previewUrl]);
 
+  const handleDialogOpenChange = useCallback((open: boolean) => {
+    setIsOpen(open);
+    if (!open) {
+      closePreview();
+      setCurrentFolder(null);
+      setDeleteConfirmFile(null);
+    }
+  }, [closePreview]);
+
   // 删除文件
   const deleteFile = async (folderKey: string, file: AssetFile) => {
     const filename = file.name;
@@ -486,7 +495,7 @@ export function AssetsFolderManager({ refreshTrigger }: AssetsFolderManagerProps
 
   return (
     <>
-      <Dialog open={isOpen} onOpenChange={setIsOpen}>
+      <Dialog open={isOpen} onOpenChange={handleDialogOpenChange}>
         <DialogTrigger asChild>
           <Button variant="outline" size="sm" className="gap-2">
             <FolderTree className="w-4 h-4" />
@@ -494,14 +503,24 @@ export function AssetsFolderManager({ refreshTrigger }: AssetsFolderManagerProps
           </Button>
         </DialogTrigger>
         <DialogContent 
-          className="max-w-3xl max-h-[85vh] overflow-hidden flex flex-col"
+          className={previewFile && previewUrl
+            ? 'flex h-[calc(100vh-0.5rem)] max-h-[calc(100vh-0.5rem)] w-[calc(100vw-0.5rem)] max-w-[calc(100vw-0.5rem)] flex-col gap-0 overflow-hidden rounded-md p-0 sm:max-w-[calc(100vw-1rem)]'
+            : 'flex max-h-[85vh] flex-col overflow-hidden sm:max-w-3xl'
+          }
+          showCloseButton={!(previewFile && previewUrl)}
           onInteractOutside={(e) => {
             // 如果图片预览打开，阻止点击外部关闭 Dialog
             if (previewFile && previewUrl) {
-            e.preventDefault();
-          }
-        }}
-      >
+              e.preventDefault();
+            }
+          }}
+          onEscapeKeyDown={(e) => {
+            if (previewFile && previewUrl) {
+              e.preventDefault();
+              closePreview();
+            }
+          }}
+        >
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <FolderOpen className="w-5 h-5" />
@@ -761,81 +780,91 @@ export function AssetsFolderManager({ refreshTrigger }: AssetsFolderManagerProps
             )}
           </div>
         )}
+
+        {/* 图片预览模态框 - 放在资产管理 Dialog 内部，避免外层弹窗拦截点击 */}
+        {previewFile && previewUrl && (
+          <div
+            className="absolute inset-0 z-50 flex items-center justify-center bg-black/90 cursor-pointer"
+            onClick={closePreview}
+            role="dialog"
+            aria-modal="true"
+            aria-label="图片预览"
+          >
+            <div
+              className="relative flex h-full w-full cursor-default flex-col overflow-hidden bg-gray-900"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex items-center justify-between p-3 bg-gray-800 border-b border-gray-700 shrink-0">
+                <div className="flex min-w-0 items-center gap-2 text-white">
+                  <Eye className="w-4 h-4 shrink-0" />
+                  <span className="truncate text-sm" title={previewFile.filename}>
+                    {previewFile.filename}
+                  </span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-1 mr-2">
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleZoomOut();
+                      }}
+                      className="text-white hover:bg-white/20 h-8 w-8 p-0"
+                      disabled={previewZoom <= 0.25}
+                      title="缩小"
+                    >
+                      <ZoomOut className="w-4 h-4" />
+                    </Button>
+                    <span className="text-white text-xs w-12 text-center">
+                      {Math.round(previewZoom * 100)}%
+                    </span>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleZoomIn();
+                      }}
+                      className="text-white hover:bg-white/20 h-8 w-8 p-0"
+                      disabled={previewZoom >= 3}
+                      title="放大"
+                    >
+                      <ZoomIn className="w-4 h-4" />
+                    </Button>
+                  </div>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onPointerDown={(e) => {
+                      e.stopPropagation();
+                    }}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      closePreview();
+                    }}
+                    className="text-white hover:bg-white/20 h-8 w-8 p-0"
+                    title="关闭预览"
+                    aria-label="关闭预览"
+                  >
+                    <X className="w-4 h-4" />
+                  </Button>
+                </div>
+              </div>
+
+              <div className="flex min-h-0 flex-1 items-center justify-center overflow-auto p-2 sm:p-3">
+                <img
+                  src={previewUrl}
+                  alt={previewFile.filename}
+                  className="max-w-full max-h-full object-contain transition-transform duration-200"
+                  style={{ transform: `scale(${previewZoom})` }}
+                />
+              </div>
+            </div>
+          </div>
+        )}
       </DialogContent>
     </Dialog>
-
-    {/* 图片预览模态框 - 完全独立于 Dialog，使用 Portal 渲染到 body */}
-    {mounted && previewFile && previewUrl && createPortal(
-      <div 
-        className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/80 cursor-pointer"
-        onClick={closePreview}
-      >
-        <div 
-          className="relative w-[90vw] h-[90vh] flex flex-col bg-gray-900 rounded-lg overflow-hidden cursor-default"
-          onClick={(e) => e.stopPropagation()}
-        >
-          {/* 工具栏 */}
-          <div className="flex items-center justify-between p-3 bg-gray-800 border-b border-gray-700 shrink-0">
-            <div className="flex items-center gap-2 text-white">
-              <Eye className="w-4 h-4" />
-              <span className="text-sm truncate max-w-[300px]" title={previewFile.filename}>
-                {previewFile.filename}
-              </span>
-            </div>
-            <div className="flex items-center gap-2">
-              {/* 缩放控制 */}
-              <div className="flex items-center gap-1 mr-2">
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={handleZoomOut}
-                  className="text-white hover:bg-white/20 h-8 w-8 p-0"
-                  disabled={previewZoom <= 0.25}
-                >
-                  <ZoomOut className="w-4 h-4" />
-                </Button>
-                <span className="text-white text-xs w-12 text-center">
-                  {Math.round(previewZoom * 100)}%
-                </span>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={handleZoomIn}
-                  className="text-white hover:bg-white/20 h-8 w-8 p-0"
-                  disabled={previewZoom >= 3}
-                >
-                  <ZoomIn className="w-4 h-4" />
-                </Button>
-              </div>
-              {/* 关闭按钮 */}
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={closePreview}
-                className="text-white hover:bg-white/20 h-8 w-8 p-0"
-              >
-                <X className="w-4 h-4" />
-              </Button>
-            </div>
-          </div>
-          
-          {/* 图片容器 - 可滚动 */}
-          <div className="flex-1 overflow-auto flex items-center justify-center p-4">
-            {previewUrl ? (
-              <img
-                src={previewUrl}
-                alt={previewFile.filename}
-                className="max-w-full max-h-full object-contain transition-transform duration-200"
-                style={{ transform: `scale(${previewZoom})` }}
-              />
-            ) : (
-              <div className="text-gray-400">暂无图片</div>
-            )}
-          </div>
-        </div>
-      </div>,
-      document.body
-    )}
     
     {/* 删除确认对话框 */}
     {mounted && deleteConfirmFile && createPortal(

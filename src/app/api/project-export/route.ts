@@ -8,15 +8,17 @@ import { getAccountAssetsPath } from '@/lib/account-assets';
 // 项目版本号
 const PROJECT_VERSION = '1.0.0';
 
+function sanitizeProjectName(value: string) {
+  return value.replace(/[\\/:*?"<>|]/g, '_').replace(/\s+/g, '_').slice(0, 80) || 'storyboard-project';
+}
+
 export async function GET(request: NextRequest) {
   const auth = await requireUserLoginResponse();
   if (auth.response) return auth.response;
 
   try {
     const { searchParams } = new URL(request.url);
-    const projectName = searchParams.get('name') || 'storyboard-project';
-
-    const configPath = path.join(process.cwd(), 'assets-config.json');
+    const projectName = sanitizeProjectName(searchParams.get('name') || 'storyboard-project');
     const assetsPath = getAccountAssetsPath(auth.account);
 
     // 创建 zip 流
@@ -42,11 +44,6 @@ export async function GET(request: NextRequest) {
       description: 'AI 故事分镜视频生成器项目文件',
     };
     archive.append(JSON.stringify(metadata, null, 2), { name: 'project.json' });
-
-    // 添加资产配置
-    if (fs.existsSync(configPath)) {
-      archive.file(configPath, { name: 'config/assets-config.json' });
-    }
 
     // 添加资产文件夹
     const assetFolders = ['场景图片', '人物图片', '道具图片', '分镜图片', '视频文件'];

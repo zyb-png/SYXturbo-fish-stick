@@ -8,6 +8,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { PasswordInput } from '@/components/password-input';
+import { notifyPersistenceAccountChanged } from '@/hooks/usePersistentState';
 import {
   Dialog,
   DialogContent,
@@ -207,6 +208,7 @@ export function CreationPointsWallet() {
       setLoginOpen(false);
       setOpen(true);
       await loadWallet(true);
+      notifyPersistenceAccountChanged();
       window.dispatchEvent(new CustomEvent('manfei:wallet-updated'));
       toast.success('账号登录成功');
     } catch (loginError) {
@@ -219,6 +221,7 @@ export function CreationPointsWallet() {
   const handleLogout = async () => {
     try {
       await fetch('/api/auth/logout', { method: 'POST' });
+      notifyPersistenceAccountChanged();
       await loadWallet(true);
       toast.success('已退出账号');
       window.setTimeout(() => window.location.reload(), 500);

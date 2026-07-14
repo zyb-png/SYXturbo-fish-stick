@@ -56,6 +56,20 @@ export function getAccountAssetsPath(account: Pick<PublicAccount, 'id'>): string
   return path.join(readConfiguredAssetsRoot(), 'accounts', getAccountStorageSegment(account.id));
 }
 
+export function resolveAccountAssetFilePath(
+  account: Pick<PublicAccount, 'id'>,
+  folder: string,
+  filename: string
+): string | null {
+  const allowedFolders = new Set(Object.values(readAssetFoldersConfig()));
+  if (!allowedFolders.has(folder)) return null;
+  if (!filename || filename !== path.basename(filename) || /[\\/]/.test(filename)) return null;
+
+  const assetsRoot = path.resolve(getAccountAssetsPath(account));
+  const filePath = path.resolve(assetsRoot, folder, filename);
+  return filePath.startsWith(`${assetsRoot}${path.sep}`) ? filePath : null;
+}
+
 export function getAccountProjectStateDir(account: Pick<PublicAccount, 'id'>): string {
   return path.join(getAccountAssetsPath(account), 'project-state');
 }

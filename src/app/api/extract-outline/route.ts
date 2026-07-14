@@ -3,16 +3,39 @@ import { stream as oaiStream, invoke as oaiInvoke } from '@/lib/openai-client';
 import { estimateMessagesTokens, estimateTokens } from '@/lib/token-utils';
 import { tryExtractAndFixJSON } from '@/lib/json-utils';
 import { requireUserLoginResponse } from '@/lib/auth-guard';
+import { getCanonicalEpisodeTitle, normalizeEpisodeChapterTitles } from '@/lib/outline-utils';
 
 // 每批处理的章节数
 const BATCH_SIZE = 5;
+
+type EpisodeMarker = {
+  number: number;
+  marker: string;
+  start?: number;
+  end?: number;
+  line?: string;
+};
 
 export async function POST(request: NextRequest) {
   const auth = await requireUserLoginResponse();
   if (auth.response) return auth.response;
 
   try {
-    const { content, fileName, batch = 1, episodeMarkers: clientEpisodeMarkers, basicInfo } = await request.json();
+    const {
+      content,
+      fileName,
+      batch = 1,
+      episodeMarkers: clientEpisodeMarkers,
+      basicInfo,
+      sourceType,
+    } = await request.json();
+
+    if (sourceType !== 'execution-script') {
+      return NextResponse.json(
+        { error: '大纲提取仅允许使用当前执行剧本，请先重新拉取执行剧本' },
+        { status: 400 }
+      );
+    }
 
     if (!content) {
       return NextResponse.json(
@@ -26,7 +49,7 @@ export async function POST(request: NextRequest) {
     // 初始化 LLM 客户端
 
     // 第一批：识别所有集数标记
-    let episodeMarkers: Array<{ number: number; marker: string }> = [];
+    let episodeMarkers: EpisodeMarker[] = [];
     let scriptBasicInfo = basicInfo;
     
     if (batch === 1) {
@@ -43,7 +66,7 @@ export async function POST(request: NextRequest) {
         if (typeof clientEpisodeMarkers[0] === 'number') {
           episodeMarkers = (clientEpisodeMarkers as number[]).map(num => ({ number: num, marker: `第${num}集` }));
         } else {
-          episodeMarkers = clientEpisodeMarkers as Array<{ number: number; marker: string }>;
+          episodeMarkers = clientEpisodeMarkers as EpisodeMarker[];
         }
       }
       console.log(`第 ${batch} 批，使用传入的集数数组，共 ${episodeMarkers.length} 个:`, episodeMarkers.map(m => `[${m.number}] ${m.marker}`));
@@ -127,92 +150,108 @@ export async function POST(request: NextRequest) {
  * 从文本中提取所有集数标记
  * 返回包含数字和实际标记文本的对象数组
  */
-function extractEpisodeMarkers(content: string): Array<{ number: number; marker: string }> {
-  const markers: Array<{ number: number; marker: string }> = [];
-  const seen = new Set<number>();  // 用于去重
-  
-  // 匹配各种集数格式
-  const patterns: Array<{ pattern: RegExp; extractNumber: (match: RegExpExecArray) => number; extractMarker: (match: RegExpExecArray) => string }> = [
-    { 
-      pattern: /第(\d+)集/g,
-      extractNumber: (match) => parseInt(match[1]),
-      extractMarker: (match) => match[0]
-    },
-    { 
-      pattern: /第([一二三四五六七八九十百千]+)集/g,
-      extractNumber: (match) => chineseToNumberMap(match[1]),
-      extractMarker: (match) => match[0]
-    },
-    { 
-      pattern: /Episode\s*(\d+)/gi,
-      extractNumber: (match) => parseInt(match[1]),
-      extractMarker: (match) => match[0]
-    },
-    { 
-      pattern: /EP\.?\s*(\d+)/gi,
-      extractNumber: (match) => parseInt(match[1]),
-      extractMarker: (match) => match[0]
-    },
-    { 
-      pattern: /第(\d+)章/g,
-      extractNumber: (match) => parseInt(match[1]),
-      extractMarker: (match) => match[0]
-    },
-    // 添加方括号格式
-    {
-      pattern: /\[\s*(\d+)\s*\]/g,
-      extractNumber: (match) => parseInt(match[1]),
-      extractMarker: (match) => match[0]
-    },
-  ];
-  
-  // 中文数字映射
-  function chineseToNumberMap(chinese: string): number {
-    const map: Record<string, number> = {
-      '一': 1, '二': 2, '三': 3, '四': 4, '五': 5,
-      '六': 6, '七': 7, '八': 8, '九': 9, '十': 10,
-      '十一': 11, '十二': 12, '十三': 13, '十四': 14, '十五': 15,
-      '十六': 16, '十七': 17, '十八': 18, '十九': 19, '二十': 20,
-      '二十一': 21, '二十二': 22, '二十三': 23, '二十四': 24, '二十五': 25,
-      '二十六': 26, '二十七': 27, '二十八': 28, '二十九': 29, '三十': 30,
-      '三十一': 31, '三十二': 32, '三十三': 33, '三十四': 34, '三十五': 35,
-      '三十六': 36, '三十七': 37, '三十八': 38, '三十九': 39, '四十': 40,
-      '四十一': 41, '四十二': 42, '四十三': 43, '四十四': 44, '四十五': 45,
-      '四十六': 46, '四十七': 47, '四十八': 48, '四十九': 49, '五十': 50,
-      '五十一': 51, '五十二': 52, '五十三': 53, '五十四': 54, '五十五': 55,
-      '五十六': 56, '五十七': 57, '五十八': 58, '五十九': 59, '六十': 60,
-      '六十一': 61, '六十二': 62, '六十三': 63, '六十四': 64, '六十五': 65,
-      '六十六': 66, '六十七': 67, '六十八': 68, '六十九': 69, '七十': 70,
-      '七十一': 71, '七十二': 72, '七十三': 73, '七十四': 74, '七十五': 75,
-      '七十六': 76, '七十七': 77, '七十八': 78, '七十九': 79, '八十': 80,
-      '八十一': 81, '八十二': 82, '八十三': 83, '八十四': 84, '八十五': 85,
-      '八十六': 86, '八十七': 87, '八十八': 88, '八十九': 89, '九十': 90,
-      '九十一': 91, '九十二': 92, '九十三': 93, '九十四': 94, '九十五': 95,
-      '九十六': 96, '九十七': 97, '九十八': 98, '九十九': 99, '一百': 100,
-    };
-    return map[chinese] || 0;
+function extractEpisodeMarkers(content: string): EpisodeMarker[] {
+  const source = normalizeLineEndings(content);
+  const markers: EpisodeMarker[] = [];
+  const seen = new Set<number>();
+  const linePattern = /([^\n]*)(?:\n|$)/g;
+  let match: RegExpExecArray | null;
+
+  while ((match = linePattern.exec(source)) !== null) {
+    const rawLine = match[1] || '';
+    if (!rawLine && match.index >= source.length) break;
+    const parsed = parseEpisodeHeadingLine(rawLine);
+    if (!parsed || seen.has(parsed.number)) continue;
+
+    seen.add(parsed.number);
+    const lineStart = match.index;
+    const markerOffset = rawLine.indexOf(parsed.marker);
+    const markerStart = lineStart + Math.max(0, markerOffset);
+    markers.push({
+      number: parsed.number,
+      marker: parsed.marker,
+      start: markerStart,
+      end: markerStart + parsed.marker.length,
+      line: rawLine.trim(),
+    });
   }
-  
-  // 执行所有匹配
-  for (const { pattern, extractNumber, extractMarker } of patterns) {
-    pattern.lastIndex = 0;
-    let match;
-    while ((match = pattern.exec(content)) !== null) {
-      const number = extractNumber(match);
-      if (number > 0 && !seen.has(number)) {
-        seen.add(number);
-        markers.push({
-          number,
-          marker: extractMarker(match)
-        });
-      }
-    }
-  }
-  
-  // 按数字排序
-  markers.sort((a, b) => a.number - b.number);
-  
+
+  markers.sort((a, b) => (a.start ?? 0) - (b.start ?? 0));
   return markers;
+}
+
+function normalizeLineEndings(value: string): string {
+  return String(value || '').replace(/\r\n?/g, '\n');
+}
+
+function chineseToNumberMap(chinese: string): number {
+  if (/^\d+$/.test(chinese)) return parseInt(chinese, 10);
+  const digitMap: Record<string, number> = {
+    零: 0,
+    一: 1,
+    二: 2,
+    两: 2,
+    三: 3,
+    四: 4,
+    五: 5,
+    六: 6,
+    七: 7,
+    八: 8,
+    九: 9,
+  };
+  if (chinese === '十') return 10;
+  if (chinese === '百' || chinese === '一百') return 100;
+
+  const hundredIndex = chinese.indexOf('百');
+  if (hundredIndex >= 0) {
+    const beforeHundred = chinese.slice(0, hundredIndex);
+    const afterHundred = chinese.slice(hundredIndex + 1);
+    const hundreds = beforeHundred ? digitMap[beforeHundred] : 1;
+    const rest = afterHundred ? chineseToNumberMap(afterHundred) : 0;
+    return typeof hundreds === 'number' ? hundreds * 100 + rest : 0;
+  }
+
+  const tenIndex = chinese.indexOf('十');
+  if (tenIndex >= 0) {
+    const beforeTen = chinese.slice(0, tenIndex);
+    const afterTen = chinese.slice(tenIndex + 1);
+    const tens = beforeTen ? digitMap[beforeTen] : 1;
+    const ones = afterTen ? digitMap[afterTen] : 0;
+    return typeof tens === 'number' && typeof ones === 'number' ? tens * 10 + ones : 0;
+  }
+
+  return digitMap[chinese] || 0;
+}
+
+function parseEpisodeHeadingLine(rawLine: string): { number: number; marker: string } | null {
+  const line = rawLine
+    .replace(/^\s*#{1,6}\s*/g, '')
+    .replace(/^\s*[-*+]\s*/g, '')
+    .replace(/^\s*\d+\s*[.、．]\s*/g, '')
+    .replace(/\*\*/g, '')
+    .trim();
+
+  if (!line || line.length > 120) return null;
+  if (isLikelyDialogueLine(line) || isLikelySceneOrActionLine(line)) return null;
+
+  const patterns: RegExp[] = [
+    /^第\s*([一二两三四五六七八九十百千\d]+)\s*[集章幕话]/,
+    /^(?:Episode|EP\.?)\s*(\d+)\b/i,
+    /^\[\s*(\d+)\s*]\s*(?:$|[^\d].*)/,
+  ];
+
+  for (const pattern of patterns) {
+    const match = pattern.exec(line);
+    if (!match) continue;
+    const number = chineseToNumberMap(match[1]);
+    if (!Number.isFinite(number) || number <= 0) continue;
+    return {
+      number,
+      marker: match[0].trim(),
+    };
+  }
+
+  return null;
 }
 
 function isLikelyDialogueLine(line: string): boolean {
@@ -226,17 +265,6 @@ function isLikelySceneOrActionLine(line: string): boolean {
     trimmed.startsWith('△') ||
     /^\d+\s*[-—]/.test(trimmed) ||
     /\b(日|夜|内|外|内\/外|外\/内)\b/.test(trimmed)
-  );
-}
-
-function isValidChapterTitleCandidate(line: string, markerPattern: RegExp): boolean {
-  const trimmed = line.trim();
-  return (
-    trimmed.length > 2 &&
-    trimmed.length < 50 &&
-    !markerPattern.test(trimmed) &&
-    !isLikelyDialogueLine(trimmed) &&
-    !isLikelySceneOrActionLine(trimmed)
   );
 }
 
@@ -319,6 +347,7 @@ async function summarizeChapterContents(
 
   const fallbackChapters = chapters.map(chapter => ({
     ...chapter,
+    title: getCanonicalEpisodeTitle(chapter.chapterNumber),
     summary: buildLocalChapterSummary(chapter.content || ''),
   }));
 
@@ -375,6 +404,7 @@ async function summarizeChapterContents(
 
   const updatedChapters = chapters.map(chapter => ({
     ...chapter,
+    title: getCanonicalEpisodeTitle(chapter.chapterNumber),
     summary: normalizeGeneratedSummary(
       summaryByChapter.get(Number(chapter.chapterNumber)),
       chapter.content || ''
@@ -394,25 +424,29 @@ async function summarizeChapterContents(
  */
 function extractChapterContentFromOriginal(
   content: string,
-  episodes: Array<{ number: number; marker: string }>
+  episodes: EpisodeMarker[]
 ): { chapters: any[]; inputTokens: number; outputTokens: number } {
   const chapters: any[] = [];
+  const source = normalizeLineEndings(content);
   
-  console.log(`[章节提取] 开始提取章节内容，总长度: ${content.length}`);
+  console.log(`[章节提取] 开始提取章节内容，总长度: ${source.length}`);
   console.log(`[章节提取] 需要提取的集数:`, episodes.map(e => `[${e.number}] ${e.marker}`).join(', '));
   
   // 找到每个章节标记的位置（使用实际标记文本）
   const positions: { ep: number; marker: string; start: number; end: number }[] = [];
   
   for (const { number, marker } of episodes) {
-    const index = content.indexOf(marker);
+    const episode = episodes.find(item => item.number === number && item.marker === marker);
+    const index = typeof episode?.start === 'number'
+      ? episode.start
+      : findEpisodeMarkerPosition(source, marker, number);
     if (index !== -1) {
       console.log(`[章节提取] 找到章节标记: 第${number}集 "${marker}"，位置: ${index}`);
       positions.push({
         ep: number,
         marker,
         start: index,
-        end: index + marker.length
+        end: typeof episode?.end === 'number' ? episode.end : index + marker.length
       });
     } else {
       console.warn(`[章节提取] 未找到章节标记: 第${number}集 "${marker}"`);
@@ -430,10 +464,10 @@ function extractChapterContentFromOriginal(
     
     // 章节内容从当前标记结束位置开始，到下一个标记开始位置结束
     const contentStart = current.end;
-    const contentEnd = next ? next.start : content.length;
+    const contentEnd = next ? next.start : source.length;
     
     // 提取章节内容
-    let chapterContent = content.substring(contentStart, contentEnd).trim();
+    let chapterContent = source.substring(contentStart, contentEnd).trim();
     
     // 如果提取的内容为空，尝试从标记之前提取
     if (chapterContent.length === 0 && next) {
@@ -442,27 +476,15 @@ function extractChapterContentFromOriginal(
       if (prev) {
         const altStart = prev.end;
         const altEnd = current.start;
-        chapterContent = content.substring(altStart, altEnd).trim();
+        chapterContent = source.substring(altStart, altEnd).trim();
         console.log(`[章节提取] 使用备用方案提取第${current.ep}集内容，长度: ${chapterContent.length}`);
       }
     }
     
     console.log(`[章节提取] 第${current.ep}集提取内容长度: ${chapterContent.length}`);
     
-    // 提取章节标题（从标记位置往前找标题，或者使用默认标题）
-    const titleStart = Math.max(0, current.start - 100);
-    const titleArea = content.substring(titleStart, current.end);
-    
-    // 尝试提取标题（通常在章节标记前一行）
-    const lines = titleArea.split('\n');
-    let title = `第${current.ep}集`;
-    const markerPattern = new RegExp(current.marker.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (isValidChapterTitleCandidate(trimmed, markerPattern)) {
-        title = trimmed;
-      }
-    }
+    // 分集标题由当前集号唯一确定，不能读取上一集结尾的台词、动作或转场标记。
+    const title = getCanonicalEpisodeTitle(current.ep);
     
     // 截取内容长度限制（避免太长）
     // 保留最多 8000 字符用于分镜生成
@@ -514,6 +536,21 @@ function extractChapterContentFromOriginal(
     inputTokens: 0, // 不使用LLM，没有token消耗
     outputTokens: 0,
   };
+}
+
+function findEpisodeMarkerPosition(content: string, marker: string, episodeNumber: number): number {
+  const escapedMarker = marker.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const linePattern = new RegExp(`(^|\\n)([^\\n]*${escapedMarker}[^\\n]*)`, 'g');
+  let match: RegExpExecArray | null;
+  while ((match = linePattern.exec(content)) !== null) {
+    const line = match[2] || '';
+    const parsed = parseEpisodeHeadingLine(line);
+    if (parsed?.number === episodeNumber) {
+      const lineStart = match.index + (match[1] ? match[1].length : 0);
+      return lineStart + line.indexOf(marker);
+    }
+  }
+  return content.indexOf(marker);
 }
 
 /**
@@ -624,7 +661,10 @@ async function generateBatchChapters(
   // 去除重复的 chapterNumber，保留第一个出现的
   const uniqueChapters = chapters.reduce((acc: any[], chapter) => {
     if (!acc.find(c => c.chapterNumber === chapter.chapterNumber)) {
-      acc.push(chapter);
+      acc.push({
+        ...chapter,
+        title: getCanonicalEpisodeTitle(chapter.chapterNumber),
+      });
     }
     return acc;
   }, []);
@@ -647,15 +687,16 @@ async function generateOutlineTraditional(
   content: string,
   fileName: string
 ): Promise<any> {
-  const systemPrompt = `你是剧本分析专家。分析剧本并拆分章节。
+  const systemPrompt = `你是剧本分析专家。分析剧本并完整拆分为分集大纲。
 
 规则：
-1. 按情节发展拆分章节，最多10个章节
-2. 章节summary用50字左右概括剧情，不摘抄原文或台词
-3. content 字段必须详细描述该章节的完整情节（500-1000字），包括场景描述、人物对话要点、关键事件发展、情感变化、冲突与转折
+1. 优先遵循原文明确的分集或章节结构；没有明确标记时，再按剧情发展自然拆分。
+2. 必须覆盖全文，不限制固定集数，不得漏掉后半部分，也不得把一句台词或转场标记单独当成一集。
+3. 每集summary用50字左右概括剧情，不摘抄原文或台词。
+4. content 字段必须详细描述该集的完整情节（500-1000字），包括场景描述、人物对话要点、关键事件发展、情感变化、冲突与转折。
 
 输出JSON：
-{"title":"标题","summary":"整体剧情概括100字左右","totalChapters":N,"chapters":[{"chapterNumber":1,"title":"章节标题","summary":"50字左右剧情概括","characters":["人物"],"scenes":["场景"],"content":"详细的情节描述，包括场景、对话要点、事件发展、情感变化等，500-1000字..."}]}`;
+{"title":"标题","summary":"整体剧情概括100字左右","totalChapters":N,"chapters":[{"chapterNumber":1,"title":"第1集","summary":"50字左右剧情概括","characters":["人物"],"scenes":["场景"],"content":"详细的情节描述，包括场景、对话要点、事件发展、情感变化等，500-1000字..."}]}`;
 
   const messages = [
     { role: 'system' as const, content: systemPrompt },
@@ -681,7 +722,7 @@ async function generateOutlineTraditional(
       totalChapters: 1,
       chapters: [{
         chapterNumber: 1,
-        title: '第1章',
+        title: '第1集',
         summary,
         characters: [],
         scenes: [],
@@ -698,7 +739,9 @@ async function generateOutlineTraditional(
   const outline = tryExtractAndFixJSON(response);
   
   if (outline && outline.chapters) {
-    outline.totalChapters = outline.chapters.length;
+    const normalized = normalizeEpisodeChapterTitles(outline.chapters);
+    outline.chapters = normalized.chapters;
+    outline.totalChapters = normalized.chapters.length;
     outline.tokenUsage = {
       input: estimateMessagesTokens(messages),
       output: estimateTokens(response),

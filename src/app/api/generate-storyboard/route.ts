@@ -14,7 +14,7 @@ import {
   freezeCreationPoints,
   InsufficientCreationPointsError,
 } from '@/lib/creation-points';
-import { calculateDeepSeekCreationPoints } from '@/lib/provider-pricing';
+import { calculateStoryboardTokenCreationPoints } from '@/lib/provider-pricing';
 import { requireUserLoginResponse } from '@/lib/auth-guard';
 
 interface Segment {
@@ -36,11 +36,13 @@ interface DialogueLock {
 }
 
 type StoryboardGlobalContext = {
+  chapterNumber?: number;
   characters?: string[];
   scenes?: string[];
   charactersData?: any;
   scenesData?: any;
   propsData?: any;
+  creationBibleInstruction?: string;
 };
 
 const MIN_SHOTS_PER_EPISODE = 50;
@@ -50,6 +52,65 @@ const MAX_SEGMENTS_PER_EPISODE = 8;
 const MIN_SHOTS_PER_SEGMENT = 6;
 const STORYBOARD_ANALYSIS_TIMEOUT_MS = 25_000;
 const STORYBOARD_SEGMENT_TIMEOUT_MS = 45_000;
+const STORYBOARD_LLM_API_KEY = process.env.STORYBOARD_LLM_API_KEY?.trim() || '';
+const STORYBOARD_LLM_MODEL = process.env.STORYBOARD_LLM_MODEL?.trim() || 'gemini-3.5-flash';
+const STORYBOARD_LLM_BASE_URL = (() => {
+  const configured = (process.env.STORYBOARD_LLM_BASE_URL || 'https://mobaohee.xyz').trim().replace(/\/+$/, '');
+  return /\/v1$/i.test(configured) ? configured : `${configured}/v1`;
+})();
+
+function getStoryboardLlmOptions() {
+  if (!STORYBOARD_LLM_API_KEY) {
+    throw new Error('未配置文字分镜模型 API Key，请联系管理员');
+  }
+  return {
+    apiKey: STORYBOARD_LLM_API_KEY,
+    baseUrl: STORYBOARD_LLM_BASE_URL,
+    model: STORYBOARD_LLM_MODEL,
+    includeUsage: true,
+  };
+}
+
+function cleanPromptText(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function buildCreationBibleInstruction(creationBible?: {
+  creationType?: string;
+  subjectRegion?: string;
+  creationBackground?: string;
+}): string {
+  const creationType = cleanPromptText(creationBible?.creationType);
+  const subjectRegion = cleanPromptText(creationBible?.subjectRegion);
+  const creationBackground = cleanPromptText(creationBible?.creationBackground);
+  if (!creationType && !subjectRegion && !creationBackground) return '';
+
+  const lines = ['【创作圣经】'];
+  if (creationType === '仿真人') {
+    lines.push('创作类型：仿真人。分镜必须以真人短剧/电影实拍逻辑描述，人物表演、皮肤质感、服装材质、空间和光影都要真实可拍。');
+  } else if (creationType === '3D') {
+    lines.push('创作类型：3D。分镜必须以3D/CG动画逻辑描述，角色模型、材质分区、动作幅度、场景结构和渲染风格保持统一。');
+  } else if (creationType === '动漫') {
+    lines.push('创作类型：动漫。分镜必须以动漫/动画电影逻辑描述，角色线条、表情、动作夸张度、色彩和美术风格保持统一。');
+  }
+
+  if (subjectRegion === '国内') {
+    lines.push('创作题材：国内。场景、道具、服饰、称呼、社会关系、环境细节要符合中国本土语境。');
+  } else if (subjectRegion === '国外') {
+    lines.push('创作题材：国外。场景、道具、服饰、称呼、社会关系、环境细节要符合海外/国际化语境。');
+  }
+
+  if (creationBackground === '近代') {
+    lines.push('创作背景：近代。镜头内的服化道、建筑、交通、通讯、照明、标识和社会礼仪必须保持近代年代质感。');
+  } else if (creationBackground === '现代') {
+    lines.push('创作背景：现代。镜头内的服化道、建筑、交通、通讯、设备、标识和社会行为必须符合现代生活语境。');
+  } else if (creationBackground === '古代') {
+    lines.push('创作背景：古代。镜头内的服饰形制、发式、建筑、器物、交通、照明、礼仪和社会秩序必须符合古代语境，禁止无剧情依据的现代元素。');
+  }
+
+  lines.push('注意：创作圣经只约束视觉风格、题材语境和时代背景，不能改写剧情、台词、人物关系和事件顺序；如剧本明确存在回忆、年代跳转或穿越，按原剧情呈现相应时期。');
+  return lines.join('\n');
+}
 // ================================================================
 // Phase 1 Prompt：章节切片分析（快，非流式）
 // ================================================================
@@ -103,6 +164,7 @@ function buildSegmentShotPrompt(
 场景：${segment.sceneContext}
 出场人物：${segment.charactersPresent?.join('、') || '未知'}
 目标分镜数：${segment.suggestedShots} 个
+${globalContext.creationBibleInstruction ? `\n${globalContext.creationBibleInstruction}` : ''}
 
 【段内容】
 ${segment.content}
@@ -145,12 +207,31 @@ ${prevLastShot}
     prompt += '\n【人物造型信息】\n';
     contextCharacters.forEach((char: any) => {
       prompt += `人物名称：${char.name}\n`;
-      if (char.faceFeatures) prompt += `  脸型特征：${char.faceFeatures}\n`;
+      if (char.faceFeatures) {
+        const faceFeatures = typeof char.faceFeatures === 'string'
+          ? char.faceFeatures
+          : [
+              char.faceFeatures.faceShape,
+              char.faceFeatures.eyes,
+              char.faceFeatures.nose,
+              char.faceFeatures.mouth,
+              char.faceFeatures.skinTone,
+            ].filter(Boolean).join('；');
+        if (faceFeatures) prompt += `  固定脸型特征：${faceFeatures}\n`;
+      }
       if (char.looks && Array.isArray(char.looks) && char.looks.length > 0) {
+        const chapterNumber = globalContext.chapterNumber;
+        const chapterLooks = char.looks.filter((look: any) => {
+          const episodes = getEpisodeNumbers(look);
+          return look?.isBaseLook || episodes.length === 0 || (chapterNumber && episodes.includes(chapterNumber));
+        });
+        const looksToShow = chapterLooks.length > 0 ? chapterLooks : char.looks;
         prompt += `  造型列表：\n`;
-        char.looks.forEach((look: any, index: number) => {
+        looksToShow.forEach((look: any, index: number) => {
           const lookId = look.id || `look_${index}`;
           prompt += `    [造型ID: ${lookId}] ${look.scene || '未知场景'} - ${look.description || look.costume || '待描述'}`;
+          const episodes = getEpisodeNumbers(look);
+          if (episodes.length > 0) prompt += `\n        关联集数: ${episodes.map(item => `第${item}集`).join('、')}`;
           if (look.costume) prompt += `\n        服装: ${look.costume}`;
           if (look.hairstyle) prompt += `\n        发型: ${look.hairstyle}`;
           prompt += '\n';
@@ -158,6 +239,26 @@ ${prevLastShot}
       }
     });
     prompt += `\n请根据场景和情节选择最合适的造型ID填入 characters[].lookId 字段\n`;
+  }
+
+  const chapterNumber = globalContext.chapterNumber;
+  const relevantScenes = getContextScenes(globalContext).filter((scene: any) => {
+    const episodes = getEpisodeNumbers(scene);
+    return episodes.length === 0 || (chapterNumber && episodes.includes(chapterNumber));
+  });
+  const relevantProps = getContextProps(globalContext).filter((prop: any) => {
+    const episodes = getEpisodeNumbers(prop);
+    return episodes.length === 0 || (chapterNumber && episodes.includes(chapterNumber));
+  });
+  if (relevantScenes.length > 0 || relevantProps.length > 0) {
+    prompt += '\n【本集素材名称与状态】\n';
+    if (relevantScenes.length > 0) {
+      prompt += `场景状态：${relevantScenes.slice(0, 30).map((scene: any) => scene.name).filter(Boolean).join('、')}\n`;
+    }
+    if (relevantProps.length > 0) {
+      prompt += `道具状态：${relevantProps.slice(0, 40).map((prop: any) => prop.name).filter(Boolean).join('、')}\n`;
+    }
+    prompt += 'scene.location 与 scene.props 优先使用上面已经提取的状态名称，确保后续图片能按集数和状态直接匹配；只有原文出现但清单遗漏时才补充新名称。\n';
   }
 
   prompt += `
@@ -701,6 +802,20 @@ function getContextProps(globalContext: StoryboardGlobalContext) {
   return toArray(globalContext.propsData, ['props', 'allProps']);
 }
 
+function getContextScenes(globalContext: StoryboardGlobalContext) {
+  return toArray(globalContext.scenesData, ['scenes', 'allScenes']);
+}
+
+function getEpisodeNumbers(value: any): number[] {
+  const direct = Array.isArray(value?.episodeNumbers) ? value.episodeNumbers : [];
+  const occurrences = Array.isArray(value?.occurrences)
+    ? value.occurrences.map((item: any) => item?.episodeNumber)
+    : [];
+  return Array.from(new Set([...direct, ...occurrences]
+    .map(item => Number(item))
+    .filter(item => Number.isFinite(item) && item > 0)));
+}
+
 function pickCharactersForContent(content: string, segment: Segment, globalContext: StoryboardGlobalContext) {
   const candidates = [
     ...(segment.charactersPresent || []),
@@ -732,7 +847,7 @@ async function estimateStoryboardReservationPoints(content: string): Promise<num
     targetSegments * (await countDeepSeekTokens(SKILL5_SYSTEM_PROMPT) + 800) +
     await countDeepSeekTokens(content);
   const estimatedOutputTokens = targetShots * 500;
-  return calculateDeepSeekCreationPoints({
+  return calculateStoryboardTokenCreationPoints({
     uncachedInputTokens: Math.ceil(estimatedInputTokens * 1.2),
     outputTokens: Math.ceil(estimatedOutputTokens * 1.2),
   });
@@ -984,9 +1099,23 @@ export async function POST(request: NextRequest) {
   if (auth.response) return auth.response;
 
   try {
-    const { chapterContent, chapterTitle, characters, scenes, chapterSummary, charactersData, scenesData, propsData } = await request.json();
+    const {
+      chapterContent,
+      chapterTitle,
+      chapterNumber,
+      characters,
+      scenes,
+      chapterSummary,
+      charactersData,
+      scenesData,
+      propsData,
+      creationBible,
+    } = await request.json();
+    const creationBibleInstruction = buildCreationBibleInstruction(creationBible);
+    const storyboardLlmOptions = getStoryboardLlmOptions();
 
     console.log(`[生成分镜API] 收到请求 - 章节: ${chapterTitle}`);
+    console.log(`[生成分镜API] 模型: ${storyboardLlmOptions.model}`);
 
     // 台词只能来自章节正文；摘要是改写文本，不能混入正文供模型抽台词。
     const sourceContent = (chapterContent || '').trim();
@@ -1018,8 +1147,9 @@ export async function POST(request: NextRequest) {
       metadata: {
         chapterTitle,
         contentLength: wordCount,
-        billingMode: 'deepseek_token',
-        pricing: 'deepseek_cost_x2',
+        billingMode: 'storyboard_token',
+        pricing: 'current_storyboard_token_rate',
+        model: storyboardLlmOptions.model,
         reservedPoints,
       },
     });
@@ -1075,6 +1205,7 @@ export async function POST(request: NextRequest) {
               content: `请分析以下章节内容，将其按情绪节拍切割成若干段。
 
 章节标题：${chapterTitle}
+${creationBibleInstruction ? `\n${creationBibleInstruction}\n` : ''}
 主要人物：${characters?.join('、') || '未指定'}
 关键场景：${scenes?.join('、') || '未指定'}
 章节摘要（仅辅助理解整体剧情，禁止从摘要抽取或改写台词）：
@@ -1093,6 +1224,7 @@ ${finalContent}
           let segments: Segment[] = [];
           try {
             const analysisResult = await oaiInvoke(segmentAnalysisMessages, {
+              ...storyboardLlmOptions,
               temperature: 0.3,
               maxTokens: 4096,
               timeout: STORYBOARD_ANALYSIS_TIMEOUT_MS,
@@ -1187,11 +1319,13 @@ ${finalContent}
 
           // 构建全局上下文
           const globalContext = {
+            chapterNumber: Number(chapterNumber) || undefined,
             characters,
             scenes,
             charactersData,
             scenesData,
             propsData,
+            creationBibleInstruction,
           };
 
           for (let segIdx = 0; segIdx < segments.length; segIdx++) {
@@ -1234,6 +1368,7 @@ ${finalContent}
 
             // 流式生成
             const segStream = oaiStream(segmentMessages, {
+              ...storyboardLlmOptions,
               temperature: 0.7,
               timeout: STORYBOARD_SEGMENT_TIMEOUT_MS,
               maxRetries: 0,
@@ -1348,7 +1483,7 @@ ${finalContent}
           // ================================================================
           const elapsed = Date.now() - startTime;
           const totalTokens = billedInputTokens + billedOutputTokens;
-          const finalPoints = calculateDeepSeekCreationPoints({
+          const finalPoints = calculateStoryboardTokenCreationPoints({
             cachedInputTokens: billedCachedInputTokens,
             uncachedInputTokens: billedUncachedInputTokens,
             inputTokens: billedInputTokens,
@@ -1364,7 +1499,8 @@ ${finalContent}
           await completeCreationPointTask(creationPointTaskId, finalPoints, {
             description: `文字分镜完成扣除（输入 ${billedInputTokens.toLocaleString('zh-CN')} / 输出 ${billedOutputTokens.toLocaleString('zh-CN')} Token）`,
             metadata: {
-              billingMode: 'deepseek_token',
+              billingMode: 'storyboard_token',
+              model: storyboardLlmOptions.model,
               cachedInputTokens: billedCachedInputTokens,
               uncachedInputTokens: billedUncachedInputTokens,
               inputTokens: billedInputTokens,
@@ -1382,6 +1518,7 @@ ${finalContent}
             totalSegments,
             elapsed,
             creationPoints: finalPoints,
+            model: storyboardLlmOptions.model,
             tokenUsage: {
               input: billedInputTokens,
               output: billedOutputTokens,

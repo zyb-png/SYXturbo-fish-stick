@@ -39,12 +39,15 @@ export interface LlmTokenUsage {
 
 interface LlmRequestOptions {
   model?: string;
+  apiKey?: string;
+  baseUrl?: string;
   temperature?: number;
   maxTokens?: number;
   timeout?: number;
   maxRetries?: number;
   signal?: AbortSignal;
   onUsage?: (usage: LlmTokenUsage) => void;
+  includeUsage?: boolean;
   billing?: boolean;
   billingLabel?: string;
 }
@@ -182,11 +185,20 @@ async function settleDeepSeekBilling(
   });
 }
 
-function getProviderRequestOptions(baseUrl: string, streaming = false) {
-  if (!baseUrl.includes('api.deepseek.com')) return {};
+function resolveLlmRequestConfig(options: LlmRequestOptions = {}) {
+  const defaults = getLlmConfigSync();
   return {
-    thinking: { type: 'disabled' },
-    ...(streaming ? { stream_options: { include_usage: true } } : {}),
+    apiKey: options.apiKey?.trim() || defaults.apiKey,
+    baseUrl: (options.baseUrl?.trim() || defaults.baseUrl).replace(/\/+$/, ''),
+    model: options.model?.trim() || defaults.model,
+  };
+}
+
+function getProviderRequestOptions(baseUrl: string, streaming = false, includeUsage = false) {
+  const isDeepSeek = baseUrl.includes('api.deepseek.com');
+  return {
+    ...(isDeepSeek ? { thinking: { type: 'disabled' } } : {}),
+    ...(streaming && (isDeepSeek || includeUsage) ? { stream_options: { include_usage: true } } : {}),
   };
 }
 
@@ -204,7 +216,7 @@ async function invokeRequest(
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeout);
-    const config = getLlmConfigSync();
+    const config = resolveLlmRequestConfig(options);
 
     if (!config.apiKey) {
       clearTimeout(timer);
@@ -219,12 +231,12 @@ async function invokeRequest(
           'Authorization': `Bearer ${config.apiKey}`,
         },
         body: JSON.stringify({
-          model: options.model || config.model,
+          model: config.model,
           messages,
           temperature: options.temperature ?? 0.7,
           max_tokens: options.maxTokens || 16384,
           stream: false,
-          ...getProviderRequestOptions(config.baseUrl),
+          ...getProviderRequestOptions(config.baseUrl, false, options.includeUsage),
         }),
         signal: options.signal ? anySignal([controller.signal, options.signal]) : controller.signal,
       });
@@ -282,7 +294,7 @@ async function* streamRequest(
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeout);
-    const config = getLlmConfigSync();
+    const config = resolveLlmRequestConfig(options);
 
     if (!config.apiKey) {
       clearTimeout(timer);
@@ -297,12 +309,12 @@ async function* streamRequest(
           'Authorization': `Bearer ${config.apiKey}`,
         },
         body: JSON.stringify({
-          model: options.model || config.model,
+          model: config.model,
           messages,
           temperature: options.temperature ?? 0.7,
           max_tokens: options.maxTokens || 16384,
           stream: true,
-          ...getProviderRequestOptions(config.baseUrl, true),
+          ...getProviderRequestOptions(config.baseUrl, true, options.includeUsage),
         }),
         signal: options.signal ? anySignal([controller.signal, options.signal]) : controller.signal,
       });
@@ -382,7 +394,7 @@ export async function invoke(
   messages: Message[],
   options: LlmRequestOptions = {}
 ): Promise<string> {
-  const config = getLlmConfigSync();
+  const config = resolveLlmRequestConfig(options);
   if (!shouldBillDeepSeek(config.baseUrl, options)) {
     return invokeRequest(messages, options);
   }
@@ -415,7 +427,7 @@ export async function* stream(
   messages: Message[],
   options: LlmRequestOptions = {}
 ): AsyncGenerator<StreamChunk> {
-  const config = getLlmConfigSync();
+  const config = resolveLlmRequestConfig(options);
   if (!shouldBillDeepSeek(config.baseUrl, options)) {
     yield* streamRequest(messages, options);
     return;

@@ -1,6 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { invoke as oaiInvoke } from '@/lib/openai-client';
 import { requireUserLoginResponse } from '@/lib/auth-guard';
+import {
+  formatStoryboardDurationSeconds,
+  sumStoryboardDurations,
+  STORYBOARD_GROUP_MAX_SECONDS,
+} from '@/lib/storyboard-duration-groups';
 
 export const maxDuration = 300;
 
@@ -91,6 +96,11 @@ type StoryboardPromptPayload = {
     styles?: string[];
     lighting?: string[];
   };
+  creationBible?: {
+    creationType?: string;
+    subjectRegion?: string;
+    creationBackground?: string;
+  };
 };
 
 function cleanText(value: unknown, fallback = ''): string {
@@ -101,6 +111,39 @@ function joinSetting(values: unknown, fallback = '未指定'): string {
   if (!Array.isArray(values)) return fallback;
   const filtered = values.filter((value): value is string => typeof value === 'string' && value.trim().length > 0);
   return filtered.length > 0 ? filtered.join('、') : fallback;
+}
+
+function buildCreationBibleText(creationBible?: StoryboardPromptPayload['creationBible']): string {
+  const creationType = cleanText(creationBible?.creationType);
+  const subjectRegion = cleanText(creationBible?.subjectRegion);
+  const creationBackground = cleanText(creationBible?.creationBackground);
+  if (!creationType && !subjectRegion && !creationBackground) return '';
+
+  const lines = ['创作圣经：'];
+  if (creationType === '仿真人') {
+    lines.push('创作类型为仿真人，故事板提示词必须保持真人短剧/电影实拍质感，真实人物、真实空间、真实材质和自然光影。');
+  } else if (creationType === '3D') {
+    lines.push('创作类型为3D，故事板提示词必须保持3D/CG动画质感，角色与场景具备模型结构、材质分区、统一渲染风格。');
+  } else if (creationType === '动漫') {
+    lines.push('创作类型为动漫，故事板提示词必须保持动漫/动画电影质感，线条、色块、角色造型和动画美术风格统一。');
+  }
+
+  if (subjectRegion === '国内') {
+    lines.push('创作题材为国内，人物服饰、场景陈设、社会关系、标识和生活细节符合中国本土语境。');
+  } else if (subjectRegion === '国外') {
+    lines.push('创作题材为国外，人物服饰、建筑空间、生活方式和文化细节符合海外/国际化语境。');
+  }
+
+  if (creationBackground === '近代') {
+    lines.push('创作背景为近代，所有面板中的服化道、建筑、交通、通讯、标识和生活设施保持近代年代质感。');
+  } else if (creationBackground === '现代') {
+    lines.push('创作背景为现代，所有面板中的服化道、建筑、交通、通讯、设备和生活设施符合现代社会语境。');
+  } else if (creationBackground === '古代') {
+    lines.push('创作背景为古代，所有面板中的服饰形制、发式、建筑、器物、交通、照明和礼仪符合古代语境，禁止无剧情依据的现代元素。');
+  }
+
+  lines.push('创作圣经只影响视觉风格、题材语境与时代背景，不改剧情、台词、人物关系和镜头事件；剧本明确的回忆、年代跳转或穿越仍按原剧情呈现。');
+  return lines.join('\n');
 }
 
 function uniq(values: string[]): string[] {
@@ -131,7 +174,13 @@ function formatShotForPrompt(shot: any, index: number): string {
   const scene = shot?.scene || {};
   const characters = Array.isArray(shot?.characters) ? shot.characters : [];
   const shotNumber = shot?.shotNumber ?? index + 1;
-  const timeRange = cleanText(shot?.timeRange || shot?.time || shot?.durationLabel, `第${index + 1}段`);
+  const duration = formatStoryboardDurationSeconds(
+    sumStoryboardDurations([shot?.duration]),
+  );
+  const timeRange = cleanText(
+    shot?.timeRange || shot?.time || shot?.durationLabel,
+    `时长${duration}秒`,
+  );
   const sceneText = [
     cleanText(scene.location || shot?.location, '未指定场景'),
     cleanText(scene.time || shot?.sceneTime),
@@ -153,6 +202,7 @@ function formatShotForPrompt(shot: any, index: number): string {
 
 function buildLocalStoryboardPrompt(payload: StoryboardPromptPayload): string {
   const shots = Array.isArray(payload.shots) ? payload.shots : [];
+  const totalDuration = sumStoryboardDurations(shots.map(shot => shot?.duration));
   const safeReferenceImages = Array.isArray(payload.referenceImages)
     ? payload.referenceImages.filter((url): url is string => typeof url === 'string' && url.trim().length > 0)
     : [];
@@ -163,13 +213,16 @@ function buildLocalStoryboardPrompt(payload: StoryboardPromptPayload): string {
       : []
   ));
   const sceneNames = uniq(shots.map((shot: any) => cleanText(shot?.scene?.location || shot?.location)));
+  const bibleText = buildCreationBibleText(payload.creationBible);
   const refText = safeReferenceImages.length > 0
     ? safeReferenceImages.map((url, index) => `（image${index + 1}）${url}`).join('\n')
     : '无参考图片时，依据分镜文字保持写实电影质感、统一角色外观和统一场景空间。';
 
   return `横向超宽电影导演工作板布局，生成一张电影工业级分镜故事板总控图。整张图必须像真实剧组导演、美术、摄影联合使用的执行总控板，中文印刷级标注清晰，信息层级严谨，不要手绘箭头，不要涂鸦批注，不要水印，不要英文规格参数区。
 
-顶部项目信息栏：项目/章节「${cleanText(payload.chapterTitle, '未命名章节')}」，镜头段落「第${payload.groupIndex ?? 1}组连续分镜」，主要角色「${characterNames.join('、') || '按镜头内容识别主体人物'}」，主要场景「${sceneNames.join('、') || '按镜头内容建立空间'}」，导演意图为连续叙事、紧凑节奏、明确人物站位、突出动作变化与情绪递进。
+${bibleText ? `${bibleText}\n` : ''}
+
+顶部项目信息栏：项目/章节「${cleanText(payload.chapterTitle, '未命名章节')}」，镜头段落「第${payload.groupIndex ?? 1}组连续分镜，共${shots.length}镜、总时长${formatStoryboardDurationSeconds(totalDuration)}秒」，主要角色「${characterNames.join('、') || '按镜头内容识别主体人物'}」，主要场景「${sceneNames.join('、') || '按镜头内容建立空间'}」，导演意图为连续叙事、紧凑节奏、明确人物站位、突出动作变化与情绪递进。
 
 上方三类设定模块：
 左上「角色设定」采用影视角色档案布局，展示主要角色小图组、服装状态、情绪状态、动作习惯、人物关系、关键视觉特征。
@@ -204,10 +257,18 @@ export async function POST(request: NextRequest) {
       shots,
       referenceImages,
       imageSettings,
+      creationBible,
     } = payload;
 
     if (!shots || !Array.isArray(shots) || shots.length === 0) {
       return NextResponse.json({ error: '请提供分镜数据' }, { status: 400 });
+    }
+
+    const groupDuration = sumStoryboardDurations(shots.map(shot => shot?.duration));
+    if (groupDuration > STORYBOARD_GROUP_MAX_SECONDS) {
+      return NextResponse.json({
+        error: `本组分镜总时长为${formatStoryboardDurationSeconds(groupDuration)}秒，不能超过15秒，请重新按时长分组`,
+      }, { status: 400 });
     }
 
     console.log(`🎬 生成故事板文字提示词: 章节="${chapterTitle}", 第${groupIndex}组, ${shots.length}个镜头`);
@@ -255,7 +316,7 @@ export async function POST(request: NextRequest) {
     }
 
     const userMsg = `章节名称：${chapterTitle}
-第 ${groupIndex} 组分镜（${shots.length} 个连续镜头）：
+第 ${groupIndex} 组分镜（${shots.length} 个连续镜头，总时长${formatStoryboardDurationSeconds(groupDuration)}秒）：
 
 ${shotDescriptions}
 
@@ -267,6 +328,8 @@ ${refDesc}
 - 画面比例：${imageSettings?.ratios?.join(' / ') || '未指定'}
 - 画面风格：${joinSetting(imageSettings?.styles)}
 - 光影效果：${joinSetting(imageSettings?.lighting)}
+
+${buildCreationBibleText(creationBible)}
 
 以上比例、风格和光影效果必须融入到故事板总控图的画面描述与视觉呈现中。
 

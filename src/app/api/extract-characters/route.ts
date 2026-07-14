@@ -3,16 +3,83 @@ import { stream as oaiStream, invoke as oaiInvoke } from '@/lib/openai-client';
 import { estimateMessagesTokens, estimateTokens } from '@/lib/token-utils';
 import { tryExtractAndFixJSON, removeControlCharsInStrings } from '@/lib/json-utils';
 import { requireUserLoginResponse } from '@/lib/auth-guard';
+import { mapWithConcurrency, selectEvenlySpaced, splitTextForFullScan } from '@/lib/full-text-scan';
+import { normalizeCharacterLooks } from '@/lib/character-look-utils';
+import {
+  buildCharacterLifecycleRequirements,
+  formatCharacterLifecycleChecklist,
+} from '@/lib/character-lifecycle-audit';
+import {
+  inheritBodyProfileForLooks,
+  mergeCharacterBodyProfiles,
+  normalizeCharacterBodyProfile,
+  stripBodyDetailsFromAppearance,
+  type CharacterBodyProfile,
+} from '@/lib/character-body-profile';
+
+export const maxDuration = 600;
 
 // 每批处理的人物数
 const BATCH_SIZE = 8;
+const FULL_SCAN_CONCURRENCY = 2;
+
+type CreationBible = {
+  creationType?: string;
+  subjectRegion?: string;
+  creationBackground?: string;
+};
+
+function buildCreationBibleInstruction(creationBible?: CreationBible): string {
+  const creationType = typeof creationBible?.creationType === 'string' ? creationBible.creationType.trim() : '';
+  const subjectRegion = typeof creationBible?.subjectRegion === 'string' ? creationBible.subjectRegion.trim() : '';
+  const creationBackground = typeof creationBible?.creationBackground === 'string'
+    ? creationBible.creationBackground.trim()
+    : '';
+  if (!creationType && !subjectRegion && !creationBackground) return '';
+
+  const lines = ['【创作圣经约束】'];
+  if (creationType === '仿真人') {
+    lines.push('创作类型：仿真人。人物外貌、faceFeatures 和 looks 要服务真人短剧/真人电影质感，强调真实皮肤、真实服装材质、自然妆发和可拍摄造型。');
+  } else if (creationType === '3D') {
+    lines.push('创作类型：3D。人物外貌、faceFeatures 和 looks 必须服务高端院线级风格化3D动画电影角色设计：使用圆润简洁、略微夸张但协调自然的角色比例，精致干净且可建模的五官，雕塑式发束结构，清晰的PBR材质分区和电影级光影；只从剧本提取身份与外貌证据，不要写成真人照片、真人摄影皮肤或由真人轻度磨皮得到的效果。');
+  } else if (creationType === '动漫') {
+    lines.push('创作类型：动漫。人物外貌、faceFeatures 和 looks 要服务动漫角色设计，强调发型轮廓、眼型、色彩记忆点、服装线条和动画表现力，不要写成真人照片。');
+  }
+  if (subjectRegion === '国内') {
+    lines.push('创作题材：国内。人物服装、妆发、身份关系、生活细节和社会语境应符合中国本土语境。');
+  } else if (subjectRegion === '国外') {
+    lines.push('创作题材：国外。人物服装、妆发、生活方式、职业细节和文化语境应符合海外/国际化语境。');
+  }
+  if (creationBackground === '近代') {
+    lines.push('创作背景：近代。人物的服装剪裁、妆发、首饰、鞋履、职业装束和不同阶段造型应符合近代年代语境。');
+  } else if (creationBackground === '现代') {
+    lines.push('创作背景：现代。人物的服装、妆发、配饰、职业装束和不同场景穿搭应符合现代生活语境。');
+  } else if (creationBackground === '古代') {
+    lines.push('创作背景：古代。人物的发式、冠帽、服装形制、妆容、首饰、鞋履和身份礼制应符合古代语境，禁止无剧情依据的现代服饰。');
+  }
+  lines.push('这些约束只影响视觉风格、题材语境和时代背景，不允许改动原剧情、人物关系、性别、年龄证据和关键事件；如剧本明确存在回忆、年代跳转或穿越，按原剧情呈现相应时期。');
+  return lines.join('\n');
+}
+
+function getCreationStyleLabel(creationBible?: CreationBible): string {
+  if (creationBible?.creationType === '3D') return '3D角色动画风格';
+  if (creationBible?.creationType === '动漫') return '动漫角色设计风格';
+  return '真人短剧写实风格';
+}
 
 export async function POST(request: NextRequest) {
   const auth = await requireUserLoginResponse();
   if (auth.response) return auth.response;
 
   try {
-    const { content, fileName, batch = 0, characterMarkers } = await request.json();
+    const { content, fileName, batch = 0, characterMarkers, creationBible, sourceType } = await request.json();
+
+    if (sourceType !== 'execution-script') {
+      return NextResponse.json(
+        { error: '人物提取仅允许使用当前执行剧本，请先重新拉取执行剧本' },
+        { status: 400 }
+      );
+    }
 
     if (!content) {
       return NextResponse.json(
@@ -34,7 +101,7 @@ export async function POST(request: NextRequest) {
 
     if (allCharacterMarkers.length === 0) {
       // 如果没有识别到人物标记，使用传统方式
-      const result = await extractCharactersTraditional(content, fileName);
+      const result = await extractCharactersTraditional(content, fileName, creationBible);
       return NextResponse.json({
         success: true,
         type: 'characters',
@@ -59,7 +126,7 @@ export async function POST(request: NextRequest) {
 
     // 提取当前批次的人物详情，传入起始 id 确保全局唯一
     const startId = currentBatchStart;
-    const batchResult = await extractBatchCharacters(content, currentBatchCharacters, startId);
+    const batchResult = await extractBatchCharacters(content, currentBatchCharacters, startId, creationBible);
     
     const hasMore = currentBatch < totalBatches;
     
@@ -97,7 +164,6 @@ async function identifyCharacterMarkers(content: string, fileName: string): Prom
   const localCharacters = extractLocalCharacterNames(content);
   if (localCharacters.length > 0) {
     console.log(`从剧本结构识别到 ${localCharacters.length} 个人物:`, localCharacters);
-    return localCharacters.slice(0, 30);
   }
 
   const systemPrompt = `你是一个专业的影视角色分析师。请分析文本，识别所有独特的人物名称。
@@ -107,73 +173,88 @@ async function identifyCharacterMarkers(content: string, fileName: string): Prom
 2. 人物名称应该准确（如：张三、李四、王五等）
 3. 合并同一人物的不同称呼（如"张三"和"老张"合并为"张三"）
 4. 按出场顺序或重要性排列
-5. 最多识别30个主要人物
+5. 不要限制数量，宁可多提取也不要漏掉；长剧本中 50+ 人物是正常情况
+6. 路人、龙套、背景人物也要识别，只是在 role 中标注为“路人/龙套/背景人物”
 
 输出JSON数组格式：
 ["人物1", "人物2", "人物3"]`;
 
-  const messages = [
-    { role: 'system' as const, content: systemPrompt },
-    { role: 'user' as const, content: `请识别以下文本中的所有人物名称：\n\n文件名：${fileName}\n\n内容：\n${content.substring(0, 50000)}` }
-  ];
+  const chunks = splitTextForFullScan(content);
+  const modelCharacterGroups = await mapWithConcurrency(chunks, FULL_SCAN_CONCURRENCY, async chunk => {
+    const messages = [
+      { role: 'system' as const, content: systemPrompt },
+      {
+        role: 'user' as const,
+        content: `这是完整剧本的第 ${chunk.index}/${chunk.total} 段（字符 ${chunk.start}-${chunk.end}）。请识别本段出现、被提及或参与关系的全部人物，包括龙套、路人和背景人物，不要因人物可能出现在其他段而省略。\n\n文件名：${fileName}\n\n本段内容：\n${chunk.text}`,
+      },
+    ];
 
-  let response = '';
-  try {
-    const stream = oaiStream(messages, {
-      temperature: 0.3,
-    });
-
-    for await (const chunk of stream) {
-      if (chunk.content) response += chunk.content.toString();
+    let response = '';
+    try {
+      const stream = oaiStream(messages, { temperature: 0.3 });
+      for await (const responseChunk of stream) {
+        if (responseChunk.content) response += responseChunk.content.toString();
+      }
+      return parseCharacterMarkerResponse(response);
+    } catch (error: any) {
+      console.warn(`人物名称模型识别第 ${chunk.index}/${chunk.total} 段失败，保留其他段和本地结果:`, error?.message || error);
+      return [];
     }
-  } catch (error: any) {
-    console.warn('人物名称模型识别失败，使用本地兜底:', error?.message || error);
-    return extractLocalCharacterNames(content).slice(0, 30);
-  }
+  });
 
-  // 清理响应内容，移除 markdown 代码块标记
-  let cleanedResponse = response.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
-  
-  // 如果响应以数组开始，直接尝试解析（先清理控制字符）
+  const mergedCharacters = mergeCharacterNames(localCharacters, ...modelCharacterGroups);
+  const modelCharacterCount = modelCharacterGroups.reduce((sum, characters) => sum + characters.length, 0);
+  console.log(`全文人物名称合并: ${chunks.length} 段，本地 ${localCharacters.length} 个，模型原始 ${modelCharacterCount} 个，合并后 ${mergedCharacters.length} 个`);
+  return mergedCharacters;
+}
+
+function parseCharacterMarkerResponse(response: string): string[] {
+  const cleanedResponse = response.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
   if (cleanedResponse.startsWith('[')) {
     try {
-      // 关键修复：先清理控制字符再解析
-      const sanitizedResponse = removeControlCharsInStrings(cleanedResponse);
-      const parsed = JSON.parse(sanitizedResponse);
+      const parsed = JSON.parse(removeControlCharsInStrings(cleanedResponse));
       if (Array.isArray(parsed)) {
-        // 去重：确保每个名称只出现一次
-        const uniqueNames = [...new Set(parsed.filter((s): s is string => typeof s === 'string'))];
-        return uniqueNames;
+        return parsed.filter((character): character is string => typeof character === 'string');
       }
-    } catch (e) {
-      console.log('人物名称数组解析失败:', e);
-      // 解析失败，继续尝试其他方法
+    } catch (error) {
+      console.log('人物名称数组解析失败，尝试修复解析:', error);
     }
   }
 
-  // 解析人物名称数组
-  const result = tryExtractAndFixJSON(response);
-  if (Array.isArray(result)) {
-    // 去重：确保每个名称只出现一次
-    const uniqueNames = [...new Set(result.filter((s): s is string => typeof s === 'string'))];
-    return uniqueNames;
-  }
-  
-  // 尝试用正则提取
-  const matches = response.match(/"([^"]+)"/g);
-  if (matches) {
-    const names = matches.map(m => m.replace(/"/g, '')).filter(s => s.length > 0 && s.length < 50);
-    // 去重
-    return [...new Set(names)];
+  const repaired = tryExtractAndFixJSON(response);
+  if (Array.isArray(repaired)) {
+    return repaired.filter((character): character is string => typeof character === 'string');
   }
 
-  return [];
+  const matches = response.match(/"([^"]+)"/g);
+  return matches
+    ? matches.map(match => match.replace(/"/g, '')).filter(character => character.length > 0 && character.length < 50)
+    : [];
+}
+
+function mergeCharacterNames(...groups: string[][]): string[] {
+  const names: string[] = [];
+  const seen = new Set<string>();
+  for (const group of groups) {
+    for (const rawName of group) {
+      if (typeof rawName !== 'string') continue;
+      const name = rawName.trim();
+      const identity = name.replace(/[，,。；;：:、\s]+/g, '').toLocaleLowerCase();
+      if (!name || !identity || seen.has(identity)) continue;
+      seen.add(identity);
+      names.push(name);
+    }
+  }
+  return names;
 }
 
 function extractLocalCharacterNames(content: string): string[] {
   const names: string[] = [];
   const seen = new Set<string>();
-  const blocked = new Set(['人物', '角色', '场景', '道具', '时间', '旁白', '画面', '镜头', '字幕']);
+  const blocked = new Set([
+    '人物', '角色', '出场人物', '主要人物', '关键人物', '场景', '道具', '时间', '地点',
+    '旁白', '画面', '镜头', '字幕', '剧情', '动作', '音效', '转场', '闪回', '回忆',
+  ]);
   const addName = (rawName: string) => {
     const name = rawName
       .replace(/（.*?）/g, '')
@@ -210,12 +291,10 @@ function extractLocalCharacterNames(content: string): string[] {
     }
   }
 
-  if (names.length < 3) {
-    const dialoguePattern = /(?:^|\n)\s*([\u4e00-\u9fa5A-Za-z]{2,8})[：:]/g;
-    let match: RegExpExecArray | null;
-    while ((match = dialoguePattern.exec(content)) !== null) {
-      addName(match[1]);
-    }
+  const dialoguePattern = /(?:^|\n)\s*([\u4e00-\u9fa5A-Za-z]{2,8})[：:]/g;
+  let dialogueMatch: RegExpExecArray | null;
+  while ((dialogueMatch = dialoguePattern.exec(content)) !== null) {
+    addName(dialogueMatch[1]);
   }
 
   return names;
@@ -251,22 +330,53 @@ function normalizeGender(value: any): '' | '男' | '女' | '待定' {
 
 function collectCharacterEvidence(content: string, name: string, radius = 140, maxCount = 6): string[] {
   if (!name) return [];
-  const evidence: string[] = [];
-  const seen = new Set<string>();
+  const matchIndexes: number[] = [];
   const regex = new RegExp(escapeRegExp(name), 'g');
   let match: RegExpExecArray | null;
+  while ((match = regex.exec(content)) !== null) {
+    matchIndexes.push(match.index);
+  }
 
-  while ((match = regex.exec(content)) !== null && evidence.length < maxCount) {
-    const start = Math.max(0, match.index - radius);
-    const end = Math.min(content.length, match.index + name.length + radius);
+  const evidence: string[] = [];
+  const seen = new Set<string>();
+  for (const matchIndex of selectEvenlySpaced(matchIndexes, maxCount * 2)) {
+    const start = Math.max(0, matchIndex - radius);
+    const end = Math.min(content.length, matchIndex + name.length + radius);
     const snippet = content.slice(start, end).replace(/\s+/g, ' ').trim();
     if (snippet && !seen.has(snippet)) {
       seen.add(snippet);
       evidence.push(snippet);
+      if (evidence.length >= maxCount) break;
     }
   }
 
   return evidence;
+}
+
+const CHARACTER_LIFECYCLE_CUE_PATTERN = /(闪回|回忆|回想|梦境|小时候|儿时|幼年|童年|儿童时期|少年时期|青年时期|中年时期|老年时期|年幼|年少|年轻时|长大后|多年以前|多年以后|[一二三四五六七八九十百0-9]+年(?:前|后)|[一二三四五六七八九十百0-9]+岁(?:时|那年)?)/;
+
+function buildLifecycleContextDigest(content: string): string {
+  const lines = content.split(/\r?\n/);
+  const cueLineIndexes = lines.reduce<number[]>((indexes, line, index) => {
+    if (CHARACTER_LIFECYCLE_CUE_PATTERN.test(line)) indexes.push(index);
+    return indexes;
+  }, []);
+  if (cueLineIndexes.length === 0) return '全文未检索到明确的闪回、年龄时期或时间跳转标记。';
+
+  const selectedIndexes = selectEvenlySpaced(cueLineIndexes, 36);
+  const evidence: string[] = [];
+  const seen = new Set<string>();
+  selectedIndexes.forEach((lineIndex) => {
+    const start = Math.max(0, lineIndex - 3);
+    const end = Math.min(lines.length, lineIndex + 9);
+    const block = lines.slice(start, end).join('\n').trim().slice(0, 900);
+    const identity = block.replace(/\s+/g, '');
+    if (!block || seen.has(identity)) return;
+    seen.add(identity);
+    evidence.push(`重点段落 ${evidence.length + 1}（约第 ${lineIndex + 1} 行）：\n${block}`);
+  });
+
+  return evidence.join('\n\n');
 }
 
 function inferGenderFromName(name: string): '' | '男' | '女' {
@@ -336,13 +446,37 @@ function textContradictsGender(value: any, gender: '男' | '女' | '待定'): bo
   return /女性角色|女士|女装|女人|女孩|女生/.test(text);
 }
 
+function normalizeAppearanceDescription(value: unknown, fallback: string): string {
+  const source = typeof value === 'string' ? value.replace(/\s+/g, ' ').trim() : '';
+  let description = source && !/^(待补充|待完善|暂无描述)$/.test(source)
+    ? source
+    : fallback.trim();
+
+  if (description.length < 80 && fallback.trim() && !description.includes(fallback.trim())) {
+    description = `${description}。${fallback.trim()}`;
+  }
+  if (description.length < 80) {
+    description = `${description}。发型轮廓、固定五官、肤色与人物辨识特征保持稳定，正脸近景的眼神和表情符合剧情阶段，便于跨场景维持同一人物身份。`;
+  }
+  if (description.length <= 150) return description;
+
+  const limited = description.slice(0, 150);
+  const punctuationIndex = Math.max(
+    limited.lastIndexOf('。'),
+    limited.lastIndexOf('；'),
+    limited.lastIndexOf('，')
+  );
+  return punctuationIndex >= 80 ? limited.slice(0, punctuationIndex + 1) : limited;
+}
+
 function buildCharacterContextDigest(content: string, characterNames: string[]): string {
   return characterNames.map((name) => {
-    const snippets = collectCharacterEvidence(content, name, 120, 4);
+    // 从完整剧本的全部命中位置中按时间线均匀抽取，兼顾首次出场、中段变化与结局状态。
+    const snippets = collectCharacterEvidence(content, name, 280, 24);
     const evidence = snippets.length > 0
       ? snippets.map((snippet, index) => `${index + 1}. ${snippet}`).join('\n')
       : '未在文本片段中找到明确上下文，请勿凭空设定性别。';
-    return `【${name}】\n${evidence}`;
+    return `【${name}｜完整剧本全量检索后，按时间线整理的生命周期证据】\n${evidence}`;
   }).join('\n\n');
 }
 
@@ -352,24 +486,37 @@ function buildCharacterContextDigest(content: string, characterNames: string[]):
 async function extractBatchCharacters(
   content: string,
   characterNames: string[],
-  startId: number = 0  // 全局起始 id，确保不同批次的人物 id 不重复
+  startId: number = 0,  // 全局起始 id，确保不同批次的人物 id 不重复
+  creationBible?: CreationBible
 ): Promise<{ characters: any[]; tokenUsage: any }> {
   const systemPrompt = `你是专业的影视角色分析师。为指定的人物生成详细信息。
+${buildCreationBibleInstruction(creationBible)}
 
 **绝对重要规则**：
 1. **必须为输入列表中的每个人物都生成信息，不能遗漏任何人！**
 2. 即使人物只是简短提到或背景角色，也必须生成完整信息
 3. 确保输出的人物名称与输入的人物名称**完全一致**（包括大小写、标点）
-4. appearance 字段必须详细描述人物的外貌特征（身高、体型、发型、五官特点、皮肤质感、穿着风格等，**80-150字**）
-5. **faceFeatures 字段必须详细描述人物的固定脸型特征**，这些特征在所有场景下都保持不变
-6. **looks 字段必须识别人物在不同场景、不同阶段的造型变化**
-7. 如果文本中有明确提到人物在不同场景的服装、发型变化，必须提取为多个造型
-8. 每个人物至少需要有一个造型（默认造型）
-9. 描述要适合真人电影风格，避免卡通化或过度夸张
-10. role 只能使用：主角、主要配角、次要配角、龙套、路人、背景人物
-11. gender 只能使用：男、女、待定。必须根据参考文本中的称谓、代词、亲属关系、括号身份说明判断；不要因为示例、职业或默认习惯把未知人物写成男性。
-12. 如果人物上下文中出现“她、女儿、养女、小姐、夫人、母亲、姐姐、妹妹、妻子、姑娘”等女性证据，gender 必须为“女”；出现“他、儿子、先生、父亲、哥哥、弟弟、丈夫”等男性证据，gender 才写“男”；没有明确证据时写“待定”。
-13. 性别判断优先级：先看别人对该人物的称呼和亲属/婚恋关系，其次看角色间互动方式里的代词和行为关系，最后才参考姓名气质；不能只因为职业、地位、年龄或模板示例判断性别。
+4. appearance 字段只描述正脸近景可见信息（发型、脸型轮廓、五官、肤色、皮肤质感和神态，**80-150字**），禁止混入身高、体重、体型和服装
+5. **bodyProfile 字段必须独立记录人物全身体态档案**；身高、体重有剧本证据时按原文填写，没有精确证据时只写合理视觉范围或留空，禁止伪造精确数值
+6. **faceFeatures 字段必须详细描述人物的固定脸型特征**，这些特征在所有场景下都保持不变
+7. **looks 字段必须建立人物完整的视觉变化时间线**，不能只提取换装；必须识别服装、年龄时期、身体状态和特殊变身形态
+8. 年龄时期包括但不限于童年、少年、青年、中年、老年，以及十年前、十年后等明确时间跨度；同一人物不同年龄仍是同一人物，固定五官辨识特征必须可追溯
+9. 身体状态包括受伤、怀孕、生病、虚弱、醉酒、淋雨、毁容、康复等会明显改变画面的剧情状态；特殊形态包括觉醒、入魔、妖化、灵体、机甲、变身等
+10. 每个人物至少需要有一个“基础造型”，基础造型必须是主要叙事时期的正常状态，作为后续年龄、服装、身体状态和变身形态的父级参考
+11. 除非剧情是非常连续的接戏（同一天、同一空间、时间跨度很短），否则人物进入明显不同场景时可以合理换装：晚上在家可穿家居服/睡衣，工作场合可穿职场装，游玩场合可穿休闲/出游服，宴会/婚礼/葬礼等节点要有对应造型
+12. 描述要贴合创作圣经风格，不要在仿真人模式下卡通化或过度夸张
+13. role 只能使用：主角、主要配角、次要配角、龙套、路人、背景人物
+14. gender 只能使用：男、女、待定。必须根据参考文本中的称谓、代词、亲属关系、括号身份说明判断；不要因为示例、职业或默认习惯把未知人物写成男性。
+15. 如果人物上下文中出现“她、女儿、养女、小姐、夫人、母亲、姐姐、妹妹、妻子、姑娘”等女性证据，gender 必须为“女”；出现“他、儿子、先生、父亲、哥哥、弟弟、丈夫”等男性证据，gender 才写“男”；没有明确证据时写“待定”。
+16. 性别判断优先级：先看别人对该人物的称呼和亲属/婚恋关系，其次看角色间互动方式里的代词和行为关系，最后才参考姓名气质；不能只因为职业、地位、年龄或模板示例判断性别。
+17. 不要把青年、中年、老年、受伤、怀孕或变身状态拆成新人物；它们必须放在同一人物的 looks 数组中
+18. 不要机械组合“时期×服装×状态”生成不存在的造型，只提取剧本明确出现、强烈暗示或对画面连续性有实际影响的变化
+19. 连续场次中时期、服装和身体状态没有明显改变时必须合并为同一造型，避免重复
+20. 每个非基础造型必须填写 referenceLookId，指向视觉差异最小、剧情上紧邻的父级造型；受伤状态参考受伤前同服装造型，怀孕状态参考同年龄正常造型，变身状态参考变身前造型，老年优先参考中年而不是跨级直接参考青年
+21. 所有造型必须保持人物固定脸型、眼睛、鼻子、嘴巴、肤色和辨识特征；年龄变化可以改变皱纹、发色、皮肤年龄感与体态，但不能换成另一个人
+22. 每个 looks 项都必须写入 bodyProfile：默认继承人物身体档案；如该时期或状态改变了体态，在 bodyChanges 中只记录当前造型相对基础身体档案的变化
+23. 必须先逐条审计“全剧本生命周期重点段落”。闪回中出现的小名、乳名、“小+姓名”、幼年称呼、女孩/男孩或亲属称呼，要结合闪回前后的转场、关系和事件判断对应人物；例如主线人物在闪回中以幼年身份出现，必须在同一人物的 looks 中新增“年龄时期”造型，不能因闪回段未重复写全名而漏掉
+24. 每个明确的童年/幼年/少年/青年/中年/老年或多年以前/以后状态，都必须在 sourceEvidence 与 episodeNumbers 中保留证据；只有确实属于同一时期且视觉没有变化的段落才能合并
 
 每个人物包含：
 - id: 序号
@@ -378,7 +525,14 @@ async function extractBatchCharacters(
 - age: 年龄（如：25岁、中年、老年等）
 - gender: 男/女/待定
 - personality: 性格特点数组（必须填写，至少2个）
-- appearance: 外貌详细描述（**必须填写，80-150字**，包含身高体型、发型、五官、皮肤质感、穿着风格等细节）
+- appearance: 正脸近景描述（**必须填写，80-150字**，只包含发型、脸型、五官、肤色、皮肤质感和神态）
+- bodyProfile: 全身体态档案对象（身高、体重、体型、肩腰与骨架、四肢比例、体态）
+  - height: 身高；有原文数值时照录，无精确证据时写合理视觉范围或空字符串
+  - weight: 体重；有原文数值时照录，无精确证据时写体重范围/体重感或空字符串
+  - bodyType: 体型和体格
+  - shoulderWaist: 肩宽、腰线与骨架特征
+  - limbProportions: 四肢、腿长和头身比例
+  - posture: 常态体态、站姿或步态
 - faceFeatures: 固定脸型特征对象（**必须填写**，包含脸型、眼睛、鼻子、嘴巴、肤色，这些特征在所有场景下保持一致）
   - faceShape: 脸型（如：椭圆脸、圆脸、方脸、鹅蛋脸等）
   - eyes: 眼睛特征（如：双眼皮大眼睛、丹凤眼、杏眼等）
@@ -395,6 +549,20 @@ async function extractBatchCharacters(
   - accessories: 配饰数组（如：项链、戒指、手镯等）
   - makeup: 化妆描述（如：淡妆、浓妆、无妆等）
   - mood: 情绪状态（如：微笑、严肃、悲伤等）
+  - continuityNote: 连续性说明（说明该造型是延续上一场还是因场景/时间跨度换装）
+  - changeType: 变化类型，只能是“基础造型/服装造型/年龄时期/身体状态/特殊形态/复合变化”
+  - ageStage: 人物时期（如：童年、青年、中年、老年、十年前）
+  - physicalState: 身体状态（如：正常状态、受伤、怀孕、病弱）
+  - transformationState: 特殊形态（没有则为空字符串，如：觉醒形态、入魔形态）
+  - bodyProfile: 本造型使用的全身体态档案；默认完整继承人物 bodyProfile，发生年龄或身体变化时按当前造型覆盖相应字段
+  - bodyChanges: 本造型相对基础身体档案的体态变化；没有变化则为空字符串
+  - episodeNumbers: 该造型出现的集数数组
+  - sceneNames: 该造型关联的场景名称数组
+  - sourceEvidence: 剧本中支持该变化的简短依据，不得编造
+  - isBaseLook: 是否为该人物主要时期的基础造型
+  - referenceLookId: 父级参考造型ID；基础造型为空，其他造型必须填写
+  - referenceReason: 为什么参考该父级造型
+  - generationPriority: 生成优先级，基础造型1、年龄时期2、服装造型3、身体状态4、特殊形态或复合变化5
 - background: 背景故事（如文本中有则填写）
 - keyRelationships: 关键关系数组（列出与他人的重要关系）
 - arc: 人物弧光（人物的发展变化轨迹）
@@ -411,7 +579,15 @@ async function extractBatchCharacters(
       "age": "25岁",
       "gender": "女",
       "personality": ["勇敢", "聪明", "正义感强"],
-      "appearance": "详细描述外貌特征，包括身高体型、发型、五官特点、皮肤质感、穿着风格等（80-150字）",
+      "appearance": "只描述正脸近景可见的发型、脸型、五官、肤色、皮肤质感和神态（80-150字）",
+      "bodyProfile": {
+        "height": "165cm左右",
+        "weight": "体重适中",
+        "bodyType": "自然匀称",
+        "shoulderWaist": "肩线舒展，腰线自然",
+        "limbProportions": "四肢比例协调",
+        "posture": "站姿挺拔但放松"
+      },
       "faceFeatures": {
         "faceShape": "椭圆脸",
         "eyes": "双眼皮大眼睛",
@@ -422,23 +598,65 @@ async function extractBatchCharacters(
       "looks": [
         {
           "id": "look-1",
-          "scene": "初见",
-          "description": "第一次出场时的造型",
+          "scene": "主要时期基础出场",
+          "stage": "前期",
+          "changeType": "基础造型",
+          "ageStage": "青年",
+          "physicalState": "正常状态",
+          "transformationState": "",
+          "bodyProfile": {
+            "height": "165cm左右",
+            "weight": "体重适中",
+            "bodyType": "自然匀称",
+            "shoulderWaist": "肩线舒展，腰线自然",
+            "limbProportions": "四肢比例协调",
+            "posture": "站姿挺拔但放松"
+          },
+          "bodyChanges": "",
+          "description": "青年时期正常状态的基础造型",
           "costume": "白色衬衫搭配黑色西装",
           "hairstyle": "利落短发",
           "accessories": ["银色手表"],
           "makeup": "淡妆",
-          "mood": "微笑"
+          "mood": "自然",
+          "episodeNumbers": [1, 2],
+          "sceneNames": ["公司办公室"],
+          "sourceEvidence": "第1集首次以青年职场身份出场",
+          "isBaseLook": true,
+          "referenceLookId": "",
+          "referenceReason": "直接参考已确认的人物正脸身份基准图",
+          "generationPriority": 1
         },
         {
           "id": "look-2",
-          "scene": "战斗",
-          "description": "战斗场景的造型",
-          "costume": "黑色战术服",
-          "hairstyle": "凌乱的战斗发型",
-          "accessories": ["战术手套", "护目镜"],
-          "makeup": "无妆",
-          "mood": "严肃"
+          "scene": "事故后住院",
+          "stage": "中期",
+          "changeType": "身体状态",
+          "ageStage": "青年",
+          "physicalState": "受伤包扎",
+          "transformationState": "",
+          "bodyProfile": {
+            "height": "165cm左右",
+            "weight": "体重适中",
+            "bodyType": "自然匀称",
+            "shoulderWaist": "肩线舒展，腰线自然",
+            "limbProportions": "四肢比例协调",
+            "posture": "因伤略微蜷缩"
+          },
+          "bodyChanges": "因伤动作受限，站姿略微蜷缩，其他身体比例保持不变",
+          "description": "延续事故前同一人物和服装体系，表现受伤后的包扎与虚弱状态",
+          "costume": "病号服，手臂和额头有包扎",
+          "hairstyle": "略显凌乱",
+          "accessories": [],
+          "makeup": "苍白病弱妆",
+          "mood": "痛苦克制",
+          "episodeNumbers": [8],
+          "sceneNames": ["医院病房"],
+          "sourceEvidence": "第8集事故后住院并出现包扎",
+          "isBaseLook": false,
+          "referenceLookId": "look-1",
+          "referenceReason": "参考青年正常造型，保持身份一致并增加受伤状态",
+          "generationPriority": 4
         }
       ],
       "background": "背景故事",
@@ -455,23 +673,33 @@ async function extractBatchCharacters(
   ]
 }
 
-**重要提示：脸型一致性**
+**重要提示：身份一致性与生成依赖**
 - faceFeatures 描述的是人物的固定特征，在所有场景下都保持不变
-- looks 描述的是人物在不同场景的造型变化（服装、发型、配饰、化妆）
-- 生成图片时，需要同时使用 faceFeatures 和 looks 的描述，确保脸型一致但造型变化`;
+- bodyProfile 是全身造型的稳定身体档案，不参与正脸近景文生图；它会继承到每套造型，只在全身造型图和四视图中使用
+- looks 描述服装、年龄时期、身体状态和特殊形态的变化，不允许把同一人物拆成多个角色
+- 基础造型参考已确认正脸；其他造型必须沿 referenceLookId 逐级图生图，不能跳过父级
+- 生成图片时同时使用 faceFeatures、looks 和父级参考关系，确保身份一致但剧情状态准确变化`;
 
   const characterList = characterNames.map((c, i) => `${i + 1}. ${c}`).join('\n');
   const characterContextDigest = buildCharacterContextDigest(content, characterNames);
+  const lifecycleContextDigest = buildLifecycleContextDigest(content);
+  const lifecycleChecklist = formatCharacterLifecycleChecklist(
+    buildCharacterLifecycleRequirements(content, characterNames)
+  );
   
   const messages = [
     { role: 'system' as const, content: systemPrompt },
-    { role: 'user' as const, content: `请为以下所有人物生成详细信息（不要遗漏任何人）：\n${characterList}\n\n每个人物的上下文证据（优先依据这些片段判断性别、年龄、身份和关系）：\n${characterContextDigest}\n\n完整参考文本：\n${content.substring(0, 30000)}` }
+    {
+      role: 'user' as const,
+      content: `请为以下所有人物生成详细信息（不要遗漏任何人）：\n${characterList}\n\n【程序核验生成的造型必填清单】\n下面每一项都有明确的集数、场次或剧情状态证据。你必须逐项映射到对应人物的 looks；属于同一视觉时期的多个场次应合并为一套造型，并合并 episodeNumbers 和 sceneNames，不能漏项，也不能机械拆成重复造型。\n${lifecycleChecklist}\n\n下面再提供从完整剧本中按人物检索的生命周期证据，帮助你补充清单之外的换装与变化：\n${characterContextDigest}\n\n【全剧本闪回、年龄时期与时间跳转重点段落】\n${lifecycleContextDigest}\n\n必须把上面每个重点段落映射到正确人物。即使段落只写“小林清”“小女孩”“她”“小时候的孩子”等别称，也要结合前后转场、亲属关系和同一事件确认身份；属于同一人物的幼年、童年、少年、青年、中年、老年状态必须进入该人物 looks。\n\n【完整执行剧本全文】\n你必须继续通读下面的完整文本，再综合判断性别、年龄、身份、关系、人物弧光、关键场景及不同阶段造型。不能只依据上面的摘要或首次出场；摘要与全文冲突时以全文为准。\n${content}`,
+    }
   ];
 
   let response = '';
   try {
     const stream = oaiStream(messages, {
       temperature: 0.5,
+      maxTokens: 24576,
     });
 
     for await (const chunk of stream) {
@@ -567,18 +795,53 @@ async function extractBatchCharacters(
       };
     };
 
+    const generateDefaultBodyProfile = (char: any): CharacterBodyProfile => {
+      const gender = normalizeGender(char.gender) || defaultGender;
+      const defaults: CharacterBodyProfile = {
+        height: '',
+        weight: '',
+        bodyType: gender === '女'
+          ? '自然匀称，体型与年龄和身份协调'
+          : gender === '男'
+            ? '自然匀称，体格与年龄和身份协调'
+            : '自然比例，体型与年龄和身份协调',
+        shoulderWaist: gender === '男' ? '肩腰比例自然，骨架稳定' : '肩腰比例自然，骨架协调',
+        limbProportions: '四肢比例自然，符合人物年龄阶段',
+        posture: '体态自然，站姿符合人物身份与剧情状态',
+      };
+      return mergeCharacterBodyProfiles(
+        normalizeCharacterBodyProfile(char.bodyProfile, char.appearance),
+        defaults
+      );
+    };
+
     // 生成默认的造型（至少一个）
     const generateDefaultLooks = (char: any) => {
       const gender = normalizeGender(char.gender) || defaultGender;
+      const styleLabel = getCreationStyleLabel(creationBible);
       return [{
         id: 'look-1',
         scene: '默认造型',
-        description: `${char.name}的基础出场造型，保持脸型和五官一致，服装根据人物身份与剧情阶段呈现写实短剧质感。`,
+        stage: '主要叙事时期',
+        description: `${char.name}的基础出场造型，保持脸型和五官一致，服装根据人物身份与剧情阶段呈现${styleLabel}。`,
         costume: char.costume && char.costume.length > 0 && !textContradictsGender(char.costume[0], gender) ? char.costume[0] : (gender === '女' ? '简洁生活装或职业装，颜色自然，方便在不同场景延展' : gender === '男' ? '简洁日常装或商务装，剪裁利落，贴合人物身份' : '简洁写实服装，颜色自然，贴合人物身份'),
         hairstyle: gender === '女' ? '自然披发、低马尾或利落短发，根据场景微调' : gender === '男' ? '干净短发或自然整理发型' : '自然整理发型，贴合人物身份',
         accessories: [],
         makeup: gender === '女' ? '自然淡妆' : gender === '男' ? '自然无妆或轻微修饰' : '自然妆造',
         mood: '自然',
+        changeType: '基础造型',
+        ageStage: char.age || defaultAge || '主要时期',
+        physicalState: '正常状态',
+        transformationState: '',
+        bodyProfile: generateDefaultBodyProfile(char),
+        bodyChanges: '',
+        episodeNumbers: [],
+        sceneNames: ['默认造型'],
+        sourceEvidence: '',
+        isBaseLook: true,
+        referenceLookId: '',
+        referenceReason: '直接参考已确认的人物正脸身份基准图',
+        generationPriority: 1,
       }];
     };
 
@@ -590,13 +853,14 @@ async function extractBatchCharacters(
         ? char.personality[0] 
         : defaultPersonality[0];
       const genderRoleText = genderText === '待定' ? '角色' : `${genderText}性角色`;
-      const bodyText = genderText === '女'
-        ? '身形自然匀称，面部线条柔和但有辨识度'
+      const styleLabel = getCreationStyleLabel(creationBible);
+      const facialText = genderText === '女'
+        ? '发型轮廓自然清晰，面部线条柔和但有辨识度，眉眼灵动，鼻唇比例协调'
         : genderText === '男'
-          ? '身材比例匀称，面部轮廓清晰'
-          : '身材比例自然，面部轮廓清晰';
+          ? '发型干净利落，面部轮廓清晰稳定，眉眼有辨识度，鼻唇比例自然'
+          : '发型与面部轮廓清晰稳定，固定五官具有辨识度';
       
-      return `${char.name}是${ageText}的${genderRoleText}，${personalityText}。${bodyText}，眼神和神态能体现人物当下情绪。服装以日常、商务或剧情场景搭配为主，整体贴合真人短剧写实风格。`;
+      return `${char.name}是${ageText}的${genderRoleText}，${personalityText}。${facialText}，肤色均匀，皮肤清爽并保留自然纹理；正脸近景的表情和眼神符合人物身份，整体贴合${styleLabel}。`;
     };
     
     // 辅助函数：判断字符串是否有效（非空且不包含"待补充"相关关键词）
@@ -645,9 +909,14 @@ async function extractBatchCharacters(
       const genderWasCorrected = Boolean(normalizedModelGender && normalizedModelGender !== '待定' && normalizedModelGender !== defaultGender);
       const safeMatchedChar = { ...matchedChar, name: charName, gender: defaultGender };
       const defaultLook = generateDefaultLooks(safeMatchedChar)[0];
-      const safeLooks = !genderWasCorrected && !textContradictsGender(matchedChar.looks, defaultGender)
+      const safeBodyProfile = generateDefaultBodyProfile(safeMatchedChar);
+      const rawSafeLooks = !genderWasCorrected && !textContradictsGender(matchedChar.looks, defaultGender)
         ? getValue(matchedChar.looks, generateDefaultLooks(safeMatchedChar))
         : generateDefaultLooks(safeMatchedChar);
+      const safeLooks = inheritBodyProfileForLooks(
+        normalizeCharacterLooks(rawSafeLooks, defaultLook, getValue(matchedChar.age, defaultAge)),
+        safeBodyProfile
+      );
       const safeCostume = !genderWasCorrected && !textContradictsGender(matchedChar.costume, defaultGender)
         ? getValue(matchedChar.costume, [defaultLook.costume])
         : [defaultLook.costume];
@@ -657,8 +926,24 @@ async function extractBatchCharacters(
             mainOutfit: defaultLook.costume,
             accessories: defaultLook.accessories,
             colorScheme: '自然写实配色',
-            styleNotes: '贴合人物身份和短剧现实题材风格',
+            styleNotes: `贴合人物身份和${getCreationStyleLabel(creationBible)}`,
           };
+      const defaultAppearance = generateDefaultAppearance(safeMatchedChar);
+      const defaultFaceFeatures = generateDefaultFaceFeatures(safeMatchedChar);
+      const modelFaceFeatures = !genderWasCorrected &&
+        matchedChar.faceFeatures &&
+        typeof matchedChar.faceFeatures === 'object' &&
+        !Array.isArray(matchedChar.faceFeatures) &&
+        !textContradictsGender(matchedChar.faceFeatures, defaultGender)
+          ? matchedChar.faceFeatures
+          : {};
+      const safeFaceFeatures = {
+        faceShape: getValue(modelFaceFeatures.faceShape, defaultFaceFeatures.faceShape),
+        eyes: getValue(modelFaceFeatures.eyes, defaultFaceFeatures.eyes),
+        nose: getValue(modelFaceFeatures.nose, defaultFaceFeatures.nose),
+        mouth: getValue(modelFaceFeatures.mouth, defaultFaceFeatures.mouth),
+        skinTone: getValue(modelFaceFeatures.skinTone, defaultFaceFeatures.skinTone),
+      };
       return {
         id: globalId,
         name: charName,
@@ -667,12 +952,14 @@ async function extractBatchCharacters(
         gender: defaultGender,
         personality: getValue(matchedChar.personality, defaultPersonality),
         // appearance 字段使用专门的验证函数
-        appearance: isValidAppearance(matchedChar.appearance) && !textContradictsGender(matchedChar.appearance, defaultGender)
-          ? matchedChar.appearance 
-          : generateDefaultAppearance(safeMatchedChar),
-        faceFeatures: !genderWasCorrected && !textContradictsGender(matchedChar.faceFeatures, defaultGender)
-          ? matchedChar.faceFeatures || generateDefaultFaceFeatures(safeMatchedChar)
-          : generateDefaultFaceFeatures(safeMatchedChar),
+        appearance: normalizeAppearanceDescription(
+          isValidAppearance(stripBodyDetailsFromAppearance(matchedChar.appearance)) && !textContradictsGender(matchedChar.appearance, defaultGender)
+            ? stripBodyDetailsFromAppearance(matchedChar.appearance)
+            : '',
+          defaultAppearance
+        ),
+        faceFeatures: safeFaceFeatures,
+        bodyProfile: safeBodyProfile,
         looks: safeLooks,
         background: getValue(matchedChar.background, `${charName}在剧情中承担${normalizeCharacterRole(getValue(matchedChar.role, '次要配角'))}功能，主要围绕核心矛盾推进人物关系和事件冲突。`),
         keyRelationships: getValue(matchedChar.keyRelationships, []),
@@ -692,9 +979,16 @@ async function extractBatchCharacters(
         age: defaultAge,
         gender: defaultGender,
         personality: defaultPersonality,
-        appearance: generateDefaultAppearance({ name: charName, age: defaultAge, gender: defaultGender, personality: defaultPersonality }),
+        appearance: normalizeAppearanceDescription(
+          '',
+          generateDefaultAppearance({ name: charName, age: defaultAge, gender: defaultGender, personality: defaultPersonality })
+        ),
         faceFeatures: generateDefaultFaceFeatures({ name: charName, gender: defaultGender }),
-        looks: generateDefaultLooks({ name: charName, gender: defaultGender }),
+        bodyProfile: generateDefaultBodyProfile({ name: charName, gender: defaultGender }),
+        looks: inheritBodyProfileForLooks(
+          generateDefaultLooks({ name: charName, gender: defaultGender }),
+          generateDefaultBodyProfile({ name: charName, gender: defaultGender })
+        ),
         background: `${charName}在剧情中承担次要配角功能，主要围绕核心矛盾推进人物关系和事件冲突。`,
         keyRelationships: [],
         arc: `${charName}随着剧情推进经历立场、情绪或处境变化，形象服务于故事冲突和反转。`,
@@ -704,7 +998,7 @@ async function extractBatchCharacters(
           mainOutfit: generateDefaultLooks({ name: charName, gender: defaultGender })[0].costume,
           accessories: [],
           colorScheme: '自然写实配色',
-          styleNotes: '贴合人物身份和短剧现实题材风格',
+          styleNotes: `贴合人物身份和${getCreationStyleLabel(creationBible)}`,
         },
         props: [],
       };
@@ -737,18 +1031,25 @@ async function extractBatchCharacters(
  */
 async function extractCharactersTraditional(
   content: string,
-  fileName: string
+  fileName: string,
+  creationBible?: CreationBible
 ): Promise<any> {
   const systemPrompt = `你是一个专业的影视角色分析师。你的任务是：
+${buildCreationBibleInstruction(creationBible)}
+
 1. 分析给定的文本内容，提取所有人物角色
-2. 每个人物必须生成 role、age、gender、personality、appearance、faceFeatures、looks、background、keyRelationships、arc、keyScenes、props
+2. 每个人物必须生成 role、age、gender、personality、appearance、bodyProfile、faceFeatures、looks、background、keyRelationships、arc、keyScenes、props
 3. role 只能使用：主角、主要配角、次要配角、龙套、路人、背景人物
-4. appearance 必须是 80-150 字外貌描述，包含身高体型、发型、五官、肤色质感、穿着风格
-5. faceFeatures 必须是固定脸型特征，包括脸型、眼睛、鼻子、嘴巴、肤色，后续所有造型都保持一致
-6. looks 必须识别人物在不同场景/阶段的造型变化，包括服装、发型、配饰、化妆、情绪状态
-7. background 写背景故事，keyRelationships 写人物关系，arc 写人物弧光，keyScenes 写关键场景，props 写标志性道具
-8. gender 只能使用：男、女、待定。必须根据文本中的称谓、代词、亲属关系、括号身份说明、角色互动方式判断；不要默认男性，不确定就写“待定”。
-9. 性别判断优先级：先看别人对该人物的称呼和亲属/婚恋关系，其次看角色间互动方式里的代词和行为关系，最后才参考姓名气质。
+4. appearance 必须是 80-150 字正脸近景描述，只包含发型、脸型、五官、肤色质感和神态，禁止混入身高、体重、体型和服装
+5. bodyProfile 独立记录身高、体重、体型、肩腰与骨架、四肢比例和体态；精确数值必须有剧本证据，否则只写合理视觉范围或留空
+6. faceFeatures 必须是固定脸型特征，包括脸型、眼睛、鼻子、嘴巴、肤色，后续所有造型都保持一致
+7. looks 必须建立同一人物的视觉变化时间线，识别服装造型、童年/青年/中年/老年等年龄时期、受伤/怀孕/病弱等身体状态，以及觉醒/入魔/变身等特殊形态
+8. background 写背景故事，keyRelationships 写人物关系，arc 写人物弧光，keyScenes 写关键场景，props 写标志性道具
+9. gender 只能使用：男、女、待定。必须根据文本中的称谓、代词、亲属关系、括号身份说明、角色互动方式判断；不要默认男性，不确定就写“待定”。
+10. 性别判断优先级：先看别人对该人物的称呼和亲属/婚恋关系，其次看角色间互动方式里的代词和行为关系，最后才参考姓名气质。
+11. 同一人物的不同时期和状态不能拆成新人物；连续场次没有明显视觉变化时合并，禁止机械组合不存在的造型
+12. 每个人物必须有一个主要时期正常状态的基础造型；其他造型填写 referenceLookId，按“正脸→基础造型→年龄时期→服装造型→身体状态→特殊形态”建立依赖
+13. 每个 looks 项必须继承人物 bodyProfile，并用 bodyChanges 单独说明当前时期、伤病、怀孕或变身造成的体态变化；没有变化则留空
 
 请以 JSON 格式返回结果，格式如下：
 {
@@ -761,7 +1062,15 @@ async function extractCharactersTraditional(
       "age": "年龄",
       "gender": "女",
       "personality": ["性格特点1", "性格特点2"],
-      "appearance": "80-150字外貌描述，包含身高体型、发型、五官、肤色质感、穿着风格",
+      "appearance": "80-150字正脸近景描述，只包含发型、脸型、五官、肤色质感和神态",
+      "bodyProfile": {
+        "height": "身高或合理视觉范围",
+        "weight": "体重、体重范围或体重感",
+        "bodyType": "体型和体格",
+        "shoulderWaist": "肩宽、腰线与骨架",
+        "limbProportions": "四肢和头身比例",
+        "posture": "常态体态或站姿"
+      },
       "faceFeatures": {
         "faceShape": "脸型",
         "eyes": "眼睛特征",
@@ -778,7 +1087,27 @@ async function extractCharactersTraditional(
           "hairstyle": "发型",
           "accessories": ["配饰"],
           "makeup": "化妆",
-          "mood": "情绪"
+          "mood": "情绪",
+          "changeType": "基础造型/服装造型/年龄时期/身体状态/特殊形态/复合变化",
+          "ageStage": "青年",
+          "physicalState": "正常状态",
+          "transformationState": "",
+          "bodyProfile": {
+            "height": "继承人物身高",
+            "weight": "继承人物体重",
+            "bodyType": "继承人物体型",
+            "shoulderWaist": "继承人物肩腰与骨架",
+            "limbProportions": "继承人物四肢比例",
+            "posture": "当前造型体态"
+          },
+          "bodyChanges": "",
+          "episodeNumbers": [1],
+          "sceneNames": ["关联场景"],
+          "sourceEvidence": "剧本依据",
+          "isBaseLook": true,
+          "referenceLookId": "",
+          "referenceReason": "参考关系说明",
+          "generationPriority": 1
         }
       ],
       "background": "背景故事",
@@ -799,7 +1128,8 @@ async function extractCharactersTraditional(
 1. 必须返回完整且有效的 JSON 格式
 2. 字符串中的引号需要转义为 \\"
 3. 不要在 JSON 中添加注释
-4. 确保所有数组和对象都正确闭合`;
+4. 确保所有数组和对象都正确闭合
+5. 全文通读后再整理同一人物的时期与状态，所有变化必须符合剧情证据并保持固定五官身份一致`;
 
   const messages = [
     { role: 'system' as const, content: systemPrompt },
@@ -821,8 +1151,8 @@ async function extractCharactersTraditional(
     }
   } catch (error: any) {
     console.warn('传统人物模型提取失败，使用本地兜底:', error?.message || error);
-    const localCharacters = extractLocalCharacterNames(content).slice(0, 30);
-    const fallback = await extractBatchCharacters(content, localCharacters, 0);
+    const localCharacters = extractLocalCharacterNames(content);
+    const fallback = await extractBatchCharacters(content, localCharacters, 0, creationBible);
     return {
       totalCharacters: fallback.characters.length,
       characters: fallback.characters,
@@ -838,14 +1168,41 @@ async function extractCharactersTraditional(
 
   if (result) {
     if (Array.isArray(result.characters)) {
-      result.characters = result.characters.map((character: any) => ({
-        ...character,
-        role: normalizeCharacterRole(character.role),
-        gender: resolveCharacterGender(character.name || '', content, character.gender),
-        appearance: textContradictsGender(character.appearance, resolveCharacterGender(character.name || '', content, character.gender))
-          ? ''
-          : character.appearance,
-      }));
+      result.characters = result.characters.map((character: any) => {
+        const resolvedGender = resolveCharacterGender(character.name || '', content, character.gender);
+        const fallbackLook = {
+          id: 'look-1',
+          scene: '默认造型',
+          stage: '主要叙事时期',
+          description: `${character.name || '该人物'}主要时期的正常状态基础造型`,
+          costume: '符合人物身份和主要场景的基础服装',
+          hairstyle: '保持人物辨识度的基础发型',
+          accessories: [],
+          makeup: resolvedGender === '女' ? '自然淡妆' : '自然妆造',
+          mood: '自然',
+          changeType: '基础造型',
+          ageStage: character.age || '主要时期',
+          physicalState: '正常状态',
+          bodyProfile: normalizeCharacterBodyProfile(character.bodyProfile, character.appearance),
+          bodyChanges: '',
+          isBaseLook: true,
+          generationPriority: 1,
+        };
+        const bodyProfile = normalizeCharacterBodyProfile(character.bodyProfile, character.appearance);
+        return {
+          ...character,
+          role: normalizeCharacterRole(character.role),
+          gender: resolvedGender,
+          appearance: textContradictsGender(character.appearance, resolvedGender)
+            ? ''
+            : stripBodyDetailsFromAppearance(character.appearance),
+          bodyProfile,
+          looks: inheritBodyProfileForLooks(
+            normalizeCharacterLooks(character.looks, fallbackLook, character.age || ''),
+            bodyProfile
+          ),
+        };
+      });
     }
 
     return {

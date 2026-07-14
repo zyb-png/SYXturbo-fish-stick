@@ -1,0 +1,13 @@
+packages:
+  - .
+
+overrides:
+  esbuild: ^0.25.12
+
+allowBuilds:
+  esbuild: true
+  onnxruntime-node: false
+  protobufjs: true
+  sharp: true
+  tos-crc64-js: true
+  unrs-resolver: true
