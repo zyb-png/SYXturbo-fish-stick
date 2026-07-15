@@ -1,4 +1,4 @@
-FROM swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/library/node:22-alpine AS deps
+FROM swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/library/node:22-bookworm-slim AS deps
 
 WORKDIR /app
 ENV ONNXRUNTIME_NODE_INSTALL=skip
@@ -6,7 +6,7 @@ RUN corepack enable
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc ./
 RUN corepack pnpm install --frozen-lockfile
 
-FROM swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/library/node:22-alpine AS builder
+FROM swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/library/node:22-bookworm-slim AS builder
 
 WORKDIR /app
 ENV NEXT_TELEMETRY_DISABLED=1
@@ -15,7 +15,7 @@ COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 RUN corepack pnpm next build
 
-FROM swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/library/node:22-alpine AS runner
+FROM swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/library/node:22-bookworm-slim AS runner
 
 WORKDIR /app
 ENV NODE_ENV=production
@@ -24,7 +24,9 @@ ENV PORT=5001
 ENV DEPLOY_RUN_PORT=5001
 
 RUN corepack enable
-RUN apk add --no-cache bash
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates libstdc++6 \
+    && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /app/package.json /app/pnpm-lock.yaml /app/pnpm-workspace.yaml /app/.npmrc ./
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/.next ./.next

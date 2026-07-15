@@ -127,9 +127,55 @@ function shouldBillDeepSeek(baseUrl: string, options: LlmRequestOptions): boolea
   return options.billing !== false && baseUrl.includes('api.deepseek.com');
 }
 
+let hasWarnedTokenizerFallback = false;
+
+function estimateTextTokens(text: string): number {
+  if (!text) return 0;
+
+  let asciiCharacters = 0;
+  let nonAsciiCharacters = 0;
+  for (const character of text) {
+    if (character.codePointAt(0)! <= 0x7f) asciiCharacters += 1;
+    else nonAsciiCharacters += 1;
+  }
+
+  return Math.max(1, Math.ceil(asciiCharacters / 4) + nonAsciiCharacters);
+}
+
+function estimateMessageTokens(messages: Message[]): number {
+  return messages.reduce(
+    (total, message) => total + 4 + estimateTextTokens(message.role) + estimateTextTokens(message.content),
+    2
+  );
+}
+
+async function countMessageTokensSafely(messages: Message[]): Promise<number> {
+  try {
+    return await countDeepSeekMessageTokens(messages);
+  } catch (error) {
+    if (!hasWarnedTokenizerFallback) {
+      hasWarnedTokenizerFallback = true;
+      console.error('[DeepSeek tokenizer] 精确计数不可用，暂用保守估算；最终结算仍优先采用 API usage:', error);
+    }
+    return estimateMessageTokens(messages);
+  }
+}
+
+async function countTextTokensSafely(text: string): Promise<number> {
+  try {
+    return await countDeepSeekTokens(text);
+  } catch (error) {
+    if (!hasWarnedTokenizerFallback) {
+      hasWarnedTokenizerFallback = true;
+      console.error('[DeepSeek tokenizer] 精确计数不可用，暂用保守估算；最终结算仍优先采用 API usage:', error);
+    }
+    return estimateTextTokens(text);
+  }
+}
+
 async function createFallbackUsage(messages: Message[], output: string): Promise<LlmTokenUsage> {
-  const inputTokens = await countDeepSeekMessageTokens(messages);
-  const outputTokens = await countDeepSeekTokens(output);
+  const inputTokens = await countMessageTokensSafely(messages);
+  const outputTokens = await countTextTokensSafely(output);
   return {
     inputTokens,
     cachedInputTokens: 0,
@@ -144,7 +190,7 @@ async function beginDeepSeekBilling(
   options: LlmRequestOptions,
   model: string
 ): Promise<string> {
-  const estimatedInputTokens = await countDeepSeekMessageTokens(messages);
+  const estimatedInputTokens = await countMessageTokensSafely(messages);
   const estimatedOutputTokens = Math.max(1, options.maxTokens || 16384);
   const reservedPoints = calculateDeepSeekCreationPoints({
     uncachedInputTokens: estimatedInputTokens,
