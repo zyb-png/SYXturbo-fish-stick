@@ -50,6 +50,7 @@ interface LlmRequestOptions {
   includeUsage?: boolean;
   billing?: boolean;
   billingLabel?: string;
+  validateContent?: (content: string) => void;
 }
 
 /** 延迟函数 */
@@ -442,7 +443,9 @@ export async function invoke(
 ): Promise<string> {
   const config = resolveLlmRequestConfig(options);
   if (!shouldBillDeepSeek(config.baseUrl, options)) {
-    return invokeRequest(messages, options);
+    const content = await invokeRequest(messages, options);
+    options.validateContent?.(content);
+    return content;
   }
 
   const taskId = await beginDeepSeekBilling(messages, options, options.model || config.model);
@@ -455,6 +458,7 @@ export async function invoke(
         options.onUsage?.(value);
       },
     });
+    options.validateContent?.(content);
     const finalUsage = usage || await createFallbackUsage(messages, content);
     await settleDeepSeekBilling(taskId, finalUsage, options.billingLabel || '文本分析');
     return content;
