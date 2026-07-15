@@ -1931,12 +1931,25 @@ export default function StoryboardGenerator() {
   const [uploadedFile, setUploadedFile] = useState<File | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
   const [isGeneratingExecutionScript, setIsGeneratingExecutionScript] = useState(false);
+  const [executionScriptElapsedSeconds, setExecutionScriptElapsedSeconds] = useState(0);
+  const [executionScriptProgressMessage, setExecutionScriptProgressMessage] = useState('DeepSeek 正在通读全文并规范剧本结构');
+  const [executionScriptError, setExecutionScriptError] = useState<string | null>(null);
   const [showExecutionScriptPreview, setShowExecutionScriptPreview] = useState(false);
   const [showExecutionScriptSuccessDialog, setShowExecutionScriptSuccessDialog] = useState(false);
   const storyboardAbortControllerRef = useRef<AbortController | null>(null);
   const storyboardBatchCancelledRef = useRef(false);
   const [editingPrompt, setEditingPrompt] = useState<{ type: 'image' | 'video'; shotNumber: number; prompt: string; chapterNumber?: number; frameType?: 'start' | 'end' } | null>(null);
   const [regeneratingShot, setRegeneratingShot] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (!isGeneratingExecutionScript) return;
+
+    const timer = window.setInterval(() => {
+      setExecutionScriptElapsedSeconds(previous => previous + 1);
+    }, 1000);
+
+    return () => window.clearInterval(timer);
+  }, [isGeneratingExecutionScript]);
 
   // 人物描述编辑状态
   const [editingCharacterId, setEditingCharacterId] = useState<number | null>(null);
@@ -2072,6 +2085,20 @@ export default function StoryboardGenerator() {
     }
   }, []);
 
+  // 网络错误处理函数 - 提供更有用的错误信息
+  const getNetworkErrorMessage = useCallback((error: unknown, operation: string): string => {
+    if (error instanceof Error && error.name === 'AbortError') {
+      return `请求超时，${operation}耗时较长。\n\n建议：\n1. 请等待 30 秒后重新尝试\n2. 如果问题持续，请联系技术支持`;
+    }
+    if (error instanceof TypeError && error.message === 'Failed to fetch') {
+      return `网络连接失败，无法${operation}。\n可能原因：\n1. 网络连接不稳定\n2. 服务暂时不可用\n\n建议：\n1. 检查网络连接\n2. 刷新页面后重试\n3. 如果问题持续，请稍后再试`;
+    }
+    if (error instanceof Error) {
+      return error.message;
+    }
+    return `${operation}失败`;
+  }, []);
+
   const ensureExecutionScript = useCallback(async (forceRegenerate = false): Promise<string | null> => {
     if (!fileContent.trim()) {
       toast.error('请先上传剧本文件');
@@ -2084,19 +2111,76 @@ export default function StoryboardGenerator() {
 
     if (!(await requireLoginBeforePaidAction())) return null;
 
+    setExecutionScriptElapsedSeconds(0);
+    setExecutionScriptProgressMessage('正在连接执行剧本服务');
+    setExecutionScriptError(null);
     setIsGeneratingExecutionScript(true);
     const toastId = toast.loading(forceRegenerate ? '正在重新拉执行剧本...' : '正在拉执行剧本...');
 
     try {
       const response = await fetch('/api/generate-execution-script', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/x-ndjson',
+        },
         body: JSON.stringify({
           content: fileContent,
           fileName: getCurrentFileName(),
         }),
       });
-      const data = await response.json().catch(() => null);
+
+      let data: any = null;
+      const contentType = response.headers.get('content-type') || '';
+
+      if (response.ok && contentType.includes('application/x-ndjson')) {
+        const reader = response.body?.getReader();
+        if (!reader) throw new Error('无法读取执行剧本生成进度');
+
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        const processLine = (line: string) => {
+          const trimmed = line.trim();
+          if (!trimmed) return;
+
+          const event = JSON.parse(trimmed);
+          if (event.type === 'progress') {
+            if (typeof event.message === 'string' && event.message.trim()) {
+              setExecutionScriptProgressMessage(event.message.trim());
+            }
+            if (Number.isFinite(event.elapsedSeconds)) {
+              setExecutionScriptElapsedSeconds(previous => Math.max(previous, Number(event.elapsedSeconds)));
+            }
+            return;
+          }
+          if (event.type === 'error') {
+            throw new Error(event.details || event.error || '拉执行剧本失败');
+          }
+          if (event.type === 'complete') {
+            data = event;
+          }
+        };
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop() || '';
+          for (const line of lines) processLine(line);
+        }
+
+        buffer += decoder.decode();
+        if (buffer.trim()) processLine(buffer);
+        if (!data) throw new Error('执行剧本生成连接已结束，但未收到完整结果');
+      } else {
+        data = await response.json().catch(() => null);
+      }
+
+      if (response.status === 401) {
+        showLoginRequired(LOGIN_REQUIRED_PROMPT);
+      }
 
       if (!response.ok || !data?.success || !data.executionScript) {
         throw new Error(data?.details || data?.error || '拉执行剧本失败');
@@ -2117,7 +2201,9 @@ export default function StoryboardGenerator() {
     } catch (error) {
       console.error('拉执行剧本失败:', error);
       toast.dismiss(toastId);
-      toast.error(getNetworkErrorMessage(error, '拉执行剧本'));
+      const errorMessage = getNetworkErrorMessage(error, '拉执行剧本');
+      setExecutionScriptError(errorMessage);
+      toast.error(errorMessage, { duration: 10000 });
       return null;
     } finally {
       setIsGeneratingExecutionScript(false);
@@ -2127,9 +2213,11 @@ export default function StoryboardGenerator() {
     fileContent,
     getCurrentExecutionScriptSignature,
     getCurrentFileName,
+    getNetworkErrorMessage,
     hasCurrentExecutionScript,
     playExecutionScriptSuccessSound,
     requireLoginBeforePaidAction,
+    showLoginRequired,
     setExecutionScript,
     setExecutionScriptSourceSignature,
     setTokenUsage,
@@ -2237,21 +2325,6 @@ export default function StoryboardGenerator() {
       throw new Error(errorMessage);
     }
     return response.json();
-  }, []);
-
-  // 网络错误处理函数 - 提供更有用的错误信息
-  const getNetworkErrorMessage = useCallback((error: unknown, operation: string): string => {
-    // 检查是否是中止错误（超时）
-    if (error instanceof Error && error.name === 'AbortError') {
-      return `请求超时，${operation}耗时较长。\n\n建议：\n1. 请等待 30 秒后重新尝试\n2. 如果问题持续，请联系技术支持`;
-    }
-    if (error instanceof TypeError && error.message === 'Failed to fetch') {
-      return `网络连接失败，无法${operation}。\n可能原因：\n1. 网络连接不稳定\n2. 服务暂时不可用\n\n建议：\n1. 检查网络连接\n2. 刷新页面后重试\n3. 如果问题持续，请稍后再试`;
-    }
-    if (error instanceof Error) {
-      return error.message;
-    }
-    return `${operation}失败`;
   }, []);
 
   // 打开图片库选择器
@@ -10322,18 +10395,20 @@ export default function StoryboardGenerator() {
                 {/* 上传确认按钮 */}
                 {(uploadedFile || (uploadedFileName && fileContent)) && !stepConfirmed.upload && fileContent && (
                   <div className="mt-4 space-y-2">
-	                    <Button
-	                      className="w-full"
-	                      onClick={() => confirmStep('upload')}
-	                      disabled={isProcessing || isGeneratingExecutionScript}
-	                    >
+		                    <Button
+		                      className={`execution-script-launch-button w-full ${isGeneratingExecutionScript ? 'is-generating' : ''}`}
+		                      onClick={() => confirmStep('upload')}
+		                      disabled={isProcessing || isGeneratingExecutionScript}
+		                    >
 	                      {isGeneratingExecutionScript ? (
 	                        <Loader2 className="w-4 h-4 mr-2 animate-spin" />
 	                      ) : (
 	                        <CheckCircle2 className="w-4 h-4 mr-2" />
 	                      )}
-	                      确认文件，拉执行剧本
-	                    </Button>
+		                      {isGeneratingExecutionScript
+		                        ? `正在整理执行剧本 · ${executionScriptElapsedSeconds} 秒`
+		                        : '确认文件，拉执行剧本'}
+		                    </Button>
                     <Button
                       className="w-full"
                       variant="outline"
@@ -10343,6 +10418,7 @@ export default function StoryboardGenerator() {
                         setUploadedFileName(null);
                         setExecutionScript('');
                         setExecutionScriptSourceSignature('');
+                        setExecutionScriptError(null);
                         setCreationBible(DEFAULT_CREATION_BIBLE);
                         setProgress(0);
                         toast.info('已清除文件，请重新上传');
@@ -10359,25 +10435,76 @@ export default function StoryboardGenerator() {
 
 	            {/* Execution Script Preparation */}
 	            {uploadedStoryReady && (
-		              <Card className="execution-script-card">
+			              <Card className={`execution-script-card ${isGeneratingExecutionScript ? 'is-generating' : ''}`}>
 		                <CardHeader>
 		                  <CardTitle className="flex flex-wrap items-center justify-between gap-2">
 		                    <span className="flex min-w-0 items-center gap-2">
 		                      <FileText className="w-5 h-5" />
 		                      拉执行剧本
 		                    </span>
-		                    <Badge className="shrink-0" variant={executionScriptReady ? 'default' : 'outline'}>
-		                      {executionScriptReady ? '已生成' : '待生成'}
-		                    </Badge>
+			                    <Badge
+			                      className={`shrink-0 ${isGeneratingExecutionScript ? 'execution-script-generating-badge' : ''}`}
+			                      variant={executionScriptReady && !isGeneratingExecutionScript ? 'default' : 'outline'}
+			                    >
+			                      {isGeneratingExecutionScript ? (
+			                        <span className="flex items-center gap-1.5">
+			                          <Loader2 className="h-3 w-3 animate-spin" />
+			                          生成中
+			                        </span>
+			                      ) : executionScriptReady ? '已生成' : '待生成'}
+			                    </Badge>
 		                  </CardTitle>
 		                  <CardDescription className="execution-script-copy">
 		                    使用 DeepSeek 先整理成执行剧本，再进入五维提取。
 		                  </CardDescription>
 	                </CardHeader>
 	                <CardContent className="space-y-3">
-		                {!executionScriptReady ? (
-		                  <Button
-		                    className="w-full"
+			                {isGeneratingExecutionScript ? (
+			                  <div
+			                    className="execution-script-generating-state"
+			                    role="status"
+			                    aria-live="polite"
+			                    aria-busy="true"
+			                  >
+			                    <div className="execution-script-generating-heading">
+			                      <span className="execution-script-generating-icon" aria-hidden="true">
+			                        <Loader2 className="h-5 w-5 animate-spin" />
+			                      </span>
+			                      <div className="min-w-0 flex-1">
+			                        <div className="text-sm font-semibold text-amber-50">
+			                          {executionScriptReady ? '正在重新整理执行剧本' : '正在生成执行剧本'}
+			                        </div>
+			                        <div className="mt-0.5 text-xs leading-5 text-amber-100/65">
+			                          {executionScriptProgressMessage}
+			                        </div>
+			                      </div>
+			                      <span className="execution-script-elapsed">
+			                        {executionScriptElapsedSeconds < 60
+			                          ? `${executionScriptElapsedSeconds} 秒`
+			                          : `${Math.floor(executionScriptElapsedSeconds / 60)}分${executionScriptElapsedSeconds % 60}秒`}
+			                      </span>
+			                    </div>
+			                    <div className="execution-script-indeterminate" aria-hidden="true">
+			                      <span />
+			                    </div>
+			                    <div className="execution-script-generating-steps" aria-hidden="true">
+			                      <span className="is-complete">
+			                        <CheckCircle2 className="h-3.5 w-3.5" />
+			                        已接收剧本
+			                      </span>
+			                      <span className="is-active">
+			                        <Sparkles className="h-3.5 w-3.5" />
+			                        正在分析场次
+			                      </span>
+			                      <span>
+			                        <Circle className="h-3.5 w-3.5" />
+			                        等待规范格式
+			                      </span>
+			                    </div>
+			                  </div>
+			                ) : !executionScriptReady ? (
+			                  <Button
+			                    className="w-full"
 		                    onClick={async () => {
 		                      await ensureExecutionScript();
 		                    }}
@@ -10475,8 +10602,40 @@ export default function StoryboardGenerator() {
 		                        </Button>
 		                  </div>
 		                </div>
-		                )}
-		                  {hasLegacyExtractionResultsPendingExecutionScript && (
+			                )}
+			                  {executionScriptError && !isGeneratingExecutionScript && (
+			                    <div
+			                      className="execution-script-error-state"
+			                      role="alert"
+			                      aria-live="assertive"
+			                    >
+			                      <span className="execution-script-error-icon" aria-hidden="true">
+			                        <AlertCircle className="h-4 w-4" />
+			                      </span>
+			                      <div className="min-w-0 flex-1">
+			                        <div className="text-sm font-semibold text-amber-50">
+			                          本次执行剧本未生成完成
+			                        </div>
+			                        <div className="mt-1 whitespace-pre-wrap break-words text-xs leading-5 text-amber-100/70">
+			                          {executionScriptError}
+			                        </div>
+			                      </div>
+			                      <Button
+			                        type="button"
+			                        size="sm"
+			                        variant="outline"
+			                        className="execution-script-error-retry shrink-0"
+			                        onClick={async () => {
+			                          await ensureExecutionScript(executionScriptReady);
+			                        }}
+			                        disabled={isProcessing || isGeneratingExecutionScript}
+			                      >
+			                        <RefreshCw className="h-3.5 w-3.5" />
+			                        再试一次
+			                      </Button>
+			                    </div>
+			                  )}
+			                  {hasLegacyExtractionResultsPendingExecutionScript && (
 		                    <div className="execution-script-copy rounded-md border border-amber-400/25 bg-amber-500/10 p-3 text-xs leading-5 text-amber-100">
 		                      当前恢复的是旧流程提取结果。请先生成执行剧本并确认创作圣经，系统会按新流程重新提取场景、人物、人物音色、道具和大纲。
 		                    </div>

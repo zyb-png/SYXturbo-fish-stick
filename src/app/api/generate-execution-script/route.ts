@@ -48,39 +48,113 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    let usage: LlmTokenUsage | null = null;
-    const response = await invoke(
-      [
-        {
-          role: 'system',
-          content: `${EXECUTION_SCRIPT_PROMPT}\n\n特别约束：必须保留原文剧情路线、人物关系和关键台词。不要新增原文没有的对白、内心独白、人物关系、背景设定或剧情反转；不要改写台词含义。可以补足可视化动作、环境、音效和镜头画面，但不能改变故事信息。\n\n格式约束：请只输出改编后的执行剧本正文，不要输出解释、前言、总结或代码块。禁止使用 Markdown 标记和特殊排版符号，包括 #、*、**、- 列表符、\`\`\`、标题井号。标题和场景题头直接用纯文本，每一句独立换行，分集和场景之间最多保留一个空行。`,
-        },
-        {
-          role: 'user',
-          content: `文件名：${safeFileName}\n\n以下是原始故事脚本，请通读全文后按要求拉成执行剧本：\n\n${scriptContent}`,
-        },
-      ],
-      {
-        temperature: 0.35,
-        maxTokens: 65536,
-        timeout: 600_000,
-        maxRetries: 2,
-        billingLabel: '拉执行剧本',
-        onUsage: value => {
-          usage = value;
-        },
-      }
-    );
+    const encoder = new TextEncoder();
+    const abortController = new AbortController();
+    let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+    let cancelled = false;
 
-    const executionScript = normalizeExecutionScriptText(response);
-    if (!executionScript) {
-      throw new Error('模型没有返回执行剧本内容');
-    }
+    if (request.signal.aborted) abortController.abort();
+    request.signal.addEventListener('abort', () => abortController.abort(), { once: true });
 
-    return NextResponse.json({
-      success: true,
-      executionScript,
-      tokenUsage: buildTokenUsage(usage),
+    const responseStream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        const startedAt = Date.now();
+        const send = (event: Record<string, unknown>) => {
+          if (cancelled) return;
+          try {
+            controller.enqueue(encoder.encode(`${JSON.stringify(event)}\n`));
+          } catch {
+            cancelled = true;
+            abortController.abort();
+          }
+        };
+
+        send({
+          type: 'progress',
+          stage: 'connected',
+          message: '已连接执行剧本服务，正在等待 DeepSeek 开始生成',
+          elapsedSeconds: 0,
+        });
+
+        heartbeatTimer = setInterval(() => {
+          send({
+            type: 'progress',
+            stage: 'generating',
+            message: 'DeepSeek 正在通读全文并规范剧本结构，连接正常',
+            elapsedSeconds: Math.floor((Date.now() - startedAt) / 1000),
+          });
+        }, 8_000);
+
+        void (async () => {
+          let usage: LlmTokenUsage | null = null;
+          try {
+            const response = await invoke(
+              [
+                {
+                  role: 'system',
+                  content: `${EXECUTION_SCRIPT_PROMPT}\n\n特别约束：必须保留原文剧情路线、人物关系和关键台词。不要新增原文没有的对白、内心独白、人物关系、背景设定或剧情反转；不要改写台词含义。可以补足可视化动作、环境、音效和镜头画面，但不能改变故事信息。\n\n格式约束：请只输出改编后的执行剧本正文，不要输出解释、前言、总结或代码块。禁止使用 Markdown 标记和特殊排版符号，包括 #、*、**、- 列表符、\`\`\`、标题井号。标题和场景题头直接用纯文本，每一句独立换行，分集和场景之间最多保留一个空行。`,
+                },
+                {
+                  role: 'user',
+                  content: `文件名：${safeFileName}\n\n以下是原始故事脚本，请通读全文后按要求拉成执行剧本：\n\n${scriptContent}`,
+                },
+              ],
+              {
+                temperature: 0.35,
+                maxTokens: 65536,
+                timeout: 600_000,
+                maxRetries: 2,
+                signal: abortController.signal,
+                billingLabel: '拉执行剧本',
+                onUsage: value => {
+                  usage = value;
+                },
+              }
+            );
+
+            const executionScript = normalizeExecutionScriptText(response);
+            if (!executionScript) {
+              throw new Error('模型没有返回执行剧本内容');
+            }
+
+            send({
+              type: 'complete',
+              success: true,
+              executionScript,
+              tokenUsage: buildTokenUsage(usage),
+            });
+          } catch (error: unknown) {
+            const details = error instanceof Error ? error.message : String(error);
+            console.error('拉执行剧本失败:', error);
+            send({
+              type: 'error',
+              success: false,
+              error: '拉执行剧本失败',
+              details,
+            });
+          } finally {
+            if (heartbeatTimer) clearInterval(heartbeatTimer);
+            heartbeatTimer = null;
+            if (!cancelled) controller.close();
+          }
+        })();
+      },
+      cancel() {
+        cancelled = true;
+        abortController.abort();
+        if (heartbeatTimer) clearInterval(heartbeatTimer);
+        heartbeatTimer = null;
+      },
+    });
+
+    return new Response(responseStream, {
+      status: 200,
+      headers: {
+        'Content-Type': 'application/x-ndjson; charset=utf-8',
+        'Cache-Control': 'no-cache, no-transform',
+        'X-Accel-Buffering': 'no',
+        'Connection': 'keep-alive',
+      },
     });
   } catch (error: any) {
     console.error('拉执行剧本失败:', error);
