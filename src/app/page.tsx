@@ -1065,21 +1065,67 @@ function buildSceneRenderItems(scenes: Scene[]): SceneRenderItem[] {
 }
 
 function buildPropRenderItems(props: Prop[]): PropRenderItem[] {
-  const groups = new Map<string, { stateCount: number; episodeNumbers: Set<number> }>();
-  const prepared = props.map((prop, sourceIndex) => {
+  type PreparedProp = {
+    prop: Prop;
+    sourceIndex: number;
+    mainPropName: string;
+    groupKey: string;
+  };
+  type PropGroup = {
+    mainPropName: string;
+    stateCount: number;
+    episodeNumbers: Set<number>;
+    entries: PreparedProp[];
+  };
+
+  const groups = new Map<string, PropGroup>();
+  const groupOrder: string[] = [];
+
+  props.forEach((prop, sourceIndex) => {
     const mainPropName = getPropMainPropName(prop);
-    const group = groups.get(mainPropName) || { stateCount: 0, episodeNumbers: new Set<number>() };
+    const groupKey = mainPropName.normalize('NFKC').replace(/\s+/g, '').toLocaleLowerCase();
+    let group = groups.get(groupKey);
+    if (!group) {
+      group = {
+        mainPropName,
+        stateCount: 0,
+        episodeNumbers: new Set<number>(),
+        entries: [],
+      };
+      groups.set(groupKey, group);
+      groupOrder.push(groupKey);
+    }
     group.stateCount += getPropStateCount(prop);
     getPropEpisodeNumbers(prop).forEach(episode => group.episodeNumbers.add(episode));
-    groups.set(mainPropName, group);
-    return { prop, sourceIndex, mainPropName };
+    group.entries.push({ prop, sourceIndex, mainPropName: group.mainPropName, groupKey });
+  });
+
+  const prepared = groupOrder.flatMap(groupKey => {
+    const group = groups.get(groupKey)!;
+    return [...group.entries].sort((a, b) => {
+      const aHasReference = Boolean(a.prop.referencePropName?.trim());
+      const bHasReference = Boolean(b.prop.referencePropName?.trim());
+      const aSequence = typeof a.prop.stateSequence === 'number' && Number.isFinite(a.prop.stateSequence)
+        ? a.prop.stateSequence
+        : aHasReference ? Number.MAX_SAFE_INTEGER : 1;
+      const bSequence = typeof b.prop.stateSequence === 'number' && Number.isFinite(b.prop.stateSequence)
+        ? b.prop.stateSequence
+        : bHasReference ? Number.MAX_SAFE_INTEGER : 1;
+      if (aSequence !== bSequence) return aSequence - bSequence;
+      if (aHasReference !== bHasReference) return aHasReference ? 1 : -1;
+
+      const aFirstEpisode = getPropEpisodeNumbers(a.prop)[0] ?? Number.MAX_SAFE_INTEGER;
+      const bFirstEpisode = getPropEpisodeNumbers(b.prop)[0] ?? Number.MAX_SAFE_INTEGER;
+      if (aFirstEpisode !== bFirstEpisode) return aFirstEpisode - bFirstEpisode;
+      return a.sourceIndex - b.sourceIndex;
+    });
   });
 
   return prepared.map((entry, index) => {
-    const group = groups.get(entry.mainPropName)!;
+    const group = groups.get(entry.groupKey)!;
     return {
       ...entry,
-      shouldShowMainPropHeader: index === 0 || prepared[index - 1].mainPropName !== entry.mainPropName,
+      shouldShowMainPropHeader: index === 0 || prepared[index - 1].groupKey !== entry.groupKey,
       siblingStateCount: group.stateCount,
       siblingEpisodeNumbers: Array.from(group.episodeNumbers).sort((a, b) => a - b),
     };

@@ -23,13 +23,13 @@ import path from 'path';
 // 设置 API 路由超时时间
 export const maxDuration = 600;
 
-const TEXT_TO_IMAGE_MODEL = 'runninghub/rhart-image-g-2-official/text-to-image';
+const TEXT_TO_IMAGE_MODEL = 'runninghub/rhart-image-g-2/text-to-image';
 const IMAGE_TO_IMAGE_MODEL = 'runninghub/rhart-image-g-2-official/image-to-image';
 
 function buildRunningHubEndpoints(baseUrl: string) {
   const base = baseUrl.replace(/\/+$/, '');
   return {
-    textToImage: `${base}/rhart-image-g-2-official/text-to-image`,
+    textToImage: `${base}/rhart-image-g-2/text-to-image`,
     imageToImage: `${base}/rhart-image-g-2-official/image-to-image`,
     query: `${base}/query`,
     mediaUpload: `${base}/media/upload/binary`,
@@ -375,10 +375,9 @@ async function runRunningHubTextToImage(
   endpoints: ReturnType<typeof buildRunningHubEndpoints>,
   prompt: string,
   aspectRatio: string,
-  resolution: '1k' | '2k' | '4k' = '4k',
-  quality: 'low' | 'medium' | 'high' = 'high'
+  resolution: '1k' | '2k' | '4k' = '4k'
 ): Promise<string> {
-  const requestBody = JSON.stringify({ prompt, aspectRatio, resolution, quality });
+  const requestBody = JSON.stringify({ prompt, aspectRatio, resolution });
 
   // 创建任务（最多重试 3 次）
   let taskId = '';
@@ -683,7 +682,7 @@ export async function POST(request: NextRequest) {
     } else {
       console.log(`⚠️ 无参考图，降级为文生图模式（${STORYBOARD_RESOLUTION}/${STORYBOARD_QUALITY}）`);
       imageUrl = await runRunningHubTextToImage(
-        runninghubKey, runninghubEndpoints, concisePrompt, aspectRatio, STORYBOARD_RESOLUTION, STORYBOARD_QUALITY
+        runninghubKey, runninghubEndpoints, concisePrompt, aspectRatio, STORYBOARD_RESOLUTION
       );
     }
 

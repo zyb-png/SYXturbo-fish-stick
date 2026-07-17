@@ -56,7 +56,7 @@ pnpm dev
 
 ### RUNNINGHUB_API_KEY（必需）
 
-**用途**: RunningHub Namo Banana Pro 图片生成
+**用途**: RunningHub RHart Image G2 标准文生图及现有图生图
 
 **获取方式**:
 1. 访问 [RunningHub 官网](https://www.runninghub.cn)

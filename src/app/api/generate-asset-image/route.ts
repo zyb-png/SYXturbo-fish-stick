@@ -29,7 +29,7 @@ import {
 const MAX_IMAGES_PER_ASSET = 3;
 
 // RunningHub API 配置
-const TEXT_TO_IMAGE_MODEL = 'runninghub/rhart-image-g-2-official/text-to-image';
+const TEXT_TO_IMAGE_MODEL = 'runninghub/rhart-image-g-2/text-to-image';
 const IMAGE_TO_IMAGE_MODEL = 'runninghub/rhart-image-g-2/image-to-image';
 
 const STYLIZED_3D_CHARACTER_PROMPT = [
@@ -71,7 +71,7 @@ const TWO_D_ANIME_FINAL_LOCK =
 function buildRunningHubEndpoints(baseUrl: string) {
   const base = baseUrl.replace(/\/+$/, '');
   return {
-    textToImage: `${base}/rhart-image-g-2-official/text-to-image`,
+    textToImage: `${base}/rhart-image-g-2/text-to-image`,
     imageToImage: `${base}/rhart-image-g-2/image-to-image`,
     query: `${base}/query`,
     mediaUpload: `${base}/media/upload/binary`,
@@ -411,15 +411,13 @@ async function runRunningHubTextToImage(
   endpoints: ReturnType<typeof buildRunningHubEndpoints>,
   prompt: string,
   aspectRatio: string,
-  resolution: '1k' | '2k' | '4k' = '4k',
-  quality: 'low' | 'medium' | 'high' = 'high'
+  resolution: '1k' | '2k' | '4k' = '4k'
 ): Promise<string> {
   // 第1步：提交任务
   const requestBody = JSON.stringify({
     prompt,
     aspectRatio,
     resolution,
-    quality,
   });
   const createResponse = await fetch(endpoints.textToImage, {
     method: 'POST',
@@ -735,8 +733,7 @@ export async function POST(request: NextRequest) {
         endpoints,
         prompt,
         aspectRatio,
-        '2k',
-        'medium'
+        '2k'
       );
     }
 
