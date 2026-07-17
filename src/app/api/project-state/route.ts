@@ -4,15 +4,20 @@ import path from 'path';
 import { requireUserLoginResponse } from '@/lib/auth-guard';
 import { getAccountProjectStateDir } from '@/lib/account-assets';
 
+export const dynamic = 'force-dynamic';
+
 type StateValues = Record<string, string>;
 
 interface StateFile {
   version: number;
+  revision: number;
   updatedAt: string;
   values: StateValues;
+  keyRevisions: Record<string, number>;
 }
 
 const STATE_FILE_NAME = 'storyboard_state.json';
+const STATE_FILE_VERSION = 2;
 const PROTECTED_NON_EMPTY_KEYS = new Set([
   'storyboard_file_content',
   'storyboard_scenes_data',
@@ -27,7 +32,7 @@ const PROTECTED_NON_EMPTY_KEYS = new Set([
   'storyboard_asset_images',
 ]);
 
-let writeQueue = Promise.resolve();
+let writeQueue: Promise<unknown> = Promise.resolve();
 
 function isAllowedKey(key: unknown): key is string {
   return (
@@ -71,11 +76,35 @@ async function readStateFile(accountId: string): Promise<StateFile> {
       }
       return acc;
     }, {});
+    const parsedRevision = Number(parsed?.revision);
+    const revision = Number.isInteger(parsedRevision) && parsedRevision >= 0
+      ? parsedRevision
+      : Object.keys(sanitizedValues).length > 0
+        ? 1
+        : 0;
+    const keyRevisions = Object.entries(parsed?.keyRevisions || {}).reduce<Record<string, number>>(
+      (acc, [key, value]) => {
+        const keyRevision = Number(value);
+        if (isAllowedKey(key) && Number.isInteger(keyRevision) && keyRevision >= 0) {
+          acc[key] = keyRevision;
+        }
+        return acc;
+      },
+      {}
+    );
+
+    Object.keys(sanitizedValues).forEach((key) => {
+      if (!keyRevisions[key]) {
+        keyRevisions[key] = Math.max(1, revision);
+      }
+    });
 
     return {
-      version: 1,
+      version: STATE_FILE_VERSION,
+      revision,
       updatedAt: typeof parsed?.updatedAt === 'string' ? parsed.updatedAt : '',
       values: sanitizedValues,
+      keyRevisions,
     };
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
@@ -84,40 +113,77 @@ async function readStateFile(accountId: string): Promise<StateFile> {
     }
 
     return {
-      version: 1,
+      version: STATE_FILE_VERSION,
+      revision: 0,
       updatedAt: '',
       values: {},
+      keyRevisions: {},
     };
   }
 }
 
-async function writeStateFile(accountId: string, values: StateValues) {
-  const { stateDir, stateFile } = getStatePath(accountId);
-  const tempFile = `${stateFile}.${process.pid}.tmp`;
+async function writeStateFile(accountId: string, state: StateFile): Promise<StateFile> {
+  const { stateDir, stateFile: statePath } = getStatePath(accountId);
+  const tempFile = `${statePath}.${process.pid}.tmp`;
   await fsp.mkdir(stateDir, { recursive: true });
+  const nextStateFile: StateFile = {
+    version: STATE_FILE_VERSION,
+    revision: state.revision,
+    updatedAt: new Date().toISOString(),
+    values: state.values,
+    keyRevisions: state.keyRevisions,
+  };
 
   try {
     await fsp.writeFile(
       tempFile,
-      JSON.stringify({
-        version: 1,
-        updatedAt: new Date().toISOString(),
-        values,
-      }, null, 2),
+      JSON.stringify(nextStateFile, null, 2),
       'utf-8'
     );
-    await fsp.rename(tempFile, stateFile);
+    await fsp.rename(tempFile, statePath);
   } finally {
     await fsp.unlink(tempFile).catch(() => undefined);
   }
+
+  return nextStateFile;
 }
 
 function queueStateUpdate(accountId: string, update: (values: StateValues) => StateValues | void) {
   const run = writeQueue.then(async () => {
-    const stateFile = await readStateFile(accountId);
-    const nextValues = { ...stateFile.values };
+    const previousStateFile = await readStateFile(accountId);
+    const nextValues = { ...previousStateFile.values };
     const updateResult = update(nextValues);
-    await writeStateFile(accountId, updateResult || nextValues);
+    const resolvedValues = updateResult || nextValues;
+    const changedKeys = Array.from(new Set([
+      ...Object.keys(previousStateFile.values),
+      ...Object.keys(resolvedValues),
+    ])).filter((key) => previousStateFile.values[key] !== resolvedValues[key]);
+
+    if (changedKeys.length === 0) {
+      return {
+        stateFile: previousStateFile,
+        changedKeys,
+      };
+    }
+
+    const revision = previousStateFile.revision + 1;
+    const keyRevisions = { ...previousStateFile.keyRevisions };
+    changedKeys.forEach((key) => {
+      keyRevisions[key] = revision;
+    });
+
+    const stateFile = await writeStateFile(accountId, {
+      version: STATE_FILE_VERSION,
+      revision,
+      updatedAt: previousStateFile.updatedAt,
+      values: resolvedValues,
+      keyRevisions,
+    });
+
+    return {
+      stateFile,
+      changedKeys,
+    };
   });
 
   writeQueue = run.catch(() => undefined);
@@ -132,6 +198,7 @@ export async function GET(request: NextRequest) {
   try {
     const { searchParams } = new URL(request.url);
     const key = searchParams.get('key');
+    const sinceRaw = searchParams.get('since');
     const stateFile = await readStateFile(accountId);
 
     if (key) {
@@ -148,7 +215,51 @@ export async function GET(request: NextRequest) {
         key,
         value,
         exists: value !== null,
+        revision: stateFile.revision,
+        keyRevision: stateFile.keyRevisions[key] || 0,
         updatedAt: stateFile.updatedAt,
+      });
+    }
+
+    if (sinceRaw !== null) {
+      const since = Number(sinceRaw);
+      if (!Number.isInteger(since) || since < 0) {
+        return NextResponse.json({
+          success: false,
+          error: '无效的同步版本',
+        }, { status: 400 });
+      }
+
+      const reset = since > stateFile.revision;
+      const changedState = Object.entries(stateFile.values).reduce<StateValues>((acc, [stateKey, value]) => {
+        if (reset || (stateFile.keyRevisions[stateKey] || 0) > since) {
+          acc[stateKey] = value;
+        }
+        return acc;
+      }, {});
+      const deletedKeys = reset
+        ? []
+        : Object.entries(stateFile.keyRevisions)
+          .filter(([stateKey, keyRevision]) => (
+            keyRevision > since &&
+            !Object.prototype.hasOwnProperty.call(stateFile.values, stateKey)
+          ))
+          .map(([stateKey]) => stateKey);
+
+      return NextResponse.json({
+        success: true,
+        state: changedState,
+        deletedKeys,
+        revision: stateFile.revision,
+        keyRevisions: Object.fromEntries(
+          [...Object.keys(changedState), ...deletedKeys].map((stateKey) => [
+            stateKey,
+            stateFile.keyRevisions[stateKey] || stateFile.revision,
+          ])
+        ),
+        updatedAt: stateFile.updatedAt,
+        notModified: !reset && stateFile.revision === since,
+        reset,
       });
     }
 
@@ -156,6 +267,8 @@ export async function GET(request: NextRequest) {
       success: true,
       state: stateFile.values,
       count: Object.keys(stateFile.values).length,
+      revision: stateFile.revision,
+      keyRevisions: stateFile.keyRevisions,
       updatedAt: stateFile.updatedAt,
     });
   } catch (error) {
@@ -184,7 +297,7 @@ export async function POST(request: NextRequest) {
         return acc;
       }, {});
 
-      await queueStateUpdate(accountId, (values) => ({
+      const updateResult = await queueStateUpdate(accountId, (values) => ({
         ...values,
         ...Object.fromEntries(
           Object.entries(incomingValues).filter(([key, value]) => {
@@ -204,6 +317,15 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({
         success: true,
         count: Object.keys(incomingValues).length,
+        changedKeys: updateResult.changedKeys,
+        revision: updateResult.stateFile.revision,
+        keyRevisions: Object.fromEntries(
+          updateResult.changedKeys.map((changedKey) => [
+            changedKey,
+            updateResult.stateFile.keyRevisions[changedKey] || updateResult.stateFile.revision,
+          ])
+        ),
+        updatedAt: updateResult.stateFile.updatedAt,
       });
     }
 
@@ -222,7 +344,7 @@ export async function POST(request: NextRequest) {
       }, { status: 400 });
     }
 
-    await queueStateUpdate(accountId, (values) => {
+    const updateResult = await queueStateUpdate(accountId, (values) => {
       if (
         PROTECTED_NON_EMPTY_KEYS.has(key) &&
         isRawEmptyValue(value) &&
@@ -238,6 +360,10 @@ export async function POST(request: NextRequest) {
       success: true,
       key,
       size: Buffer.byteLength(value, 'utf-8'),
+      changed: updateResult.changedKeys.includes(key),
+      revision: updateResult.stateFile.revision,
+      keyRevision: updateResult.stateFile.keyRevisions[key] || 0,
+      updatedAt: updateResult.stateFile.updatedAt,
     });
   } catch (error) {
     console.error('[项目状态] 保存失败:', error);
@@ -266,7 +392,7 @@ export async function DELETE(request: NextRequest) {
         }, { status: 400 });
       }
 
-      await queueStateUpdate(accountId, (values) => {
+      const updateResult = await queueStateUpdate(accountId, (values) => {
         delete values[key];
       });
 
@@ -274,6 +400,10 @@ export async function DELETE(request: NextRequest) {
         success: true,
         key,
         deleted: true,
+        changed: updateResult.changedKeys.includes(key),
+        revision: updateResult.stateFile.revision,
+        keyRevision: updateResult.stateFile.keyRevisions[key] || 0,
+        updatedAt: updateResult.stateFile.updatedAt,
       });
     }
 

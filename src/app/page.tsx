@@ -3852,12 +3852,18 @@ export default function StoryboardGenerator() {
     const initAssetsFolder = async () => {
       try {
         // 检查是否已配置
-        const response = await fetch('/api/assets-config');
+        const response = await fetch('/api/assets-config', {
+          headers: { 'X-Skip-Login-Prompt': '1' },
+        });
+        if (response.status === 401) return;
         const data = await response.json();
 
         if (data.success && !data.assetsExist) {
           // 自动初始化
-          await fetch('/api/assets-config', { method: 'PUT' });
+          await fetch('/api/assets-config', {
+            method: 'PUT',
+            headers: { 'X-Skip-Login-Prompt': '1' },
+          });
           console.log('资产文件夹已自动初始化');
         }
       } catch (error) {

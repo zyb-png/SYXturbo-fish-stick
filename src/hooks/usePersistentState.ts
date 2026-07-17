@@ -4,7 +4,11 @@ import LZString from 'lz-string';
 const PROJECT_STATE_API = '/api/project-state';
 const ESTIMATED_LOCAL_STORAGE_QUOTA = 5 * 1024 * 1024;
 const MAX_LOCAL_STORAGE_VALUE_SIZE = 200 * 1024;
-const SAVE_DEBOUNCE_MS = 2000;
+const SAVE_DEBOUNCE_MS = 900;
+const PROJECT_SYNC_POLL_MS = 1500;
+const PROJECT_SYNC_BACKGROUND_POLL_MS = 10_000;
+const PROJECT_SYNC_RETRY_MS = 5000;
+const PROJECT_SYNC_CHANNEL_NAME = 'manfei:project-state-sync';
 const PERSISTENCE_DEBUG = false;
 const ACTIVE_ACCOUNT_KEY = 'storyboard_active_account_id';
 const ACCOUNT_KEY_PREFIX = 'storyboard_account_';
@@ -205,6 +209,255 @@ function isLegacyRawStoryboardStateKey(key: string): boolean {
     key !== ACTIVE_ACCOUNT_KEY;
 }
 
+interface ProjectStateSyncUpdate {
+  key: string;
+  value: string | null;
+  revision: number;
+  keyRevision: number;
+}
+
+type ProjectStateSyncListener = (update: ProjectStateSyncUpdate) => void;
+
+const projectStateSyncListeners = new Map<string, Set<ProjectStateSyncListener>>();
+let projectStateSyncAccountId: string | null = null;
+let projectStateSyncRevision = 0;
+let projectStateSyncGeneration = 0;
+let projectStateSyncTimer: ReturnType<typeof setTimeout> | null = null;
+let projectStateSyncInFlight = false;
+let projectStateSyncChannel: BroadcastChannel | null = null;
+let projectStateSyncClientId = '';
+let projectStateSyncWindowListenersReady = false;
+
+function getProjectStateSyncClientId(): string {
+  if (!projectStateSyncClientId) {
+    projectStateSyncClientId = typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+      ? crypto.randomUUID()
+      : `client-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  }
+  return projectStateSyncClientId;
+}
+
+function dispatchProjectStateSyncUpdate(update: ProjectStateSyncUpdate): void {
+  projectStateSyncListeners.get(update.key)?.forEach((listener) => {
+    try {
+      listener(update);
+    } catch (error) {
+      console.warn(`[多端同步] 应用远端状态失败: ${update.key}`, error);
+    }
+  });
+}
+
+function getProjectStateSyncDelay(): number {
+  return typeof document !== 'undefined' && document.hidden
+    ? PROJECT_SYNC_BACKGROUND_POLL_MS
+    : PROJECT_SYNC_POLL_MS;
+}
+
+function scheduleProjectStateSync(delay = getProjectStateSyncDelay()): void {
+  if (typeof window === 'undefined' || !projectStateSyncAccountId || projectStateSyncListeners.size === 0) {
+    return;
+  }
+
+  if (projectStateSyncTimer) {
+    clearTimeout(projectStateSyncTimer);
+  }
+  projectStateSyncTimer = setTimeout(() => {
+    projectStateSyncTimer = null;
+    void pollProjectStateChanges();
+  }, delay);
+}
+
+async function pollProjectStateChanges(): Promise<void> {
+  if (
+    typeof window === 'undefined' ||
+    projectStateSyncInFlight ||
+    !projectStateSyncAccountId ||
+    projectStateSyncListeners.size === 0
+  ) {
+    return;
+  }
+
+  projectStateSyncInFlight = true;
+  const accountId = projectStateSyncAccountId;
+  const generation = projectStateSyncGeneration;
+
+  try {
+    const response = await fetch(`${PROJECT_STATE_API}?since=${projectStateSyncRevision}`, {
+      cache: 'no-store',
+      headers: { 'X-Skip-Login-Prompt': '1' },
+    });
+
+    if (
+      response.status === 401 ||
+      accountId !== projectStateSyncAccountId ||
+      generation !== projectStateSyncGeneration
+    ) {
+      return;
+    }
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+
+    const result = await response.json();
+    if (
+      !result?.success ||
+      accountId !== projectStateSyncAccountId ||
+      generation !== projectStateSyncGeneration
+    ) return;
+
+    const revision = Number.isInteger(result.revision) ? result.revision : projectStateSyncRevision;
+    const state = result.state && typeof result.state === 'object'
+      ? result.state as Record<string, string>
+      : {};
+    const keyRevisions = result.keyRevisions && typeof result.keyRevisions === 'object'
+      ? result.keyRevisions as Record<string, number>
+      : {};
+
+    if (result.reset) {
+      projectStateSyncListeners.forEach((_listeners, stateKey) => {
+        dispatchProjectStateSyncUpdate({
+          key: stateKey,
+          value: typeof state[stateKey] === 'string' ? state[stateKey] : null,
+          revision,
+          keyRevision: Number(keyRevisions[stateKey]) || revision,
+        });
+      });
+    } else {
+      Object.entries(state).forEach(([stateKey, value]) => {
+        if (typeof value !== 'string') return;
+        dispatchProjectStateSyncUpdate({
+          key: stateKey,
+          value,
+          revision,
+          keyRevision: Number(keyRevisions[stateKey]) || revision,
+        });
+      });
+
+      if (Array.isArray(result.deletedKeys)) {
+        result.deletedKeys.forEach((stateKey: unknown) => {
+          if (typeof stateKey !== 'string') return;
+          dispatchProjectStateSyncUpdate({
+            key: stateKey,
+            value: null,
+            revision,
+            keyRevision: Number(keyRevisions[stateKey]) || revision,
+          });
+        });
+      }
+    }
+
+    projectStateSyncRevision = revision;
+  } catch (error) {
+    persistenceDebugLog('[多端同步] 拉取远端变更失败，将自动重试:', error);
+  } finally {
+    if (generation === projectStateSyncGeneration) {
+      projectStateSyncInFlight = false;
+    }
+    if (
+      accountId === projectStateSyncAccountId &&
+      generation === projectStateSyncGeneration
+    ) {
+      scheduleProjectStateSync();
+    }
+  }
+}
+
+function requestImmediateProjectStateSync(): void {
+  if (projectStateSyncTimer) {
+    clearTimeout(projectStateSyncTimer);
+    projectStateSyncTimer = null;
+  }
+  void pollProjectStateChanges();
+}
+
+function ensureProjectStateSyncWindowListeners(): void {
+  if (typeof window === 'undefined' || projectStateSyncWindowListenersReady) return;
+
+  const handleResume = () => requestImmediateProjectStateSync();
+  window.addEventListener('focus', handleResume);
+  window.addEventListener('online', handleResume);
+  document.addEventListener('visibilitychange', handleResume);
+  projectStateSyncWindowListenersReady = true;
+}
+
+function ensureProjectStateSyncChannel(): void {
+  if (typeof window === 'undefined' || projectStateSyncChannel || typeof BroadcastChannel === 'undefined') return;
+
+  projectStateSyncChannel = new BroadcastChannel(PROJECT_SYNC_CHANNEL_NAME);
+  projectStateSyncChannel.addEventListener('message', (event: MessageEvent) => {
+    const message = event.data;
+    if (
+      !message ||
+      message.clientId === getProjectStateSyncClientId() ||
+      message.accountId !== projectStateSyncAccountId ||
+      typeof message.key !== 'string'
+    ) {
+      return;
+    }
+
+    dispatchProjectStateSyncUpdate({
+      key: message.key,
+      value: typeof message.value === 'string' ? message.value : null,
+      revision: Number(message.revision) || projectStateSyncRevision,
+      keyRevision: Number(message.keyRevision) || Number(message.revision) || projectStateSyncRevision,
+    });
+  });
+}
+
+function subscribeProjectStateSync(
+  accountId: string,
+  key: string,
+  listener: ProjectStateSyncListener
+): () => void {
+  if (projectStateSyncAccountId !== accountId) {
+    projectStateSyncAccountId = accountId;
+    projectStateSyncRevision = 0;
+    projectStateSyncGeneration += 1;
+    projectStateSyncInFlight = false;
+  }
+
+  const listeners = projectStateSyncListeners.get(key) || new Set<ProjectStateSyncListener>();
+  listeners.add(listener);
+  projectStateSyncListeners.set(key, listeners);
+
+  ensureProjectStateSyncWindowListeners();
+  ensureProjectStateSyncChannel();
+  scheduleProjectStateSync(0);
+
+  return () => {
+    const currentListeners = projectStateSyncListeners.get(key);
+    currentListeners?.delete(listener);
+    if (currentListeners?.size === 0) {
+      projectStateSyncListeners.delete(key);
+    }
+    if (projectStateSyncListeners.size === 0 && projectStateSyncTimer) {
+      clearTimeout(projectStateSyncTimer);
+      projectStateSyncTimer = null;
+    }
+  };
+}
+
+function publishProjectStateSyncUpdate(
+  accountId: string | null,
+  key: string,
+  value: string,
+  result: { revision?: number; keyRevision?: number }
+): void {
+  if (!accountId || typeof window === 'undefined') return;
+
+  const update: ProjectStateSyncUpdate = {
+    key,
+    value,
+    revision: Number(result.revision) || 0,
+    keyRevision: Number(result.keyRevision) || Number(result.revision) || 0,
+  };
+  projectStateSyncChannel?.postMessage({
+    ...update,
+    accountId,
+    clientId: getProjectStateSyncClientId(),
+  });
+}
+
 let accountIdPromise: Promise<string | null> | null = null;
 
 export function notifyPersistenceAccountChanged(): void {
@@ -239,11 +492,19 @@ function isEmptyValue(value: unknown): boolean {
   return value === null || value === undefined;
 }
 
-function backupStateToServer(key: string, serializedValue: string, options?: { keepalive?: boolean }): void {
-  if (typeof window === 'undefined' || !isStoryboardStateKey(key)) return;
+async function backupStateToServer(
+  key: string,
+  serializedValue: string,
+  options?: { keepalive?: boolean; isCurrent?: () => boolean }
+): Promise<boolean> {
+  if (typeof window === 'undefined' || !isStoryboardStateKey(key)) return false;
 
   try {
-    const body = JSON.stringify({ key, value: serializedValue });
+    const body = JSON.stringify({
+      key,
+      value: serializedValue,
+      clientId: getProjectStateSyncClientId(),
+    });
     const canKeepAlive = !!options?.keepalive && body.length < 60 * 1024;
 
     if (canKeepAlive && navigator.sendBeacon) {
@@ -251,55 +512,87 @@ function backupStateToServer(key: string, serializedValue: string, options?: { k
         PROJECT_STATE_API,
         new Blob([body], { type: 'application/json' })
       );
-      if (sent) return;
+      if (sent) return true;
     }
 
-    void fetch(PROJECT_STATE_API, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Skip-Login-Prompt': '1',
-      },
-      body,
-      keepalive: canKeepAlive,
-    }).then((response) => {
-      if (!response.ok) {
-        console.warn(`[持久化] 本地文件备份失败: ${key}, HTTP ${response.status}`);
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      if (options?.isCurrent && !options.isCurrent()) return false;
+
+      try {
+        const response = await fetch(PROJECT_STATE_API, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Skip-Login-Prompt': '1',
+          },
+          body,
+          keepalive: canKeepAlive,
+        });
+        if (response.ok) {
+          const result = await response.json().catch(() => ({}));
+          publishProjectStateSyncUpdate(
+            window.localStorage.getItem(ACTIVE_ACCOUNT_KEY),
+            key,
+            serializedValue,
+            result
+          );
+          return true;
+        }
+        if (response.status === 401) return false;
+        if (attempt === 2) {
+          console.warn(`[持久化] 本地文件备份失败: ${key}, HTTP ${response.status}`);
+        }
+      } catch (error) {
+        if (attempt === 2) {
+          console.warn(`[持久化] 本地文件备份请求失败: ${key}`, error);
+        }
       }
-    }).catch((error) => {
-      console.warn(`[持久化] 本地文件备份请求失败: ${key}`, error);
-    });
+
+      await new Promise((resolve) => {
+        setTimeout(resolve, Math.min(1000 * (2 ** attempt), PROJECT_SYNC_RETRY_MS));
+      });
+    }
   } catch (error) {
     console.warn(`[持久化] 准备本地文件备份失败: ${key}`, error);
   }
+
+  return false;
 }
 
-async function restoreStateFromServer(key: string): Promise<{ value: string | null; blockedByLogin: boolean }> {
+async function restoreStateFromServer(key: string): Promise<{
+  value: string | null;
+  blockedByLogin: boolean;
+  revision: number;
+  keyRevision: number;
+}> {
   if (typeof window === 'undefined' || !isStoryboardStateKey(key)) {
-    return { value: null, blockedByLogin: false };
+    return { value: null, blockedByLogin: false, revision: 0, keyRevision: 0 };
   }
 
   try {
     const response = await fetch(`${PROJECT_STATE_API}?key=${encodeURIComponent(key)}`, {
       cache: 'no-store',
+      headers: { 'X-Skip-Login-Prompt': '1' },
     });
 
     if (response.status === 401) {
-      return { value: null, blockedByLogin: true };
+      return { value: null, blockedByLogin: true, revision: 0, keyRevision: 0 };
     }
 
     if (!response.ok) {
-      return { value: null, blockedByLogin: false };
+      return { value: null, blockedByLogin: false, revision: 0, keyRevision: 0 };
     }
 
     const data = await response.json();
     return {
       value: data?.success && typeof data.value === 'string' ? data.value : null,
       blockedByLogin: false,
+      revision: Number(data?.revision) || 0,
+      keyRevision: Number(data?.keyRevision) || 0,
     };
   } catch (error) {
     console.warn(`[持久化] 读取本地文件备份失败: ${key}`, error);
-    return { value: null, blockedByLogin: false };
+    return { value: null, blockedByLogin: false, revision: 0, keyRevision: 0 };
   }
 }
 
@@ -366,11 +659,18 @@ export function usePersistentState<T>(
 ): [T, (value: T | ((prev: T) => T)) => void, () => void] {
   // 初始状态始终使用 initialValue，避免 SSR hydration mismatch
   const [state, setState] = useState<T>(initialValue);
+  const initialValueRef = useRef(initialValue);
   const hasHydratedRef = useRef(false);
   const stateRef = useRef(state);
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const saveRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingSaveRef = useRef<T | null>(null);
+  const pendingSaveVersionRef = useRef(0);
   const hasPendingSaveRef = useRef(false);
+  const localMutationVersionRef = useRef(0);
+  const persistedMutationVersionRef = useRef(0);
+  const lastAppliedSerializedRef = useRef<string | null>(null);
+  const retrySaveRef = useRef<(value: T, mutationVersion: number) => void>(() => undefined);
   const accountIdRef = useRef<string | null>(null);
   const scopedKeyRef = useRef(key);
   const [accountScopeVersion, setAccountScopeVersion] = useState(0);
@@ -384,9 +684,20 @@ export function usePersistentState<T>(
         clearTimeout(saveTimerRef.current);
         saveTimerRef.current = null;
       }
+      if (saveRetryTimerRef.current) {
+        clearTimeout(saveRetryTimerRef.current);
+        saveRetryTimerRef.current = null;
+      }
       pendingSaveRef.current = null;
+      pendingSaveVersionRef.current = 0;
       hasPendingSaveRef.current = false;
       hasHydratedRef.current = false;
+      localMutationVersionRef.current = 0;
+      persistedMutationVersionRef.current = 0;
+      lastAppliedSerializedRef.current = null;
+      accountIdRef.current = null;
+      stateRef.current = initialValueRef.current;
+      setState(initialValueRef.current);
       setAccountScopeVersion((version) => version + 1);
     };
 
@@ -431,6 +742,7 @@ export function usePersistentState<T>(
         if (serialized) {
           const decompressed = decompressData(serialized);
           const parsed = JSON.parse(decompressed);
+          lastAppliedSerializedRef.current = serialized;
 
           if (backup) {
             try {
@@ -450,11 +762,12 @@ export function usePersistentState<T>(
               window.localStorage.removeItem(key);
               persistenceDebugLog(`[持久化] 已将旧浏览器缓存迁入当前账号: ${key}`);
             }
-            backupStateToServer(key, item || legacyItem || '');
+            void backupStateToServer(key, item || legacyItem || '');
           }
 
           persistenceDebugLog(`[持久化] 从${backup ? '本地文件备份' : '浏览器'}恢复状态: ${key}`);
           if (!cancelled) {
+            stateRef.current = parsed;
             setState(parsed);
           }
           return;
@@ -467,7 +780,7 @@ export function usePersistentState<T>(
         ) {
           const currentSerialized = compressData(stateRef.current);
           const currentSize = new Blob([currentSerialized]).size;
-          backupStateToServer(key, currentSerialized);
+          void backupStateToServer(key, currentSerialized);
           if (currentSize <= MAX_LOCAL_STORAGE_VALUE_SIZE && checkStorageSpace(currentSize)) {
             window.localStorage.setItem(scopedKey, currentSerialized);
           }
@@ -484,8 +797,10 @@ export function usePersistentState<T>(
           try {
             const decompressed = decompressData(backup);
             const parsed = JSON.parse(decompressed);
+            lastAppliedSerializedRef.current = backup;
             persistenceDebugLog(`[持久化] 浏览器数据异常，已从本地文件备份恢复: ${key}`);
             if (!cancelled) {
+              stateRef.current = parsed;
               setState(parsed);
             }
           } catch (backupError) {
@@ -507,8 +822,96 @@ export function usePersistentState<T>(
     };
   }, [key, accountScopeVersion]);
 
+  // 账号在其他电脑或标签页发生变化时，增量更新当前 Hook 的状态。
+  useEffect(() => {
+    let cancelled = false;
+    let unsubscribe: () => void = () => undefined;
+
+    const subscribe = async () => {
+      const accountId = await resolvePersistenceAccountId();
+      if (!accountId || cancelled) return;
+
+      unsubscribe = subscribeProjectStateSync(accountId, key, (update) => {
+        if (
+          accountIdRef.current !== accountId ||
+          !hasHydratedRef.current ||
+          update.value === lastAppliedSerializedRef.current
+        ) {
+          return;
+        }
+
+        if (update.value === null) {
+          if (saveTimerRef.current) {
+            clearTimeout(saveTimerRef.current);
+            saveTimerRef.current = null;
+          }
+          if (saveRetryTimerRef.current) {
+            clearTimeout(saveRetryTimerRef.current);
+            saveRetryTimerRef.current = null;
+          }
+          pendingSaveRef.current = null;
+          pendingSaveVersionRef.current = 0;
+          hasPendingSaveRef.current = false;
+          localMutationVersionRef.current = 0;
+          persistedMutationVersionRef.current = 0;
+          lastAppliedSerializedRef.current = null;
+          window.localStorage.removeItem(scopedKeyRef.current);
+          stateRef.current = initialValueRef.current;
+          setState(initialValueRef.current);
+          return;
+        }
+
+        const hasUnsavedLocalChange = (
+          hasPendingSaveRef.current ||
+          localMutationVersionRef.current > persistedMutationVersionRef.current
+        );
+        if (hasUnsavedLocalChange) {
+          persistenceDebugLog(`[多端同步] ${key} 存在本机未保存修改，暂不应用远端版本`);
+          return;
+        }
+
+        try {
+          const parsed = JSON.parse(decompressData(update.value)) as T;
+          const serializedSize = new Blob([update.value]).size;
+
+          if (
+            serializedSize <= MAX_LOCAL_STORAGE_VALUE_SIZE &&
+            checkStorageSpace(serializedSize)
+          ) {
+            window.localStorage.setItem(scopedKeyRef.current, update.value);
+          } else {
+            window.localStorage.removeItem(scopedKeyRef.current);
+          }
+
+          lastAppliedSerializedRef.current = update.value;
+          stateRef.current = parsed;
+          setState(parsed);
+          window.dispatchEvent(new CustomEvent('manfei:project-state-synced', {
+            detail: {
+              key,
+              revision: update.revision,
+              keyRevision: update.keyRevision,
+            },
+          }));
+        } catch (error) {
+          console.warn(`[多端同步] 无法解析远端状态: ${key}`, error);
+        }
+      });
+    };
+
+    void subscribe();
+    return () => {
+      cancelled = true;
+      unsubscribe();
+    };
+  }, [key, accountScopeVersion]);
+
   // 保存到 localStorage，并同步写入项目本地文件备份
-  const saveToStorage = useCallback((value: T, options?: { keepalive?: boolean }) => {
+  const saveToStorage = useCallback((
+    value: T,
+    options?: { keepalive?: boolean },
+    mutationVersion = localMutationVersionRef.current
+  ) => {
     if (typeof window === 'undefined') return;
 
     // 🛡️ 防误写保护 1：hydration 完成前禁止保存
@@ -553,7 +956,38 @@ export function usePersistentState<T>(
       const serialized = compressData(value);
       const size = new Blob([serialized]).size;
 
-      backupStateToServer(key, serialized, options);
+      lastAppliedSerializedRef.current = serialized;
+      void backupStateToServer(key, serialized, {
+        ...options,
+        isCurrent: () => (
+          !!options?.keepalive ||
+          mutationVersion === localMutationVersionRef.current
+        ),
+      }).then((saved) => {
+        if (saved) {
+          persistedMutationVersionRef.current = Math.max(
+            persistedMutationVersionRef.current,
+            mutationVersion
+          );
+          if (saveRetryTimerRef.current) {
+            clearTimeout(saveRetryTimerRef.current);
+            saveRetryTimerRef.current = null;
+          }
+          return;
+        }
+
+        if (
+          accountIdRef.current &&
+          mutationVersion === localMutationVersionRef.current &&
+          !hasPendingSaveRef.current &&
+          !saveRetryTimerRef.current
+        ) {
+          saveRetryTimerRef.current = setTimeout(() => {
+            saveRetryTimerRef.current = null;
+            retrySaveRef.current(stateRef.current, localMutationVersionRef.current);
+          }, PROJECT_SYNC_RETRY_MS);
+        }
+      });
 
       // 大状态只写入项目本地文件备份，避免浏览器 localStorage 5MB 配额被撑满。
       if (size > MAX_LOCAL_STORAGE_VALUE_SIZE || !checkStorageSpace(size)) {
@@ -573,8 +1007,13 @@ export function usePersistentState<T>(
     }
   }, [key]);
 
-  const scheduleSaveToStorage = useCallback((value: T) => {
+  retrySaveRef.current = (value: T, mutationVersion: number) => {
+    saveToStorage(value, undefined, mutationVersion);
+  };
+
+  const scheduleSaveToStorage = useCallback((value: T, mutationVersion: number) => {
     pendingSaveRef.current = value;
+    pendingSaveVersionRef.current = mutationVersion;
     hasPendingSaveRef.current = true;
 
     if (saveTimerRef.current) {
@@ -584,26 +1023,32 @@ export function usePersistentState<T>(
     saveTimerRef.current = setTimeout(() => {
       saveTimerRef.current = null;
       const pendingValue = pendingSaveRef.current;
+      const pendingVersion = pendingSaveVersionRef.current;
       pendingSaveRef.current = null;
+      pendingSaveVersionRef.current = 0;
       const hasPendingValue = hasPendingSaveRef.current;
       hasPendingSaveRef.current = false;
       if (hasPendingValue) {
-        saveToStorage(pendingValue as T);
+        saveToStorage(pendingValue as T, undefined, pendingVersion);
       }
     }, SAVE_DEBOUNCE_MS);
   }, [saveToStorage]);
 
   // 更新状态并保存
   const setValue = useCallback((value: T | ((prev: T) => T)) => {
+    const mutationVersion = localMutationVersionRef.current + 1;
+    localMutationVersionRef.current = mutationVersion;
     if (value instanceof Function) {
       setState((prev) => {
         const newValue = value(prev);
-        scheduleSaveToStorage(newValue);
+        stateRef.current = newValue;
+        scheduleSaveToStorage(newValue, mutationVersion);
         return newValue;
       });
     } else {
+      stateRef.current = value;
       setState(value);
-      scheduleSaveToStorage(value);
+      scheduleSaveToStorage(value, mutationVersion);
     }
   }, [scheduleSaveToStorage]);
 
@@ -616,10 +1061,20 @@ export function usePersistentState<T>(
         clearTimeout(saveTimerRef.current);
         saveTimerRef.current = null;
       }
+      if (saveRetryTimerRef.current) {
+        clearTimeout(saveRetryTimerRef.current);
+        saveRetryTimerRef.current = null;
+      }
       pendingSaveRef.current = null;
+      pendingSaveVersionRef.current = 0;
       hasPendingSaveRef.current = false;
+      localMutationVersionRef.current = 0;
+      persistedMutationVersionRef.current = 0;
+      lastAppliedSerializedRef.current = null;
       window.localStorage.removeItem(scopedKeyRef.current);
       deleteStateBackup(key);
+      stateRef.current = initialValueRef.current;
+      setState(initialValueRef.current);
       persistenceDebugLog(`[持久化] 清除状态: ${key}`);
     } catch (error) {
       console.error(`[持久化] 清除失败: ${key}`, error);
@@ -634,9 +1089,14 @@ export function usePersistentState<T>(
         saveTimerRef.current = null;
       }
       pendingSaveRef.current = null;
+      pendingSaveVersionRef.current = 0;
       hasPendingSaveRef.current = false;
       // 使用 ref 获取当前最新 state，防止因闭包捕获陈旧值
-      saveToStorage(stateRef.current, { keepalive: true });
+      saveToStorage(
+        stateRef.current,
+        { keepalive: true },
+        localMutationVersionRef.current
+      );
     };
 
     window.addEventListener('beforeunload', handleBeforeUnload);
@@ -711,7 +1171,7 @@ export function usePersistentStateManager() {
         const serialized = typeof value === 'string' ? value : compressData(value);
         const accountId = window.localStorage.getItem(ACTIVE_ACCOUNT_KEY);
         window.localStorage.setItem(getScopedStorageKey(key, accountId), serialized);
-        backupStateToServer(key, serialized);
+        void backupStateToServer(key, serialized);
       }
     });
     console.log(`[持久化] 已导入 ${Object.keys(data).length} 项状态`);

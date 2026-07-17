@@ -127,7 +127,10 @@ export function CreationPointsWallet() {
   const loadWallet = useCallback(async (quiet = false) => {
     if (!quiet) setLoading(true);
     try {
-      const response = await fetch('/api/creation-points', { cache: 'no-store' });
+      const response = await fetch('/api/creation-points', {
+        cache: 'no-store',
+        headers: { 'X-Skip-Login-Prompt': '1' },
+      });
       const result = await response.json();
       if (!response.ok || !result.success) {
         throw new Error(result.error || '读取创作点失败');
@@ -143,10 +146,21 @@ export function CreationPointsWallet() {
 
   useEffect(() => {
     void loadWallet();
-    const timer = window.setInterval(() => {
+    const refreshWallet = () => {
       if (!document.hidden) void loadWallet(true);
-    }, 15_000);
-    return () => window.clearInterval(timer);
+    };
+    const timer = window.setInterval(() => {
+      refreshWallet();
+    }, 3000);
+    window.addEventListener('focus', refreshWallet);
+    window.addEventListener('online', refreshWallet);
+    document.addEventListener('visibilitychange', refreshWallet);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener('focus', refreshWallet);
+      window.removeEventListener('online', refreshWallet);
+      document.removeEventListener('visibilitychange', refreshWallet);
+    };
   }, [loadWallet]);
 
   useEffect(() => {
