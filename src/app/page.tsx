@@ -1536,8 +1536,10 @@ function findCharacterLookForShot(character: Character, shotCharacter: Shot['cha
 const MAX_IMAGES_PER_ASSET = 3;
 // 后台图片任务默认最多等待 10 分钟；前端需覆盖完整后台等待窗口，避免后台已保存、页面先断开。
 const CHARACTER_IMAGE_REQUEST_TIMEOUT_MS = 660_000;
-const PAID_ACTION_AUTH_CACHE_MS = 15_000;
-const PAID_ACTION_AUTH_TIMEOUT_MS = 5_000;
+// Paid API routes perform their own login checks. Keep the client-side preflight
+// cached so long-running image batches cannot starve it behind browser connections.
+const PAID_ACTION_AUTH_CACHE_MS = 30 * 60_000;
+const PAID_ACTION_AUTH_TIMEOUT_MS = 8_000;
 const ASSET_RECOVERY_SYNC_DELAYS_MS = [0, 15_000, 60_000, 180_000, 360_000, 660_000] as const;
 const BATCH_ASSET_IMAGE_CONCURRENCY = 10;
 const INITIAL_BATCH_ASSET_GENERATION_HISTORY = {
@@ -1718,25 +1720,38 @@ export default function StoryboardGenerator() {
       try {
         const response = await fetch('/api/auth/session', {
           cache: 'no-store',
+          credentials: 'same-origin',
+          headers: { 'X-Skip-Login-Prompt': '1' },
           signal: controller.signal,
         });
-        const result = await response.json();
-        if (!response.ok || !result?.authenticated || !result?.account?.id) {
+        const result = await response.json().catch(() => null);
+        const explicitlyLoggedOut =
+          response.status === 401 ||
+          (response.ok && result?.authenticated === false);
+
+        if (explicitlyLoggedOut) {
           paidActionAuthCacheRef.current = null;
           showLoginRequired(LOGIN_REQUIRED_PROMPT);
           return false;
         }
+
+        if (!response.ok || !result?.authenticated || !result?.account?.id) {
+          if (cachedAuth?.accountId) return true;
+          toast.error('网络繁忙，暂时无法确认登录状态，请稍后重试');
+          return false;
+        }
+
         paidActionAuthCacheRef.current = {
           accountId: result.account.id,
           checkedAt: Date.now(),
         };
         return true;
       } catch (error) {
-        paidActionAuthCacheRef.current = null;
+        if (cachedAuth?.accountId) return true;
         const timedOut = error instanceof DOMException && error.name === 'AbortError';
-        showLoginRequired(timedOut
-          ? '登录状态校验超时，请稍后重试。新账号首次登录赠送 500 创作点。'
-          : '暂时无法确认登录状态，请先登录账号后再重试。新账号首次登录赠送 500 创作点。');
+        toast.error(timedOut
+          ? '网络繁忙，登录状态校验排队超时，请稍后重试'
+          : '网络连接异常，暂时无法确认登录状态，请稍后重试');
         return false;
       } finally {
         window.clearTimeout(timeout);
@@ -8313,6 +8328,7 @@ export default function StoryboardGenerator() {
       silent?: boolean;
       tempImageId?: string;
       skipPlaceholder?: boolean;
+      skipAuthCheck?: boolean;
       generatingStatus?: string;
       referenceImageUrl?: string;
       onSuccess?: (image: AssetSingleImage) => void;
@@ -8333,7 +8349,7 @@ export default function StoryboardGenerator() {
       if (!options?.silent) setAssetImageLimitNotice({ type, name: data.name });
       return false;
     }
-    if (!(await requireLoginBeforePaidAction())) return false;
+    if (!options?.skipAuthCheck && !(await requireLoginBeforePaidAction())) return false;
 
     const referenceType: 'scene' | 'prop' | null = type === 'scene' ? 'scene' : type === 'prop' ? 'prop' : null;
     const referenceAssetName = type === 'scene' && typeof data.referenceSceneName === 'string'
@@ -8737,6 +8753,7 @@ export default function StoryboardGenerator() {
             silent: true,
             tempImageId,
             skipPlaceholder: true,
+            skipAuthCheck: true,
             referenceImageUrl: referenceImageUrl || undefined,
             generatingStatus: referenceImageUrl
               ? `正在参考「${referenceAssetName}」进行图生图`
