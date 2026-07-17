@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Check,
+  ChevronDown,
   Library,
   Link2,
   Loader2,
@@ -26,6 +27,7 @@ import {
 } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { OnDemandCollection } from '@/components/on-demand-collection';
 import {
   Select,
   SelectContent,
@@ -33,10 +35,11 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
-import type {
-  CharacterVoiceExtraction,
-  CharacterVoiceVariant,
-  VoiceLibraryItem,
+import {
+  MIN_DIALOGUE_LINES_FOR_VOICE_PROFILE,
+  type CharacterVoiceExtraction,
+  type CharacterVoiceVariant,
+  type VoiceLibraryItem,
 } from '@/lib/character-voice';
 
 type ExtractionStatus = 'pending' | 'loading' | 'success' | 'error' | 'batch_confirm';
@@ -145,6 +148,7 @@ export function CharacterVoiceLibrary({
   onDeleteVoice,
 }: CharacterVoiceLibraryProps) {
   const [libraryOpen, setLibraryOpen] = useState(false);
+  const [profilesExpanded, setProfilesExpanded] = useState(false);
   const [draftSelections, setDraftSelections] = useState<Record<string, string>>({});
   const [voicePickerTarget, setVoicePickerTarget] = useState<VoicePickerTarget | null>(null);
   const [pickerLanguage, setPickerLanguage] = useState('中文');
@@ -409,7 +413,7 @@ export function CharacterVoiceLibrary({
               )}
             </CardTitle>
             <CardDescription className="mt-1 max-w-3xl text-[11px] leading-4">
-              同一人物的不同时期和变身音色归在人物下；系统播报与第三方台词也会独立入库并参与视频音色绑定。
+              全剧累计至少 {MIN_DIALOGUE_LINES_FOR_VOICE_PROFILE} 句台词才建立音色档案；同一人物的不同时期归在人物下，系统与第三方声音遵循同一门槛。
             </CardDescription>
           </div>
           <div className="flex shrink-0 flex-wrap gap-1.5">
@@ -624,7 +628,7 @@ export function CharacterVoiceLibrary({
         {status === 'loading' && !data && (
           <div className="flex min-h-20 items-center justify-center gap-2 rounded-md border border-amber-400/20 bg-amber-500/[0.04] text-xs text-amber-100/80">
             <Loader2 className="h-4 w-4 animate-spin" />
-            正在通读执行剧本，识别所有有台词人物及其时期/变身音色...
+            正在通读执行剧本，统计累计至少 {MIN_DIALOGUE_LINES_FOR_VOICE_PROFILE} 句台词的发声主体及其时期/变身音色...
           </div>
         )}
 
@@ -636,7 +640,7 @@ export function CharacterVoiceLibrary({
 
         {!data && status !== 'loading' && status !== 'error' && (
           <div className="rounded-md border border-dashed border-amber-400/25 p-4 text-center text-xs text-muted-foreground">
-            尚未建立人物音色库。提取后，有台词的人物会按时期和特殊状态归类。
+            尚未建立人物音色库。提取后，累计至少 {MIN_DIALOGUE_LINES_FOR_VOICE_PROFILE} 句台词的发声主体会按时期和特殊状态归类。
           </div>
         )}
 
@@ -649,8 +653,18 @@ export function CharacterVoiceLibrary({
               </span>
             </div>
 
-            {data.profiles.map(profile => (
-              <section key={profile.id} className="border-t border-amber-400/15 pt-3 first:border-t-0 first:pt-0">
+            <OnDemandCollection
+              items={data.profiles}
+              expanded={profilesExpanded}
+              collapsedCount={3}
+              batchSize={6}
+              className="space-y-3 overflow-x-hidden overflow-y-auto pr-1 transition-all duration-300"
+              collapsedClassName="max-h-[460px]"
+              expandedClassName="max-h-[76vh]"
+              itemClassName="[content-visibility:auto] [contain-intrinsic-size:280px]"
+              getKey={profile => profile.id}
+              renderItem={profile => (
+                <section className="border-t border-amber-400/15 pt-3 first:border-t-0 first:pt-0">
                 <div className="mb-1.5 flex flex-wrap items-center gap-1.5">
                   <h3 className="text-sm font-semibold text-amber-100">{profile.characterName}</h3>
                   {profile.speakerCategory === 'system' && (
@@ -750,8 +764,23 @@ export function CharacterVoiceLibrary({
                     );
                   })}
                 </div>
-              </section>
-            ))}
+                </section>
+              )}
+            />
+
+            <div className="border-t border-amber-400/15 pt-2 text-center">
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="h-7 px-3 text-[11px] text-muted-foreground hover:text-amber-100"
+                aria-expanded={profilesExpanded}
+                onClick={() => setProfilesExpanded(value => !value)}
+              >
+                {profilesExpanded ? '收起' : '展开全部'} {data.totalSpeakers} 个人物 / {variantCount} 个音色状态
+                <ChevronDown className={`ml-1 h-3 w-3 transition-transform ${profilesExpanded ? 'rotate-180' : ''}`} />
+              </Button>
+            </div>
           </div>
         )}
       </CardContent>

@@ -16,6 +16,11 @@ import {
   stripBodyDetailsFromAppearance,
   type CharacterBodyProfile,
 } from '@/lib/character-body-profile';
+import {
+  inferCharacterEntityKind,
+  inferExplicitGenderFromName,
+  resolveCharacterGenderByPolicy,
+} from '@/lib/character-semantic-rules';
 
 export const maxDuration = 600;
 
@@ -48,7 +53,7 @@ function buildCreationBibleInstruction(creationBible?: CreationBible): string {
   if (subjectRegion === '国内') {
     lines.push('创作题材：国内。人物服装、妆发、身份关系、生活细节和社会语境应符合中国本土语境。');
   } else if (subjectRegion === '国外') {
-    lines.push('创作题材：国外。人物服装、妆发、生活方式、职业细节和文化语境应符合海外/国际化语境。');
+    lines.push('创作题材：国外。人物服装、妆发、生活方式、职业细节和文化语境应符合海外/国际化语境；人类角色在剧本未明确族裔时，默认采用非东亚的欧美/国际化外貌特征，不得惯性生成中国或东亚面孔。剧本明确族裔时以剧本为准。');
   }
   if (creationBackground === '近代') {
     lines.push('创作背景：近代。人物的服装剪裁、妆发、首饰、鞋履、职业装束和不同阶段造型应符合近代年代语境。');
@@ -379,36 +384,19 @@ function buildLifecycleContextDigest(content: string): string {
   return evidence.join('\n\n');
 }
 
-function inferGenderFromName(name: string): '' | '男' | '女' {
-  if (!name) return '';
-  if (/母|妈|妈妈|姐姐|妹妹|阿姨|嫂|妻|夫人|太太|小姐|姑娘|女孩|女儿|新娘|老板娘/.test(name)) return '女';
-  if (/父|爸|爸爸|叔|伯|哥|哥哥|爷|爷爷|儿子|先生|少爷|老爷|公子|男孩/.test(name)) return '男';
-  if (/沈念|明珠|巧云|春梅|桂芳|晓晓|梦瑶|小芳|小美/.test(name)) return '女';
-  if (/延之|方宇|顾父|王叔|老陈|张村长/.test(name)) return '男';
-  if (/[婷娜娟芳梅兰雪霞莉丽敏婧妍媛瑶琳倩萍慧颖]$/.test(name)) return '女';
-  if (/[伟强刚勇军杰磊鹏涛斌龙峰]$/.test(name)) return '男';
-  return '';
-}
-
 function inferGenderFromEvidence(name: string, content: string): '' | '男' | '女' {
   const evidence = collectCharacterEvidence(content, name, 220, 10).join(' ');
   if (!evidence) return '';
 
   const femalePatterns = [
-    /她/g,
-    /女主|女配|女二|女反派|女儿|养女|亲生女|女孩|女生|女人|姑娘|小姐|大小姐|千金|夫人|太太|母亲|妈妈|姐姐|妹妹|妻子|老婆|未婚妻|新娘|闺蜜|姐妹|母女|父女|姐弟/g,
-    /叫她|喊她|问她|对她说|拉着她|抱住她|保护她|她的|嫁给|娶她/g,
     new RegExp(`${escapeRegExp(name)}[（(][^）)]*(女|养女|女儿|姑娘|小姐|大小姐|千金|太太|夫人|妻子|未婚妻|新娘|姐姐|妹妹)`, 'g'),
-    new RegExp(`${escapeRegExp(name)}[^。！？\\n]{0,40}(她|女儿|养女|小姐|姑娘|妻子|未婚妻|母亲|妈妈|姐姐|妹妹|新娘|太太|夫人)`, 'g'),
-    new RegExp(`(她|女儿|养女|小姐|姑娘|妻子|未婚妻|母亲|妈妈|姐姐|妹妹|新娘|太太|夫人)[^。！？\\n]{0,40}${escapeRegExp(name)}`, 'g'),
+    new RegExp(`${escapeRegExp(name)}[^。！？：:\\n]{0,32}(她|女性|女儿|养女|小姐|姑娘|妻子|未婚妻|母亲|妈妈|姐姐|妹妹|新娘|太太|夫人)`, 'g'),
+    new RegExp(`(她|女性|女儿|养女|小姐|姑娘|妻子|未婚妻|母亲|妈妈|姐姐|妹妹|新娘|太太|夫人)[^。！？：:\\n]{0,32}${escapeRegExp(name)}`, 'g'),
   ];
   const malePatterns = [
-    /他/g,
-    /男主|男配|男二|男反派|儿子|养子|亲生子|男孩|男生|男人|先生|少爷|老爷|公子|父亲|爸爸|哥哥|弟弟|丈夫|老公|未婚夫|新郎|兄弟|父子|母子|兄妹/g,
-    /叫他|喊他|问他|对他说|拉着他|抱住他|保护他|他的|他娶|他要娶/g,
     new RegExp(`${escapeRegExp(name)}[（(][^）)]*(男|养子|儿子|先生|少爷|老爷|公子|丈夫|未婚夫|新郎|父亲|爸爸|哥哥|弟弟)`, 'g'),
-    new RegExp(`${escapeRegExp(name)}[^。！？\\n]{0,40}(他|儿子|养子|先生|少爷|丈夫|未婚夫|父亲|爸爸|哥哥|弟弟|新郎)`, 'g'),
-    new RegExp(`(他|儿子|养子|先生|少爷|丈夫|未婚夫|父亲|爸爸|哥哥|弟弟|新郎)[^。！？\\n]{0,40}${escapeRegExp(name)}`, 'g'),
+    new RegExp(`${escapeRegExp(name)}[^。！？：:\\n]{0,32}(他|男性|儿子|养子|先生|少爷|丈夫|未婚夫|父亲|爸爸|哥哥|弟弟|新郎)`, 'g'),
+    new RegExp(`(他|男性|儿子|养子|先生|少爷|丈夫|未婚夫|父亲|爸爸|哥哥|弟弟|新郎)[^。！？：:\\n]{0,32}${escapeRegExp(name)}`, 'g'),
   ];
 
   const score = (patterns: RegExp[]) => patterns.reduce((sum, pattern) => {
@@ -423,18 +411,16 @@ function inferGenderFromEvidence(name: string, content: string): '' | '男' | '�
   return '';
 }
 
-function resolveCharacterGender(name: string, content: string, modelGender: any): '男' | '女' | '待定' {
-  const normalizedModelGender = normalizeGender(modelGender);
+function resolveCharacterGender(name: string, content: string, modelGender: any, character?: Record<string, any>): '男' | '女' | '待定' {
+  const explicitNameGender = inferExplicitGenderFromName(name);
+  if (explicitNameGender) return explicitNameGender;
   const evidenceGender = inferGenderFromEvidence(name, content);
-  const nameHintGender = inferGenderFromName(name);
-
-  if (evidenceGender) return evidenceGender;
-  if (normalizedModelGender && normalizedModelGender !== '待定') {
-    if (nameHintGender && nameHintGender !== normalizedModelGender) return nameHintGender;
-    return normalizedModelGender;
-  }
-  if (nameHintGender) return nameHintGender;
-  return '待定';
+  return resolveCharacterGenderByPolicy({
+    name,
+    currentGender: modelGender,
+    evidenceGender,
+    character: character || { name },
+  });
 }
 
 function textContradictsGender(value: any, gender: '男' | '女' | '待定'): boolean {
@@ -506,9 +492,9 @@ ${buildCreationBibleInstruction(creationBible)}
 11. 除非剧情是非常连续的接戏（同一天、同一空间、时间跨度很短），否则人物进入明显不同场景时可以合理换装：晚上在家可穿家居服/睡衣，工作场合可穿职场装，游玩场合可穿休闲/出游服，宴会/婚礼/葬礼等节点要有对应造型
 12. 描述要贴合创作圣经风格，不要在仿真人模式下卡通化或过度夸张
 13. role 只能使用：主角、主要配角、次要配角、龙套、路人、背景人物
-14. gender 只能使用：男、女、待定。必须根据参考文本中的称谓、代词、亲属关系、括号身份说明判断；不要因为示例、职业或默认习惯把未知人物写成男性。
-15. 如果人物上下文中出现“她、女儿、养女、小姐、夫人、母亲、姐姐、妹妹、妻子、姑娘”等女性证据，gender 必须为“女”；出现“他、儿子、先生、父亲、哥哥、弟弟、丈夫”等男性证据，gender 才写“男”；没有明确证据时写“待定”。
-16. 性别判断优先级：先看别人对该人物的称呼和亲属/婚恋关系，其次看角色间互动方式里的代词和行为关系，最后才参考姓名气质；不能只因为职业、地位、年龄或模板示例判断性别。
+14. gender 只能使用：男、女、待定。角色名或称谓本身明确写有“男/女”（如贵族男、贵族女、男仆、女仆、看守男）时，这是最高优先级证据，任何附近其他人物的代词都不得覆盖。
+15. 其余人物再根据与该人物直接绑定的称谓、代词、亲属关系、括号身份说明和角色互动判断；不得统计同一场景中其他人物的“他/她”来替代该人物性别。确实没有证据时按产品制作规则写“男”，不要随机写“女”。
+16. 性别判断优先级固定为：角色名中的明确性别 > 与人物直接绑定的剧本证据 > 模型综合判断 > 无法判断时默认男。女性护卫、女骑士等只有剧本或名称明确写出女性时才为女。
 17. 不要把青年、中年、老年、受伤、怀孕或变身状态拆成新人物；它们必须放在同一人物的 looks 数组中
 18. 不要机械组合“时期×服装×状态”生成不存在的造型，只提取剧本明确出现、强烈暗示或对画面连续性有实际影响的变化
 19. 连续场次中时期、服装和身体状态没有明显改变时必须合并为同一造型，避免重复
@@ -517,6 +503,7 @@ ${buildCreationBibleInstruction(creationBible)}
 22. 每个 looks 项都必须写入 bodyProfile：默认继承人物身体档案；如该时期或状态改变了体态，在 bodyChanges 中只记录当前造型相对基础身体档案的变化
 23. 必须先逐条审计“全剧本生命周期重点段落”。闪回中出现的小名、乳名、“小+姓名”、幼年称呼、女孩/男孩或亲属称呼，要结合闪回前后的转场、关系和事件判断对应人物；例如主线人物在闪回中以幼年身份出现，必须在同一人物的 looks 中新增“年龄时期”造型，不能因闪回段未重复写全名而漏掉
 24. 每个明确的童年/幼年/少年/青年/中年/老年或多年以前/以后状态，都必须在 sourceEvidence 与 episodeNumbers 中保留证据；只有确实属于同一时期且视觉没有变化的段落才能合并
+25. 必须区分人类与非人角色。地狱犬、狼人、兽人、魔兽等应保留动物/兽类物种特征；不能套用普通人类脸型、皮肤、妆容和人类发型模板。动物毛发必须顺应动物头骨与身体结构，禁止生成女性长发、披发、马尾或假发。
 
 每个人物包含：
 - id: 序号
@@ -577,7 +564,7 @@ ${buildCreationBibleInstruction(creationBible)}
       "name": "人物名称1",
       "role": "主角",
       "age": "25岁",
-      "gender": "女",
+      "gender": "男",
       "personality": ["勇敢", "聪明", "正义感强"],
       "appearance": "只描述正脸近景可见的发型、脸型、五官、肤色、皮肤质感和神态（80-150字）",
       "bodyProfile": {
@@ -589,10 +576,10 @@ ${buildCreationBibleInstruction(creationBible)}
         "posture": "站姿挺拔但放松"
       },
       "faceFeatures": {
-        "faceShape": "椭圆脸",
-        "eyes": "双眼皮大眼睛",
+        "faceShape": "轮廓清晰的椭圆脸",
+        "eyes": "眼神专注，眉眼有辨识度",
         "nose": "高鼻梁",
-        "mouth": "樱桃小嘴",
+        "mouth": "唇线清楚，表情自然",
         "skinTone": "白皙"
       },
       "looks": [
@@ -617,7 +604,7 @@ ${buildCreationBibleInstruction(creationBible)}
           "costume": "白色衬衫搭配黑色西装",
           "hairstyle": "利落短发",
           "accessories": ["银色手表"],
-          "makeup": "淡妆",
+          "makeup": "自然无妆或轻微修饰",
           "mood": "自然",
           "episodeNumbers": [1, 2],
           "sceneNames": ["公司办公室"],
@@ -771,7 +758,9 @@ ${buildCreationBibleInstruction(creationBible)}
     
     // 使用 characterNames 的索引来生成全局唯一的 id
     const globalId = startId + idx + 1;
-    const defaultGender = resolveCharacterGender(charName, content, matchedChar?.gender);
+    const semanticCharacter = { ...(matchedChar || {}), name: charName };
+    const isAnimalCreature = inferCharacterEntityKind(semanticCharacter) === 'animal-creature';
+    const defaultGender = resolveCharacterGender(charName, content, matchedChar?.gender, semanticCharacter);
     const defaultAge = matchedChar?.age || (/村长|王叔|老陈|老板|刘总|孙总|钱老板/.test(charName) ? '45岁左右' : /李春梅|赵桂芳/.test(charName) ? '中年' : /张敏|李晓晓|小助理/.test(charName) ? '25岁左右' : /方宇/.test(charName) ? '28岁左右' : '30岁左右');
     const defaultPersonality = /方宇/.test(charName)
       ? ['冷静克制', '证据意识强', '外柔内刚']
@@ -785,6 +774,15 @@ ${buildCreationBibleInstruction(creationBible)}
     
     // 生成默认的脸型特征
     const generateDefaultFaceFeatures = (char: any) => {
+      if (isAnimalCreature) {
+        return {
+          faceShape: '符合物种的动物头骨与吻部轮廓，动物特征占主导',
+          eyes: '符合剧情设定的兽类眼睛，目光与情绪清晰',
+          nose: '动物鼻头与吻部结构清楚，不使用人类鼻型',
+          mouth: '兽类口吻与牙齿结构，不使用人类唇形',
+          skinTone: '符合物种设定的皮毛、鳞片或兽类表面材质',
+        };
+      }
       const gender = normalizeGender(char.gender) || defaultGender;
       return {
         faceShape: gender === '女' ? '鹅蛋脸或柔和椭圆脸，轮廓自然清晰' : gender === '男' ? '椭圆脸或方中带圆的脸型，轮廓稳定' : '自然写实脸型，轮廓清晰稳定',
@@ -796,6 +794,19 @@ ${buildCreationBibleInstruction(creationBible)}
     };
 
     const generateDefaultBodyProfile = (char: any): CharacterBodyProfile => {
+      if (isAnimalCreature) {
+        return mergeCharacterBodyProfiles(
+          normalizeCharacterBodyProfile(char.bodyProfile, char.appearance),
+          {
+            height: '',
+            weight: '',
+            bodyType: '动物特征占主导的奇幻生物体型，解剖结构符合剧本物种设定',
+            shoulderWaist: '肩背、胸腔与腰腹结构符合动物或兽类解剖',
+            limbProportions: '四肢、爪、尾巴与头身比例符合物种设定',
+            posture: '按剧本保持四足或明确的人形兽类姿态',
+          }
+        );
+      }
       const gender = normalizeGender(char.gender) || defaultGender;
       const defaults: CharacterBodyProfile = {
         height: '',
@@ -824,10 +835,10 @@ ${buildCreationBibleInstruction(creationBible)}
         scene: '默认造型',
         stage: '主要叙事时期',
         description: `${char.name}的基础出场造型，保持脸型和五官一致，服装根据人物身份与剧情阶段呈现${styleLabel}。`,
-        costume: char.costume && char.costume.length > 0 && !textContradictsGender(char.costume[0], gender) ? char.costume[0] : (gender === '女' ? '简洁生活装或职业装，颜色自然，方便在不同场景延展' : gender === '男' ? '简洁日常装或商务装，剪裁利落，贴合人物身份' : '简洁写实服装，颜色自然，贴合人物身份'),
-        hairstyle: gender === '女' ? '自然披发、低马尾或利落短发，根据场景微调' : gender === '男' ? '干净短发或自然整理发型' : '自然整理发型，贴合人物身份',
+        costume: isAnimalCreature ? '无；除非剧本明确要求护甲、项圈或装饰' : char.costume && char.costume.length > 0 && !textContradictsGender(char.costume[0], gender) ? char.costume[0] : (gender === '女' ? '简洁生活装或职业装，颜色自然，方便在不同场景延展' : gender === '男' ? '简洁日常装或商务装，剪裁利落，贴合人物身份' : '简洁写实服装，颜色自然，贴合人物身份'),
+        hairstyle: isAnimalCreature ? '毛发顺应动物头骨与身体结构生长，不使用任何人类发型' : gender === '女' ? '自然披发、低马尾或利落短发，根据场景微调' : gender === '男' ? '干净短发或自然整理发型' : '自然整理发型，贴合人物身份',
         accessories: [],
-        makeup: gender === '女' ? '自然淡妆' : gender === '男' ? '自然无妆或轻微修饰' : '自然妆造',
+        makeup: isAnimalCreature ? '无；保持动物面部与皮毛自然材质' : gender === '女' ? '自然淡妆' : gender === '男' ? '自然无妆或轻微修饰' : '自然妆造',
         mood: '自然',
         changeType: '基础造型',
         ageStage: char.age || defaultAge || '主要时期',
@@ -854,6 +865,12 @@ ${buildCreationBibleInstruction(creationBible)}
         : defaultPersonality[0];
       const genderRoleText = genderText === '待定' ? '角色' : `${genderText}性角色`;
       const styleLabel = getCreationStyleLabel(creationBible);
+      if (isAnimalCreature) {
+        return normalizeAppearanceDescription(
+          char.appearance,
+          `${char.name}是动物特征占主导的奇幻生物。头骨、吻部、兽耳、眼睛、鼻头、牙齿和皮毛符合剧本物种设定，毛发顺应动物头骨与身体结构生长，不出现人类皮肤、人类五官比例、女性长发、披发、马尾或其他人类发型。`
+        );
+      }
       const facialText = genderText === '女'
         ? '发型轮廓自然清晰，面部线条柔和但有辨识度，眉眼灵动，鼻唇比例协调'
         : genderText === '男'
@@ -1045,11 +1062,12 @@ ${buildCreationBibleInstruction(creationBible)}
 6. faceFeatures 必须是固定脸型特征，包括脸型、眼睛、鼻子、嘴巴、肤色，后续所有造型都保持一致
 7. looks 必须建立同一人物的视觉变化时间线，识别服装造型、童年/青年/中年/老年等年龄时期、受伤/怀孕/病弱等身体状态，以及觉醒/入魔/变身等特殊形态
 8. background 写背景故事，keyRelationships 写人物关系，arc 写人物弧光，keyScenes 写关键场景，props 写标志性道具
-9. gender 只能使用：男、女、待定。必须根据文本中的称谓、代词、亲属关系、括号身份说明、角色互动方式判断；不要默认男性，不确定就写“待定”。
-10. 性别判断优先级：先看别人对该人物的称呼和亲属/婚恋关系，其次看角色间互动方式里的代词和行为关系，最后才参考姓名气质。
+9. gender 只能使用：男、女、待定。角色名或称谓本身明确含有“男/女”时优先级最高；其余再根据与该人物直接绑定的称谓、代词、亲属关系、括号身份说明和互动判断，不能拿同场其他人物的代词替代。仍无法判断时按产品规则写“男”。
+10. 性别判断优先级固定为：角色名中的明确性别 > 与人物直接绑定的剧本证据 > 模型综合判断 > 无法判断时默认男。女性护卫、女骑士等必须有明确女性证据。
 11. 同一人物的不同时期和状态不能拆成新人物；连续场次没有明显视觉变化时合并，禁止机械组合不存在的造型
 12. 每个人物必须有一个主要时期正常状态的基础造型；其他造型填写 referenceLookId，按“正脸→基础造型→年龄时期→服装造型→身体状态→特殊形态”建立依赖
 13. 每个 looks 项必须继承人物 bodyProfile，并用 bodyChanges 单独说明当前时期、伤病、怀孕或变身造成的体态变化；没有变化则留空
+14. 地狱犬、狼人、兽人、魔兽等非人角色必须保留动物/兽类解剖与物种特征，禁止套用普通人类脸型、皮肤、妆容或人类长发模板
 
 请以 JSON 格式返回结果，格式如下：
 {
@@ -1060,7 +1078,7 @@ ${buildCreationBibleInstruction(creationBible)}
       "name": "人物名称",
       "role": "主角/主要配角/次要配角/龙套/路人/背景人物",
       "age": "年龄",
-      "gender": "女",
+      "gender": "男",
       "personality": ["性格特点1", "性格特点2"],
       "appearance": "80-150字正脸近景描述，只包含发型、脸型、五官、肤色质感和神态",
       "bodyProfile": {
@@ -1169,7 +1187,7 @@ ${buildCreationBibleInstruction(creationBible)}
   if (result) {
     if (Array.isArray(result.characters)) {
       result.characters = result.characters.map((character: any) => {
-        const resolvedGender = resolveCharacterGender(character.name || '', content, character.gender);
+        const resolvedGender = resolveCharacterGender(character.name || '', content, character.gender, character);
         const fallbackLook = {
           id: 'look-1',
           scene: '默认造型',

@@ -19,6 +19,11 @@ import {
   normalizeCharacterBodyProfile,
   stripBodyDetailsFromAppearance,
 } from '@/lib/character-body-profile';
+import {
+  getAnimalCreaturePromptDirectives,
+  inferCharacterEntityKind,
+  resolveCharacterGenderByPolicy,
+} from '@/lib/character-semantic-rules';
 
 // 图片数量限制
 const MAX_IMAGES_PER_ASSET = 3;
@@ -93,9 +98,16 @@ const ASPECT_RATIO_MAP: Record<string, string> = {
   '1:2': '1:2',
 };
 
-// 查询任务最大重试次数和间隔
-const MAX_POLL_RETRIES = 60;
-const POLL_INTERVAL_MS = 3000;
+function readPositiveInt(name: string, fallback: number): number {
+  const parsed = Number.parseInt(process.env[name] || '', 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+// 2K 图片在上游排队时可能超过 3 分钟。默认等待 10 分钟，并允许部署时覆盖。
+const MAX_POLL_RETRIES = readPositiveInt('ASSET_IMAGE_MAX_POLL_RETRIES', 200);
+const POLL_INTERVAL_MS = readPositiveInt('ASSET_IMAGE_POLL_INTERVAL_MS', 3000);
+const QUERY_NETWORK_RETRIES = readPositiveInt('ASSET_IMAGE_QUERY_NETWORK_RETRIES', 3);
+const NETWORK_RETRY_DELAY_MS = readPositiveInt('ASSET_IMAGE_NETWORK_RETRY_DELAY_MS', 1200);
 
 const ASSET_FOLDERS: Record<string, string> = {
   scene: '场景图片',
@@ -160,30 +172,179 @@ async function readReferenceImage(
 
   const localAsset = resolveLocalAssetFilePath(account, value);
   if (localAsset) {
-    return {
-      buffer: await fs.promises.readFile(localAsset.filePath),
-      fileName: path.basename(localAsset.filePath),
-      contentType: localAsset.contentType,
-    };
+    try {
+      return {
+        buffer: await fs.promises.readFile(localAsset.filePath),
+        fileName: path.basename(localAsset.filePath),
+        contentType: localAsset.contentType,
+      };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        throw new Error(`参考图“${path.basename(localAsset.filePath)}”已不存在，请重新生成或选择有效参考图后再试`);
+      }
+      throw error;
+    }
   }
 
   const parsed = new URL(value, request.url);
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null;
 
-  const response = await fetch(parsed.toString());
-  if (!response.ok) {
-    throw new Error(`读取参考图失败 (${response.status})`);
-  }
-  const contentType = response.headers.get('content-type') || 'image/png';
-  if (!contentType.startsWith('image/')) {
-    throw new Error(`参考图不是图片类型: ${contentType}`);
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= QUERY_NETWORK_RETRIES; attempt++) {
+    try {
+      const response = await fetch(parsed.toString());
+      if (!response.ok) {
+        const referenceError = new Error(`读取参考图失败 (${response.status})`);
+        if (attempt < QUERY_NETWORK_RETRIES && isRetryableHttpStatus(response.status)) {
+          lastError = referenceError;
+          await waitBeforeNetworkRetry(attempt);
+          continue;
+        }
+        throw referenceError;
+      }
+      const contentType = response.headers.get('content-type') || 'image/png';
+      if (!contentType.startsWith('image/')) {
+        throw new Error(`参考图不是图片类型: ${contentType}`);
+      }
+
+      return {
+        buffer: Buffer.from(await response.arrayBuffer()),
+        fileName: `asset-reference.${getExtensionFromContentType(contentType)}`,
+        contentType,
+      };
+    } catch (error) {
+      lastError = error;
+      if (attempt >= QUERY_NETWORK_RETRIES || !isTransientNetworkError(error)) throw error;
+      await waitBeforeNetworkRetry(attempt);
+    }
   }
 
-  return {
-    buffer: Buffer.from(await response.arrayBuffer()),
-    fileName: `asset-reference.${getExtensionFromContentType(contentType)}`,
-    contentType,
-  };
+  throw lastError instanceof Error ? lastError : new Error('读取参考图失败');
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function isTransientNetworkError(error: unknown): boolean {
+  const nestedCause = error && typeof error === 'object' && 'cause' in error
+    ? (error as { cause?: unknown }).cause
+    : undefined;
+  const message = `${errorMessage(error)} ${errorMessage(nestedCause)}`.toLowerCase();
+  return [
+    'fetch failed',
+    'econnreset',
+    'etimedout',
+    'econnrefused',
+    'socket hang up',
+    'network',
+    'terminated',
+  ].some(keyword => message.includes(keyword));
+}
+
+function isRetryableHttpStatus(status: number): boolean {
+  return status === 408 || status === 429 || status >= 500;
+}
+
+async function waitBeforeNetworkRetry(attempt: number): Promise<void> {
+  await new Promise(resolve => setTimeout(resolve, NETWORK_RETRY_DELAY_MS * attempt));
+}
+
+async function queryRunningHubTask(
+  apiKey: string,
+  endpoints: ReturnType<typeof buildRunningHubEndpoints>,
+  taskId: string,
+  label: string
+): Promise<any> {
+  let lastError: unknown;
+
+  for (let attempt = 1; attempt <= QUERY_NETWORK_RETRIES; attempt++) {
+    try {
+      const queryResponse = await fetch(endpoints.query, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${apiKey}`,
+        },
+        body: Buffer.from(JSON.stringify({ taskId }), 'utf-8'),
+      });
+
+      const responseText = await queryResponse.text();
+      if (!queryResponse.ok) {
+        const queryError = new Error(`RunningHub ${label}查询失败 (${queryResponse.status}): ${responseText.slice(0, 300)}`);
+        if (attempt < QUERY_NETWORK_RETRIES && isRetryableHttpStatus(queryResponse.status)) {
+          lastError = queryError;
+          console.warn(`[RunningHub] ${label}任务 ${taskId} 查询暂时失败，第 ${attempt}/${QUERY_NETWORK_RETRIES} 次重试`);
+          await waitBeforeNetworkRetry(attempt);
+          continue;
+        }
+        throw queryError;
+      }
+
+      try {
+        return JSON.parse(responseText);
+      } catch {
+        const parseError = new Error(`RunningHub ${label}查询返回了无法解析的数据`);
+        if (attempt < QUERY_NETWORK_RETRIES) {
+          lastError = parseError;
+          await waitBeforeNetworkRetry(attempt);
+          continue;
+        }
+        throw parseError;
+      }
+    } catch (error) {
+      lastError = error;
+      if (attempt >= QUERY_NETWORK_RETRIES || !isTransientNetworkError(error)) throw error;
+      console.warn(`[RunningHub] ${label}任务 ${taskId} 查询连接中断，第 ${attempt}/${QUERY_NETWORK_RETRIES} 次重试`);
+      await waitBeforeNetworkRetry(attempt);
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error(`RunningHub ${label}查询失败`);
+}
+
+async function downloadGeneratedImage(imageUrl: string): Promise<Buffer> {
+  let lastError: unknown;
+
+  for (let attempt = 1; attempt <= QUERY_NETWORK_RETRIES; attempt++) {
+    try {
+      const response = await fetch(imageUrl);
+      if (!response.ok) {
+        const downloadError = new Error(`下载图片失败 (${response.status})`);
+        if (attempt < QUERY_NETWORK_RETRIES && isRetryableHttpStatus(response.status)) {
+          lastError = downloadError;
+          await waitBeforeNetworkRetry(attempt);
+          continue;
+        }
+        throw downloadError;
+      }
+      return Buffer.from(await response.arrayBuffer());
+    } catch (error) {
+      lastError = error;
+      if (attempt >= QUERY_NETWORK_RETRIES || !isTransientNetworkError(error)) throw error;
+      console.warn(`[RunningHub] 下载生成图片连接中断，第 ${attempt}/${QUERY_NETWORK_RETRIES} 次重试`);
+      await waitBeforeNetworkRetry(attempt);
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error('下载图片失败');
+}
+
+function getPublicAssetImageError(error: unknown): string {
+  if (error instanceof InsufficientCreationPointsError) return error.message;
+
+  const message = errorMessage(error);
+  const code = error && typeof error === 'object' && 'code' in error
+    ? String((error as { code?: unknown }).code || '')
+    : '';
+  if (message.includes('参考图')) return message;
+  if (message.includes('RunningHub')) return message;
+  if (message.includes('下载图片失败')) return `${message}，请稍后重试`;
+  if (code === 'ENOSPC' || message.includes('ENOSPC')) return '服务器存储空间不足，图片已生成但无法保存，请联系管理员清理空间后重试';
+  if (code === 'EACCES' || code === 'EPERM') return '服务器没有权限保存图片，请联系管理员检查资产目录权限';
+  if (message.includes('无法读取图生图参考图片')) return message;
+  if (isTransientNetworkError(error)) return '图片接口连接临时中断，已退回本次冻结点数，请稍后重试';
+  return '素材图片生成失败，请稍后重试';
 }
 
 async function uploadReferenceImageToRunningHub(
@@ -285,21 +446,7 @@ async function runRunningHubTextToImage(
   for (let i = 0; i < MAX_POLL_RETRIES; i++) {
     await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL_MS));
 
-    const queryResponse = await fetch(endpoints.query, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${apiKey}`,
-      },
-      body: Buffer.from(JSON.stringify({ taskId }), 'utf-8'),
-    });
-
-    if (!queryResponse.ok) {
-      const errorText = await queryResponse.text();
-      throw new Error(`RunningHub 查询失败 (${queryResponse.status}): ${errorText}`);
-    }
-
-    const queryResult = await queryResponse.json();
+    const queryResult = await queryRunningHubTask(apiKey, endpoints, taskId, '图片');
     const status = queryResult.status;
 
     if (status === 'SUCCESS') {
@@ -365,21 +512,7 @@ async function runRunningHubImageToImage(
   for (let i = 0; i < MAX_POLL_RETRIES; i++) {
     await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL_MS));
 
-    const queryResponse = await fetch(endpoints.query, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${apiKey}`,
-      },
-      body: Buffer.from(JSON.stringify({ taskId }), 'utf-8'),
-    });
-
-    if (!queryResponse.ok) {
-      const errorText = await queryResponse.text();
-      throw new Error(`RunningHub 查询失败 (${queryResponse.status}): ${errorText}`);
-    }
-
-    const queryResult = await queryResponse.json();
+    const queryResult = await queryRunningHubTask(apiKey, endpoints, taskId, '图生图');
     const status = queryResult.status;
 
     if (status === 'SUCCESS') {
@@ -429,7 +562,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({
         success: false,
         error: '未配置 RunningHub API Key，请联系管理员配置图片生成接口',
-      });
+      }, { status: 503 });
     }
     const apiKey = runningHubApiKey.trim();
     const endpoints = buildRunningHubEndpoints(runningHubConfig.baseUrl);
@@ -610,11 +743,7 @@ export async function POST(request: NextRequest) {
     console.log(`[RunningHub] 图片生成成功:`, imageUrl);
 
     // 下载图片并持久化保存
-    const imageResponse = await fetch(imageUrl);
-    if (!imageResponse.ok) {
-      throw new Error(`下载图片失败: ${imageResponse.status}`);
-    }
-    const imageBuffer = Buffer.from(await imageResponse.arrayBuffer());
+    const imageBuffer = await downloadGeneratedImage(imageUrl);
     const outputName = assetImageName || (resolvedImageVariant === 'character-four-view' ? `${data.name || `asset-${data.id}`}的四视图` : (data.name || `asset-${data.id}`));
     const localResult = await saveToLocalAssets(auth.account, type, outputName, imageBuffer, lookId);
 
@@ -676,10 +805,13 @@ export async function POST(request: NextRequest) {
       message: error?.message,
     });
 
+    const publicError = getPublicAssetImageError(error);
+
     return NextResponse.json({
       success: false,
-      error: error instanceof InsufficientCreationPointsError ? error.message : '素材图片生成失败',
+      error: publicError,
       details: error?.message || '未知错误',
+      retryable: isTransientNetworkError(error) || publicError.includes('超时') || publicError.includes('稍后重试'),
     }, { status: error instanceof InsufficientCreationPointsError ? 402 : 500 });
   }
 }
@@ -723,7 +855,7 @@ function buildCreationBibleImageDirectives(creationBible?: CreationBible): strin
   if (subjectRegion === '国内') {
     parts.push('【创作题材】国内：中国本土语境，环境陈设、服饰、生活细节和社会关系符合国内语境');
   } else if (subjectRegion === '国外') {
-    parts.push('【创作题材】国外：海外/国际化语境，建筑、服饰、生活方式和文化细节符合国外语境');
+    parts.push('【创作题材最高优先级】国外：海外/国际化语境，建筑、服饰、生活方式和文化细节符合国外语境；人类角色若剧本未明确族裔，必须默认采用非东亚的欧美/国际化面孔与骨相，不得惯性生成中国或东亚面孔。剧本明确族裔时以剧本为准');
   }
 
   if (creationBackground === '近代') {
@@ -799,12 +931,12 @@ function getCharacterStyleDirectives(creationBible?: CreationBible): string[] {
 function getCharacterSkinRequirement(creationBible?: CreationBible): string {
   const creationType = normalizeCreationType(creationBible);
   if (creationType === '3D') {
-    return '【皮肤材质】使用光滑细腻的风格化3D皮肤材质，带轻微自然次表面散射，肤色均匀清爽，柔润但不过度塑料化；不要真人毛孔摄影、油光、脏斑、蜡像感或廉价塑料感';
+    return '【皮肤材质】人物肤色均匀、无脏点，使用光滑细腻的风格化3D皮肤材质，带轻微自然次表面散射，以干净哑光肤质为主，只保留受控的柔润高光；不要真人毛孔摄影、油光、脏斑、蜡像感或廉价塑料感';
   }
   if (creationType === '动漫') {
-    return '【面部上色】面部干净清爽，肤色均匀，使用平整底色与两到三层赛璐璐明暗，鼻梁、眼窝和下颌只做克制的二维色块塑形；不要真人皮肤毛孔、油光、脏斑、照片质感或3D体积皮肤';
+    return '【面部上色】人物肤色均匀、无脏点，面部干净清爽，使用平整哑光底色与两到三层赛璐璐明暗，鼻梁、眼窝和下颌只做克制的二维色块塑形；不要真人皮肤毛孔、油光、脏斑、照片质感或3D体积皮肤';
   }
-  return '【皮肤要求】人脸干净清爽，肤色均匀，保留真实自然的皮肤质感，不要脏斑，不要皮肤油光，不要脏污，不要过度磨皮';
+  return '【人物皮肤要求】人物皮肤肤色均匀、无脏点，皮肤质感真实，呈自然哑光皮肤肤质；避免皮肤油光、脏污、斑驳、蜡像感和过度磨皮，保留细腻真实的自然皮肤纹理';
 }
 
 function getCharacterFaceComposition(creationBible?: CreationBible): string {
@@ -931,7 +1063,16 @@ function buildPrompt(type: string, data: any, lookId?: string, imageVariant?: st
 
     case 'character':
       const characterCreationType = normalizeCreationType(creationBible);
+      const isAnimalCreature = inferCharacterEntityKind(data) === 'animal-creature';
+      const resolvedCharacterGender = resolveCharacterGenderByPolicy({
+        name: data?.name,
+        currentGender: data?.gender,
+        character: data,
+      });
       parts.push(...getCharacterStyleDirectives(creationBible));
+      if (isAnimalCreature) {
+        parts.push(...getAnimalCreaturePromptDirectives(data));
+      }
       const isMainCharacter = data.role && (
         data.role.includes('主角') ||
         data.role.includes('男主') ||
@@ -945,7 +1086,7 @@ function buildPrompt(type: string, data: any, lookId?: string, imageVariant?: st
       // 查找当前造型的提示词
       const currentLook = lookId && data.looks?.find((l: any) => l.id === lookId);
       const lookPrompt = currentLook?.description?.trim();
-      const faceOnlyAppearance = stripBodyDetailsFromAppearance(data.appearance);
+      const faceOnlyAppearance = isAnimalCreature ? '' : stripBodyDetailsFromAppearance(data.appearance);
       const characterBodyProfile = normalizeCharacterBodyProfile(data.bodyProfile, data.appearance);
       const currentBodyProfile = mergeCharacterBodyProfiles(currentLook?.bodyProfile, characterBodyProfile);
 
@@ -963,7 +1104,7 @@ function buildPrompt(type: string, data: any, lookId?: string, imageVariant?: st
         if (data.name) parts.push(`人物：${data.name}`);
         if (data.role) parts.push(`角色：${data.role}`);
         if (data.age) parts.push(`年龄：${data.age}`);
-        if (data.gender) parts.push(`性别：${data.gender}`);
+        if (resolvedCharacterGender) parts.push(`性别：${resolvedCharacterGender}`);
         if (faceOnlyAppearance) parts.push(`正脸外貌：${faceOnlyAppearance}`);
         if (data.personality) parts.push(`气质：${Array.isArray(data.personality) ? data.personality.join('、') : data.personality}`);
         if (faceParts.length > 0) parts.push(`固定面部特征：${faceParts.join('，')}`);
@@ -995,19 +1136,32 @@ function buildPrompt(type: string, data: any, lookId?: string, imageVariant?: st
 
       if (imageVariant === 'character-four-view') {
         parts.push(`严格按照参考图像，制作一张专业的角色概念设计图。使用干净、纯白背景，以技术模型转场的形式呈现，同时确保与参考图像的视觉风格完全匹配（相同的${characterCreationType === '仿真人' || !characterCreationType ? '写实程度' : '风格化程度'}、渲染方法、纹理、色彩处理和整体美感）。`);
-        parts.push('将构图安排为4列排列：左1为一张高度精细的特写肖像：正面脸部肖像；左2为全身站立的正面视图；左3为全身站立的侧面视图（面向左侧）；左4为全身站立的背面视图。');
-        parts.push('确保每个面板上的身份保持一致。让角色保持放松的A型站姿，各视图之间保持一致的尺寸和对齐，确保解剖准确，轮廓清晰；确保间距均匀，面板分离清晰，全身肖像系列采用统一的构图和一致的头高，各肖像之间的面部尺寸保持一致。');
+        parts.push(isAnimalCreature
+          ? '将构图安排为4列：左1为动物头部正面特写；左2为完整身体正面视图；左3为完整身体左侧视图；左4为完整身体背面视图。四足角色必须始终保持自然、放松的四足站姿。'
+          : '将构图安排为4列排列：左1为一张高度精细的特写肖像：正面脸部肖像；左2为全身站立的正面视图；左3为全身站立的侧面视图（面向左侧）；左4为全身站立的背面视图。');
+        parts.push(isAnimalCreature
+          ? '确保四个面板是同一只动物角色，物种、头骨、吻部、耳形、眼睛、牙齿、皮毛花纹、爪、尾巴和身体比例完全一致；各视图尺寸与地面线对齐，动物解剖准确，轮廓清楚。'
+          : '确保每个面板上的身份保持一致。让角色保持放松的A型站姿，各视图之间保持一致的尺寸和对齐，确保解剖准确，轮廓清晰；确保间距均匀，面板分离清晰，全身肖像系列采用统一的构图和一致的头高，各肖像之间的面部尺寸保持一致。');
         parts.push('所有面板的照明应保持一致（方向、强度和柔和度相同），阴影自然且受控，在不产生剧烈情绪变化的情况下保留细节。输出一张清晰、可打印的参考图，细节锐利。避免裁剪、重叠、杂乱背景和动态姿势。比例：16:9。');
         parts.push('【一致性要求】必须严格参考输入图片的人脸，保持脸型、眼睛、鼻子、嘴巴、肤色、年龄感一致。');
+        parts.push(isAnimalCreature
+          ? '【动物表面材质】皮毛、鳞片或兽类皮肤必须符合物种和创作类型，干净清晰并保留自然层次；不得出现人类皮肤或人类头发'
+          : getCharacterSkinRequirement(creationBible));
         parts.push('【禁止】不要文字、字幕、水印、标签、编号，不要多人不同脸，不要裁切脚部。');
         appendCharacterIdentity(true);
         appendLookDetails();
       } else {
         if (imageVariant === 'character-look') {
           const allowsAgeChange = ['年龄时期', '复合变化'].includes(currentLook?.changeType);
-          parts.push(`【核心要求】${characterCreationType === '3D' ? '风格化3D人物剧情造型全身渲染' : characterCreationType === '动漫' ? '动漫人物剧情造型全身设定图' : '人物剧情造型全身照'}，严格使用输入参考图延续同一人物身份；根据当前造型要求改变服装、年龄时期、身体状态或特殊形态`);
-          parts.push(`【构图要求】全身站姿，从头到脚完整可见，${getCharacterRenderPhrase(creationBible)}，纯白色背景，干净无杂物`);
-          parts.push('【身份一致性】脸型骨骼、眼睛形状与间距、鼻型、嘴型、基础肤色和核心辨识特征必须继承参考图，不能换成另一个人');
+          parts.push(isAnimalCreature
+            ? `【核心要求】奇幻动物角色剧情状态全身设定图，严格使用输入参考图延续同一动物身份；只按剧情要求改变年龄、伤病、护甲、项圈或特殊形态，保持物种与动物解剖一致`
+            : `【核心要求】${characterCreationType === '3D' ? '风格化3D人物剧情造型全身渲染' : characterCreationType === '动漫' ? '动漫人物剧情造型全身设定图' : '人物剧情造型全身照'}，严格使用输入参考图延续同一人物身份；根据当前造型要求改变服装、年龄时期、身体状态或特殊形态`);
+          parts.push(isAnimalCreature
+            ? `【构图要求】完整动物全身与四肢、爪、尾巴全部可见，自然物种站姿，${getCharacterRenderPhrase(creationBible)}，纯白色背景，干净无杂物`
+            : `【构图要求】全身站姿，从头到脚完整可见，${getCharacterRenderPhrase(creationBible)}，纯白色背景，干净无杂物`);
+          parts.push(isAnimalCreature
+            ? '【身份一致性】头骨、吻部、耳形、眼睛、鼻头、牙齿、皮毛花纹、爪、尾巴和身体比例必须继承参考图，不能变成另一物种或人类'
+            : '【身份一致性】脸型骨骼、眼睛形状与间距、鼻型、嘴型、基础肤色和核心辨识特征必须继承参考图，不能换成另一个人');
           if (allowsAgeChange) {
             parts.push(`【年龄变化】允许按“${currentLook?.ageStage || '目标时期'}”调整皱纹、发色、皮肤年龄感、体态和妆发，但必须清楚看出是参考图中的同一人物`);
           } else {
@@ -1019,16 +1173,24 @@ function buildPrompt(type: string, data: any, lookId?: string, imageVariant?: st
           if (currentLook?.transformationState) {
             parts.push(`【特殊形态变化】在保留可识别的人脸结构和身份锚点前提下表现“${currentLook.transformationState}”，形态变化不能把人物变成完全无关的新角色`);
           }
-          parts.push(getCharacterSkinRequirement(creationBible));
+          parts.push(isAnimalCreature
+            ? '【动物表面材质】皮毛、鳞片或兽类皮肤必须符合物种和创作类型，干净清晰并保留自然层次；不得出现人类皮肤或人类头发'
+            : getCharacterSkinRequirement(creationBible));
           parts.push(getCharacterNegativeRequirement(creationBible, true));
           appendCharacterIdentity(true);
           appendLookDetails();
         } else {
-          parts.push(getCharacterFaceComposition(creationBible));
-          parts.push('【信息分流】这是正脸近景基准图，只读取发型、脸型、五官、肤色、皮肤质感和神态；忽略身高、体重、体型、肩腰、四肢比例与服装信息');
+          parts.push(isAnimalCreature
+            ? '【核心要求】奇幻动物角色身份基准图。四足角色采用完整四足全身的侧前方三分之四视图，清楚呈现动物头部、吻部、耳朵、眼睛、皮毛、爪、尾巴与整体物种轮廓；不得生成人类头像'
+            : getCharacterFaceComposition(creationBible));
+          parts.push(isAnimalCreature
+            ? '【信息分流】读取物种、动物头骨、吻部、耳形、眼睛、牙齿、皮毛花纹、爪、尾巴与身体比例，忽略任何人类脸型、妆容和发型模板'
+            : '【信息分流】这是正脸近景基准图，只读取发型、脸型、五官、肤色、皮肤质感和神态；忽略身高、体重、体型、肩腰、四肢比例与服装信息');
           parts.push('【核心要求】纯白色背景，背景干净明亮，无任何杂物或装饰');
-          parts.push(getCharacterSkinRequirement(creationBible));
-          parts.push(`【画质要求】${getCharacterRenderPhrase(creationBible)}，4K高清，面部五官清晰，自然柔光`);
+          parts.push(isAnimalCreature
+            ? '【动物表面材质】皮毛、鳞片或兽类皮肤必须符合物种和创作类型，干净清晰并保留自然层次；不得出现人类皮肤或人类头发'
+            : getCharacterSkinRequirement(creationBible));
+          parts.push(`【画质要求】${getCharacterRenderPhrase(creationBible)}，4K高清，${isAnimalCreature ? '动物解剖与物种辨识特征清晰' : '面部五官清晰'}，自然柔光`);
           parts.push(getCharacterNegativeRequirement(creationBible));
           appendCharacterIdentity(false);
           if (isMainCharacter) {
@@ -1041,7 +1203,12 @@ function buildPrompt(type: string, data: any, lookId?: string, imageVariant?: st
       } else if (characterCreationType === '动漫') {
         parts.push(TWO_D_ANIME_FINAL_LOCK);
       }
-      parts.push('4K超高清，人物细节清晰，高清面部特征，身份一致');
+      if (isAnimalCreature) {
+        parts.push(...getAnimalCreaturePromptDirectives(data));
+      }
+      parts.push(isAnimalCreature
+        ? '4K超高清，动物角色解剖与物种细节清晰，身份一致'
+        : '4K超高清，人物细节清晰，高清面部特征，身份一致');
       parts.push('【再次强调】纯白色背景，无文字，无字幕，无水印');
       break;
 

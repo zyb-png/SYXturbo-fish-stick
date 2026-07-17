@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { requireUserLoginResponse } from '@/lib/auth-guard';
 import {
+  MIN_DIALOGUE_LINES_FOR_VOICE_PROFILE,
   recommendVoicePresetId,
   type CharacterVoiceExtraction,
   type CharacterVoiceProfile,
@@ -50,7 +51,6 @@ const TRANSFORMATION_PATTERN = /(变身|觉醒|魔化|妖化|兽化|黑化|附�
 const SYSTEM_SPEAKER_PATTERN = /(系统|导航|智能助手|AI助手|自动语音|电子音|机器音|语音提示)/i;
 const THIRD_PARTY_SPEAKER_PATTERN = /(第三方|旁白|解说|客服|接线员|广播|播报|主持人|记者|电话那头|电话声音|陌生人|路人|群众|店员|服务员)/;
 const NON_CHARACTER_SPEAKER_PATTERN = new RegExp(`${SYSTEM_SPEAKER_PATTERN.source}|${THIRD_PARTY_SPEAKER_PATTERN.source}`, 'i');
-const MIN_DIALOGUE_LINES_PER_PROFILE = 2;
 
 function chineseNumberToInt(value: string): number {
   if (/^\d+$/.test(value)) return Number(value);
@@ -680,12 +680,12 @@ function parseModelResponse(response: string): unknown {
   }
 }
 
-function removeSingleLineProfiles(profiles: CharacterVoiceProfile[]): {
+function removeLowDialogueProfiles(profiles: CharacterVoiceProfile[]): {
   profiles: CharacterVoiceProfile[];
   removedCount: number;
 } {
   const retained = profiles.filter(profile => (
-    Number(profile.totalDialogueCount) >= MIN_DIALOGUE_LINES_PER_PROFILE
+    Number(profile.totalDialogueCount) >= MIN_DIALOGUE_LINES_FOR_VOICE_PROFILE
   ));
   return {
     profiles: retained,
@@ -732,8 +732,8 @@ export async function POST(request: NextRequest) {
           content: `你是影视声音导演。请根据执行剧本中已扫描出的全部对白人物和上下文，建立人物音色档案。
 
 规则：
-1. 先合并同一人物的别名、称谓和不同时期，再统计该人物在全剧的台词总句数；合并后只有 1 句台词的人物不要输出，至少有 2 句台词才建立 profile。
-2. 符合至少 2 句台词条件的发声主体必须完整覆盖，不能遗漏 sourceName；即使不在人物列表中也必须保留。
+1. 先合并同一人物的别名、称谓和不同时期，再统计该发声主体在完整执行剧本中的台词总句数；合并后少于 ${MIN_DIALOGUE_LINES_FOR_VOICE_PROFILE} 句的一律不要输出，累计至少 ${MIN_DIALOGUE_LINES_FOR_VOICE_PROFILE} 句才建立 profile。
+2. 符合至少 ${MIN_DIALOGUE_LINES_FOR_VOICE_PROFILE} 句台词条件的发声主体必须完整覆盖，不能遗漏 sourceName；即使不在人物列表中也必须保留。
 3. 同一人物的别名、称谓和不同时期必须合并到同一个人物 profile；sourceNames 必须列出被合并的原始说话人名称。
 4. 系统提示、导航、智能助手、自动语音等归类为 speakerCategory=system；广播、客服、接线员、电话另一端、旁白和其他第三方发声者归类为 speakerCategory=third_party；普通人物为 character。不得把符合句数条件的系统或第三方台词当作字幕、音效而删除。
 5. 幼年、童年、少年、青年、中年、老年，以及会明显改变声音的变身/魔化/附身等，作为该人物下面的独立 variants。
@@ -807,12 +807,14 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const filtered = removeSingleLineProfiles(modelProfiles);
+    const filtered = removeLowDialogueProfiles(modelProfiles);
     modelProfiles = filtered.profiles;
     if (filtered.removedCount > 0) {
-      console.log(`[人物音色提取] 已忽略 ${filtered.removedCount} 个全剧仅有一句台词的发声者`);
+      console.log(
+        `[人物音色提取] 已忽略 ${filtered.removedCount} 个全剧台词少于 ${MIN_DIALOGUE_LINES_FOR_VOICE_PROFILE} 句的发声主体`,
+      );
       if (modelProfiles.length === 0) {
-        warning = [warning, '已识别到的发声者在全剧均只有一句台词，按规则不建立人物音色档案']
+        warning = [warning, `已识别到的发声主体在全剧均少于 ${MIN_DIALOGUE_LINES_FOR_VOICE_PROFILE} 句台词，按规则不建立人物音色档案`]
           .filter(Boolean)
           .join('；');
       }

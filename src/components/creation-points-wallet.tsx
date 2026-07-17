@@ -143,7 +143,9 @@ export function CreationPointsWallet() {
 
   useEffect(() => {
     void loadWallet();
-    const timer = window.setInterval(() => void loadWallet(true), 5_000);
+    const timer = window.setInterval(() => {
+      if (!document.hidden) void loadWallet(true);
+    }, 15_000);
     return () => window.clearInterval(timer);
   }, [loadWallet]);
 

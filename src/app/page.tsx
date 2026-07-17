@@ -78,8 +78,11 @@ import { StorageMonitor } from '@/components/storage-monitor';
 import { WorkspaceModeSwitch } from '@/components/workspace-mode-switch';
 import { PasswordInput } from '@/components/password-input';
 import { CharacterVoiceLibrary, type VoiceUploadInput } from '@/components/character-voice-library';
+import { OnDemandCollection } from '@/components/on-demand-collection';
+import { getAssetPreviewUrl, getAssetThumbnailUrl } from '@/lib/asset-image-url';
 import { usePersistentState, usePersistentStateManager, STORAGE_KEYS, TokenUsage, INITIAL_TOKEN_USAGE } from '@/hooks/usePersistentState';
 import {
+  MIN_DIALOGUE_LINES_FOR_VOICE_PROFILE,
   normalizeVoiceCharacterName,
   resolveVideoVoiceAssignments,
   type CharacterVoiceExtraction,
@@ -97,6 +100,11 @@ import {
   type CharacterBodyProfile,
 } from '@/lib/character-body-profile';
 import { getCanonicalEpisodeTitle, normalizeEpisodeChapterTitles } from '@/lib/outline-utils';
+import {
+  inferCharacterEntityKind,
+  normalizeCharacterGender,
+  resolveCharacterGenderByPolicy,
+} from '@/lib/character-semantic-rules';
 import { expandPropStateUnits } from '@/lib/prop-state-utils';
 import {
   getSceneMainLocation,
@@ -195,6 +203,7 @@ interface CharacterLook {
   isCustom?: boolean;
   isGenerating?: boolean;
   generatingStatus?: string;
+  generationError?: string;
   fourViewImageUrl?: string;
   fourViewPrompt?: string;
   fourViewIdentitySourceUrl?: string;
@@ -202,6 +211,7 @@ interface CharacterLook {
   fourViewIdentityNeedsReview?: boolean;
   isGeneratingFourView?: boolean;
   fourViewStatus?: string;
+  fourViewError?: string;
   isLifecycleFallback?: boolean;
 }
 
@@ -356,11 +366,74 @@ function AssetGenerationPlaceholder({ status }: { status?: string }) {
   );
 }
 
+async function readImageGenerationResponse(response: Response, fallback: string): Promise<any> {
+  const responseText = await response.text();
+  let payload: any = null;
+  try {
+    payload = responseText ? JSON.parse(responseText) : null;
+  } catch {
+    payload = null;
+  }
+
+  if (payload && typeof payload === 'object') {
+    if (!payload.success && !payload.error && payload.details) {
+      return { ...payload, error: String(payload.details) };
+    }
+    return payload;
+  }
+
+  const statusReason = response.status === 401
+    ? '登录状态已失效，请重新登录后再试'
+    : response.status === 402
+      ? '创作点不足，无法开始图片生成'
+      : response.status === 408 || response.status === 504
+        ? '图片服务等待超时，请稍后重试'
+        : response.status === 429
+          ? '图片服务请求过于频繁，请稍后再试'
+          : response.status >= 500
+            ? `图片服务异常（HTTP ${response.status}）`
+            : response.status >= 400
+              ? `图片请求被拒绝（HTTP ${response.status}）`
+              : fallback;
+
+  return { success: false, error: statusReason };
+}
+
+function getImageRequestFailureReason(error: unknown, operation: string): string {
+  if (error instanceof Error && error.name === 'AbortError') {
+    return `${operation}等待超时，后台任务可能仍在处理，系统会继续检查结果`;
+  }
+  if (error instanceof TypeError) {
+    return `${operation}时网络连接中断，请检查网络；后台若已完成，图片会自动补回`;
+  }
+  if (error instanceof Error && error.message.trim()) {
+    return `${operation}失败：${error.message.trim()}`;
+  }
+  return `${operation}失败：未知错误`;
+}
+
+function AssetGenerationFailure({ reason }: { reason: string }) {
+  return (
+    <div
+      className="flex max-w-full items-start gap-2 rounded-md border border-red-400/35 bg-red-950/35 px-3 py-2 text-left text-xs leading-5 text-red-100"
+      role="alert"
+      title={reason}
+    >
+      <AlertTriangle className="mt-0.5 size-3.5 shrink-0 text-red-300" />
+      <div className="min-w-0">
+        <div className="font-medium text-red-200">图片生成失败</div>
+        <div className="break-words text-red-100/80 [overflow-wrap:anywhere]">{reason}</div>
+      </div>
+    </div>
+  );
+}
+
 function AssetImageStack({
   images,
   name,
   type,
   generationStatus,
+  failureReason,
   isGenerating,
   isAssetsConfirmed,
   onOpenChooser,
@@ -373,6 +446,7 @@ function AssetImageStack({
   name: string;
   type: 'scene' | 'character' | 'prop';
   generationStatus?: string;
+  failureReason?: string;
   isGenerating: boolean;
   isAssetsConfirmed: boolean;
   onOpenChooser: () => void;
@@ -381,6 +455,7 @@ function AssetImageStack({
   onDownload: (image: AssetSingleImage) => void;
   onRemove: (image: AssetSingleImage) => void;
 }) {
+  const [showHoverPreviews, setShowHoverPreviews] = useState(false);
   const completedImages = images.filter(image => Boolean(image.imageUrl) && !image.isGenerating);
   const primaryImage = completedImages[0];
   const ghostImages = completedImages.slice(1, MAX_IMAGES_PER_ASSET);
@@ -401,29 +476,34 @@ function AssetImageStack({
       );
     }
     return (
-      <div className={`flex flex-col items-center justify-center gap-2 rounded-md border border-dashed border-amber-400/25 bg-black/20 text-amber-100/45 ${frameClass}`}>
-        <EmptyIcon className="size-9" />
-        <span className="text-xs">尚未生成{typeLabel}图</span>
+      <div className="space-y-2">
+        <div className={`flex flex-col items-center justify-center gap-2 rounded-md border border-dashed border-amber-400/25 bg-black/20 text-amber-100/45 ${frameClass}`}>
+          <EmptyIcon className="size-9" />
+          <span className="text-xs">尚未生成{typeLabel}图</span>
+        </div>
+        {failureReason && <AssetGenerationFailure reason={failureReason} />}
       </div>
     );
   }
 
   return (
-    <div className={`group/stack relative ${ghostImages.length > 0 ? 'mb-4 mr-2' : ''}`}>
+    <div
+      className={`group/stack relative ${ghostImages.length > 0 ? 'mb-4 mr-2' : ''}`}
+      onMouseEnter={() => setShowHoverPreviews(true)}
+      onMouseLeave={() => setShowHoverPreviews(false)}
+    >
       <div className={`relative ${frameClass}`}>
         {ghostImages.map((image, index) => (
           <div
             key={`ghost-${image.imageId}`}
-            className={`pointer-events-none absolute inset-0 overflow-hidden rounded-md border border-amber-300/30 bg-black shadow-[0_8px_24px_rgba(0,0,0,0.55)] transition-all duration-300 ${
+            className={`pointer-events-none absolute inset-0 overflow-hidden rounded-md border border-amber-300/30 bg-[linear-gradient(145deg,rgba(251,191,36,0.12),rgba(0,0,0,0.92))] shadow-[0_8px_24px_rgba(0,0,0,0.55)] transition-all duration-300 ${
               index === 0
                 ? 'translate-x-1 translate-y-2 opacity-55 group-hover/stack:translate-x-2 group-hover/stack:translate-y-3 group-hover/stack:opacity-80'
                 : 'translate-x-2 translate-y-4 opacity-30 group-hover/stack:translate-x-4 group-hover/stack:translate-y-5 group-hover/stack:opacity-60'
             }`}
             style={{ zIndex: 10 - index }}
             aria-hidden="true"
-          >
-            <img src={image.imageUrl} alt="" className={`h-full w-full ${objectClass}`} />
-          </div>
+          />
         ))}
 
         <button
@@ -434,25 +514,42 @@ function AssetImageStack({
           aria-label={completedImages.length > 1 ? `选择${name}主图` : `预览${name}图片`}
         >
           <img
-            src={primaryImage.imageUrl}
+            src={getAssetThumbnailUrl(primaryImage.imageUrl, isPortrait ? 640 : 960)}
             alt={name}
+            loading="lazy"
+            decoding="async"
+            fetchPriority="low"
             className={`h-full w-full transition duration-300 group-hover/stack:brightness-90 ${objectClass}`}
+            onError={(event) => {
+              const image = event.currentTarget;
+              if (image.dataset.originalFallback === 'true') return;
+              image.dataset.originalFallback = 'true';
+              image.src = primaryImage.imageUrl;
+            }}
           />
           {completedImages.length > 1 && (
             <>
               <div className="absolute bottom-2 right-2 rounded border border-amber-300/30 bg-black/75 px-2 py-1 text-[11px] font-medium text-amber-100 backdrop-blur-sm">
                 主图 · 共 {completedImages.length} 张
               </div>
+              {showHoverPreviews && (
               <div className="pointer-events-none absolute bottom-2 left-2 z-30 flex max-w-[70%] gap-1.5 opacity-0 transition-all duration-200 group-hover/stack:opacity-100">
                 {completedImages.map((image, index) => (
                   <div
                     key={`hover-preview-${image.imageId}`}
                     className={`h-10 w-14 overflow-hidden rounded border bg-black/80 shadow-lg ${index === 0 ? 'border-amber-300' : 'border-white/30'}`}
                   >
-                    <img src={image.imageUrl} alt="" className={`h-full w-full ${objectClass}`} />
+                    <img
+                      src={getAssetThumbnailUrl(image.imageUrl, 240, 66)}
+                      alt=""
+                      loading="lazy"
+                      decoding="async"
+                      className={`h-full w-full ${objectClass}`}
+                    />
                   </div>
                 ))}
               </div>
+              )}
             </>
           )}
           {primaryImage.isCustom && completedImages.length === 1 && (
@@ -516,37 +613,25 @@ function AssetImageStack({
           )}
         </div>
       </div>
+      {failureReason && !isGenerating && (
+        <div className="mt-2">
+          <AssetGenerationFailure reason={failureReason} />
+        </div>
+      )}
     </div>
   );
 }
 
 function normalizeGenderValue(value?: string): string {
-  if (!isUsefulText(value)) return '';
-  if (/待定|未知|不明/.test(value)) return '待定';
-  const hasFemale = /女|女性|女生|女孩|女人/.test(value);
-  const hasMale = /男|男性|男生|男孩|男人/.test(value);
-  if (hasFemale && !hasMale) return '女';
-  if (hasMale && !hasFemale) return '男';
-  return value.trim();
-}
-
-function inferGenderFromNameHint(name: string): string {
-  if (/母|妈|妈妈|姐姐|妹妹|阿姨|嫂|妻|夫人|太太|小姐|姑娘|女孩|女儿|新娘|老板娘/.test(name)) return '女';
-  if (/父|爸|爸爸|叔|伯|哥|哥哥|爷|爷爷|儿子|先生|少爷|老爷|公子|男孩/.test(name)) return '男';
-  if (/沈念|明珠|巧云|春梅|桂芳|晓晓|梦瑶|小芳|小美/.test(name)) return '女';
-  if (/延之|方宇|顾父|王叔|老陈|张村长/.test(name)) return '男';
-  if (/[婷娜娟芳梅兰雪霞莉丽敏婧妍媛瑶琳倩萍慧颖]$/.test(name)) return '女';
-  if (/[伟强刚勇军杰磊鹏涛斌龙峰]$/.test(name)) return '男';
-  return '';
+  return normalizeCharacterGender(value);
 }
 
 function inferCharacterGender(name: string, current?: string): string {
-  const gender = normalizeGenderValue(current);
-  const nameHint = inferGenderFromNameHint(name);
-  if (nameHint && gender && gender !== '待定' && nameHint !== gender) return nameHint;
-  if (gender) return gender;
-  if (nameHint) return nameHint;
-  return '待定';
+  return resolveCharacterGenderByPolicy({
+    name,
+    currentGender: current,
+    character: { name },
+  });
 }
 
 function characterTextContradictsGender(value: unknown, gender: string): boolean {
@@ -591,6 +676,9 @@ function inferCharacterPersonality(name: string, current?: string[]): string[] {
 
 function buildCharacterAppearance(character: Partial<Character>): string {
   const name = character.name || '该人物';
+  if (inferCharacterEntityKind(character as Record<string, any>) === 'animal-creature') {
+    return `${name}是动物特征占主导的奇幻生物。头骨、吻部、兽耳、眼睛、鼻头、牙齿和皮毛符合剧本物种设定，毛发顺应动物头骨与身体结构生长；不使用人类皮肤、人类五官比例、女性长发、披发、马尾或其他人类发型。`;
+  }
   const gender = inferCharacterGender(name, character.gender);
   const age = inferCharacterAge(name, character.age);
   const personality = inferCharacterPersonality(name, character.personality)[0];
@@ -604,8 +692,16 @@ function buildCharacterAppearance(character: Partial<Character>): string {
 }
 
 function buildCharacterBodyProfile(character: Partial<Character>): CharacterBodyProfile {
+  const isAnimalCreature = inferCharacterEntityKind(character as Record<string, any>) === 'animal-creature';
   const gender = inferCharacterGender(character.name || '该人物', character.gender);
-  const defaults: CharacterBodyProfile = {
+  const defaults: CharacterBodyProfile = isAnimalCreature ? {
+    height: '',
+    weight: '',
+    bodyType: '动物特征占主导的奇幻生物体型，解剖结构符合剧本物种设定',
+    shoulderWaist: '肩背、胸腔与腰腹结构符合动物或兽类解剖',
+    limbProportions: '四肢、爪、尾巴与头身比例符合物种设定',
+    posture: '按剧本保持四足或明确的人形兽类姿态',
+  } : {
     height: '',
     weight: '',
     bodyType: gender === '女'
@@ -625,6 +721,15 @@ function buildCharacterBodyProfile(character: Partial<Character>): CharacterBody
 
 function buildCharacterFaceFeatures(character: Partial<Character>): FaceFeatures {
   const name = character.name || '该人物';
+  if (inferCharacterEntityKind(character as Record<string, any>) === 'animal-creature') {
+    return {
+      faceShape: '符合物种的动物头骨与吻部轮廓，动物特征占主导',
+      eyes: '符合剧情设定的兽类眼睛，目光与情绪清晰',
+      nose: '动物鼻头与吻部结构清楚，不使用人类鼻型',
+      mouth: '兽类口吻与牙齿结构，不使用人类唇形',
+      skinTone: '符合物种设定的皮毛、鳞片或兽类表面材质',
+    };
+  }
   const gender = inferCharacterGender(name, character.gender);
   return {
     faceShape: gender === '女' ? '鹅蛋脸或柔和椭圆脸，轮廓自然清晰' : gender === '男' ? '椭圆脸或方中带圆的脸型，轮廓稳定' : '自然写实脸型，轮廓清晰稳定',
@@ -637,15 +742,16 @@ function buildCharacterFaceFeatures(character: Partial<Character>): FaceFeatures
 
 function buildCharacterLook(character: Partial<Character>): CharacterLook {
   const name = character.name || '该人物';
+  const isAnimalCreature = inferCharacterEntityKind(character as Record<string, any>) === 'animal-creature';
   const gender = inferCharacterGender(name, character.gender);
   return {
     id: 'look-1',
     scene: '默认造型',
     description: `${name}的基础出场造型，保持脸型和五官一致，服装根据人物身份与剧情阶段呈现写实短剧质感。`,
-    costume: gender === '女' ? '简洁生活装或职业装，颜色自然，方便在不同场景延展' : gender === '男' ? '简洁日常装或商务装，剪裁利落，贴合人物身份' : '简洁写实服装，颜色自然，贴合人物身份',
-    hairstyle: gender === '女' ? '自然披发、低马尾或利落短发，根据场景微调' : gender === '男' ? '干净短发或自然整理发型' : '自然整理发型，贴合人物身份',
+    costume: isAnimalCreature ? '无；除非剧本明确要求护甲、项圈或装饰' : gender === '女' ? '简洁生活装或职业装，颜色自然，方便在不同场景延展' : gender === '男' ? '简洁日常装或商务装，剪裁利落，贴合人物身份' : '简洁写实服装，颜色自然，贴合人物身份',
+    hairstyle: isAnimalCreature ? '毛发顺应动物头骨与身体结构生长，不使用任何人类发型' : gender === '女' ? '自然披发、低马尾或利落短发，根据场景微调' : gender === '男' ? '干净短发或自然整理发型' : '自然整理发型，贴合人物身份',
     accessories: [],
-    makeup: gender === '女' ? '自然淡妆' : gender === '男' ? '自然无妆或轻微修饰' : '自然妆造',
+    makeup: isAnimalCreature ? '无；保持动物面部与皮毛自然材质' : gender === '女' ? '自然淡妆' : gender === '男' ? '自然无妆或轻微修饰' : '自然妆造',
     mood: '自然',
     changeType: '基础造型',
     ageStage: character.age || '主要时期',
@@ -662,7 +768,46 @@ function buildCharacterLook(character: Partial<Character>): CharacterLook {
   };
 }
 
+function repairCharacterLookSemanticDefaults(
+  look: CharacterLook,
+  gender: string,
+  isAnimalCreature: boolean,
+  genderWasCorrected: boolean
+): CharacterLook {
+  if (isAnimalCreature) {
+    return {
+      ...look,
+      costume: !isUsefulText(look.costume) || /生活装|职业装|商务装/.test(look.costume)
+        ? '无；除非剧本明确要求护甲、项圈或装饰'
+        : look.costume,
+      hairstyle: !isUsefulText(look.hairstyle) || /披发|马尾|盘发|短发|人类发型/.test(look.hairstyle)
+        ? '毛发顺应动物头骨与身体结构生长，不使用任何人类发型'
+        : look.hairstyle,
+      makeup: !isUsefulText(look.makeup) || /淡妆|浓妆|修饰/.test(look.makeup)
+        ? '无；保持动物面部与皮毛自然材质'
+        : look.makeup,
+    };
+  }
+  if (!genderWasCorrected) return look;
+  if (gender === '男') {
+    return {
+      ...look,
+      costume: /简洁生活装或职业装/.test(look.costume || '')
+        ? '简洁日常装或商务装，剪裁利落，贴合人物身份'
+        : look.costume,
+      hairstyle: /自然披发|低马尾|盘发/.test(look.hairstyle || '')
+        ? '干净短发或自然整理发型'
+        : look.hairstyle,
+      makeup: /自然淡妆|精致妆容/.test(look.makeup || '')
+        ? '自然无妆或轻微修饰'
+        : look.makeup,
+    };
+  }
+  return look;
+}
+
 function normalizeCharacterVisualInfo(character: Character): Character {
+  const isAnimalCreature = inferCharacterEntityKind(character as unknown as Record<string, any>) === 'animal-creature';
   const normalized: Character = {
     ...character,
     role: inferCharacterRole(character.name, character.role),
@@ -674,7 +819,8 @@ function normalizeCharacterVisualInfo(character: Character): Character {
   const genderWasCorrected = Boolean(originalGender && originalGender !== '待定' && originalGender !== normalized.gender);
 
   const faceOnlyAppearance = stripBodyDetailsFromAppearance(character.appearance);
-  normalized.appearance = isUsefulText(faceOnlyAppearance) && !genderWasCorrected && !characterTextContradictsGender(faceOnlyAppearance, normalized.gender)
+  const hasUsableAnimalAppearance = isAnimalCreature && /犬|狼|兽|动物|吻部|皮毛|兽毛|四足|爪|獠牙/.test(faceOnlyAppearance) && !/女性角色|人类皮肤|女性长发/.test(faceOnlyAppearance);
+  normalized.appearance = isUsefulText(faceOnlyAppearance) && !genderWasCorrected && (hasUsableAnimalAppearance || (!isAnimalCreature && !characterTextContradictsGender(faceOnlyAppearance, normalized.gender)))
     ? faceOnlyAppearance
     : buildCharacterAppearance(normalized);
 
@@ -694,8 +840,10 @@ function normalizeCharacterVisualInfo(character: Character): Character {
   };
 
   const defaultLook = buildCharacterLook(normalized);
+  const sourceLooks = (normalizeCharacterLooks(character.looks, defaultLook, normalized.age) as CharacterLook[])
+    .map(look => repairCharacterLookSemanticDefaults(look, normalized.gender, isAnimalCreature, genderWasCorrected));
   normalized.looks = inheritBodyProfileForLooks(
-    normalizeCharacterLooks(character.looks, defaultLook, normalized.age) as CharacterLook[],
+    sourceLooks,
     normalized.bodyProfile
   );
 
@@ -781,6 +929,161 @@ interface Prop {
   }>;
   notes: string;
   aliases?: string[];
+}
+
+interface SceneRenderItem {
+  scene: Scene;
+  sourceIndex: number;
+  mainSceneName: string;
+  shouldShowMainSceneHeader: boolean;
+  siblingStateCount: number;
+  siblingStateIndex: number;
+  siblingEpisodeNumbers: number[];
+}
+
+interface PropRenderItem {
+  prop: Prop;
+  sourceIndex: number;
+  mainPropName: string;
+  shouldShowMainPropHeader: boolean;
+  siblingStateCount: number;
+  siblingEpisodeNumbers: number[];
+}
+
+const getSceneMainSceneName = (scene: Scene) => getSceneMainLocation(scene) || scene.name;
+
+const getSceneEpisodeNumbers = (scene: Scene): number[] => {
+  const fromEpisodes = Array.isArray(scene.episodeNumbers)
+    ? scene.episodeNumbers.filter((item): item is number => typeof item === 'number' && Number.isFinite(item))
+    : [];
+  const fromOccurrences = Array.isArray(scene.occurrences)
+    ? scene.occurrences
+      .map(item => item.episodeNumber)
+      .filter((item): item is number => typeof item === 'number' && Number.isFinite(item))
+    : [];
+  return Array.from(new Set([...fromEpisodes, ...fromOccurrences])).sort((a, b) => a - b);
+};
+
+const formatSceneEpisodeText = (scene: Scene) => {
+  const episodeNumbers = getSceneEpisodeNumbers(scene);
+  if (episodeNumbers.length > 0) {
+    return episodeNumbers.length <= 4
+      ? episodeNumbers.map(item => `第${item}集`).join('、')
+      : `${episodeNumbers.slice(0, 4).map(item => `第${item}集`).join('、')} 等${episodeNumbers.length}集`;
+  }
+  const labels = Array.isArray(scene.occurrences)
+    ? scene.occurrences
+      .map(item => item.episodeLabel)
+      .filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+    : [];
+  return Array.from(new Set(labels)).join('、') || '未关联集数';
+};
+
+const getPropMainPropName = (prop: Prop) => (
+  prop.mainPropName ||
+  String(prop.name || '')
+    .replace(/[【\[]\s*(?:完整|基准|原始|破碎|碎裂|损坏|破损|裂开|断裂|旧化|陈旧|老旧|沾血|染血|血迹|烧毁|焦黑|修复|修好|打开|关闭|空的|空置|空瓶|空盒|空状态|装满|改造前|改造后|十年前|10年前|十年后|10年后|遗失|失效)\s*[】\]]/g, '')
+    .replace(/（\s*(?:完整|基准|原始|破碎|碎裂|损坏|破损|裂开|断裂|旧化|陈旧|老旧|沾血|染血|血迹|烧毁|焦黑|修复|修好|打开|关闭|空的|空置|空瓶|空盒|空状态|装满|改造前|改造后|十年前|10年前|十年后|10年后|遗失|失效)(?:状态)?\s*）/g, '')
+    .replace(/\(\s*(?:完整|基准|原始|破碎|碎裂|损坏|破损|裂开|断裂|旧化|陈旧|老旧|沾血|染血|血迹|烧毁|焦黑|修复|修好|打开|关闭|空的|空置|空瓶|空盒|空状态|装满|改造前|改造后|十年前|10年前|十年后|10年后|遗失|失效)(?:状态)?\s*\)/g, '')
+    .replace(/^(?:完整|基准|原始|破碎|碎裂|损坏|破损|裂开|断裂|旧化|陈旧|老旧|沾血|染血|血迹|烧毁|焦黑|修复|修好|打开|关闭|空的|空置|空瓶|空盒|空状态|装满|改造前|改造后|十年前|10年前|十年后|10年后|遗失|失效)的?/g, '')
+    .replace(/(?:完整|基准|原始|破碎|碎裂|损坏|破损|裂开|断裂|旧化|陈旧|老旧|沾血|染血|血迹|烧毁|焦黑|修复|修好|打开|关闭|空的|空置|空瓶|空盒|空状态|装满|改造前|改造后|十年前|10年前|十年后|10年后|遗失|失效)(?:状态|版|后|前)?$/g, '')
+    .replace(/\s+/g, '')
+    .trim() ||
+  prop.name
+);
+
+const getPropEpisodeNumbers = (prop: Prop): number[] => {
+  const fromEpisodes = Array.isArray(prop.episodeNumbers)
+    ? prop.episodeNumbers.filter((item): item is number => typeof item === 'number' && Number.isFinite(item))
+    : [];
+  const fromOccurrences = Array.isArray(prop.occurrences)
+    ? prop.occurrences
+      .map(item => item.episodeNumber)
+      .filter((item): item is number => typeof item === 'number' && Number.isFinite(item))
+    : [];
+  const fromStates = !prop.isStateUnit && Array.isArray(prop.stateVariants)
+    ? prop.stateVariants.flatMap(state => (
+        Array.isArray(state.episodeNumbers)
+          ? state.episodeNumbers.filter((item): item is number => typeof item === 'number' && Number.isFinite(item))
+          : []
+      ))
+    : [];
+  return Array.from(new Set([...fromEpisodes, ...fromOccurrences, ...fromStates])).sort((a, b) => a - b);
+};
+
+const formatPropEpisodeText = (prop: Prop) => {
+  const episodeNumbers = getPropEpisodeNumbers(prop);
+  if (episodeNumbers.length > 0) {
+    return episodeNumbers.length <= 4
+      ? episodeNumbers.map(item => `第${item}集`).join('、')
+      : `${episodeNumbers.slice(0, 4).map(item => `第${item}集`).join('、')} 等${episodeNumbers.length}集`;
+  }
+  const labels = [
+    ...(Array.isArray(prop.occurrences)
+      ? prop.occurrences
+        .map(item => item.episodeLabel)
+        .filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+      : []),
+    ...(!prop.isStateUnit && Array.isArray(prop.stateVariants)
+      ? prop.stateVariants.flatMap(state => (
+          Array.isArray(state.occurrences)
+            ? state.occurrences
+              .map(item => item.episodeLabel)
+              .filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+            : []
+        ))
+      : []),
+  ];
+  return Array.from(new Set(labels)).join('、') || '未关联集数';
+};
+
+const getPropStateCount = (prop: Prop) => (
+  prop.isStateUnit ? 1 : (Array.isArray(prop.stateVariants) && prop.stateVariants.length > 0 ? prop.stateVariants.length : 1)
+);
+
+function buildSceneRenderItems(scenes: Scene[]): SceneRenderItem[] {
+  const groups = new Map<string, { stateCount: number; episodeNumbers: Set<number> }>();
+  const prepared = scenes.map((scene, sourceIndex) => {
+    const mainSceneName = getSceneMainSceneName(scene);
+    const group = groups.get(mainSceneName) || { stateCount: 0, episodeNumbers: new Set<number>() };
+    const siblingStateIndex = group.stateCount;
+    group.stateCount += 1;
+    getSceneEpisodeNumbers(scene).forEach(episode => group.episodeNumbers.add(episode));
+    groups.set(mainSceneName, group);
+    return { scene, sourceIndex, mainSceneName, siblingStateIndex };
+  });
+
+  return prepared.map((entry, index) => {
+    const group = groups.get(entry.mainSceneName)!;
+    return {
+      ...entry,
+      shouldShowMainSceneHeader: index === 0 || prepared[index - 1].mainSceneName !== entry.mainSceneName,
+      siblingStateCount: group.stateCount,
+      siblingEpisodeNumbers: Array.from(group.episodeNumbers).sort((a, b) => a - b),
+    };
+  });
+}
+
+function buildPropRenderItems(props: Prop[]): PropRenderItem[] {
+  const groups = new Map<string, { stateCount: number; episodeNumbers: Set<number> }>();
+  const prepared = props.map((prop, sourceIndex) => {
+    const mainPropName = getPropMainPropName(prop);
+    const group = groups.get(mainPropName) || { stateCount: 0, episodeNumbers: new Set<number>() };
+    group.stateCount += getPropStateCount(prop);
+    getPropEpisodeNumbers(prop).forEach(episode => group.episodeNumbers.add(episode));
+    groups.set(mainPropName, group);
+    return { prop, sourceIndex, mainPropName };
+  });
+
+  return prepared.map((entry, index) => {
+    const group = groups.get(entry.mainPropName)!;
+    return {
+      ...entry,
+      shouldShowMainPropHeader: index === 0 || prepared[index - 1].mainPropName !== entry.mainPropName,
+      siblingStateCount: group.stateCount,
+      siblingEpisodeNumbers: Array.from(group.episodeNumbers).sort((a, b) => a - b),
+    };
+  });
 }
 
 interface Shot {
@@ -1030,6 +1333,12 @@ interface RestoredAssetImage {
   timestamp: number;
 }
 
+function getAssetStorageFileBase(value: unknown): string {
+  return String(value || '')
+    .replace(/[<>:"/\\|?*\s]+/g, '_')
+    .slice(0, 80);
+}
+
 function normalizeAssetIdentity(value: unknown): string {
   return String(value || '')
     .trim()
@@ -1179,7 +1488,11 @@ function findCharacterLookForShot(character: Character, shotCharacter: Shot['cha
 
 // 图片数量限制
 const MAX_IMAGES_PER_ASSET = 3;
-const CHARACTER_IMAGE_REQUEST_TIMEOUT_MS = 210_000;
+// 后台图片任务默认最多等待 10 分钟；前端需覆盖完整后台等待窗口，避免后台已保存、页面先断开。
+const CHARACTER_IMAGE_REQUEST_TIMEOUT_MS = 660_000;
+const PAID_ACTION_AUTH_CACHE_MS = 15_000;
+const PAID_ACTION_AUTH_TIMEOUT_MS = 5_000;
+const ASSET_RECOVERY_SYNC_DELAYS_MS = [0, 15_000, 60_000, 180_000, 360_000, 660_000] as const;
 const BATCH_ASSET_IMAGE_CONCURRENCY = 10;
 const INITIAL_BATCH_ASSET_GENERATION_HISTORY = {
   scene: false,
@@ -1309,12 +1622,31 @@ export default function StoryboardGenerator() {
 
   // 资产刷新触发器（清除数据后递增此值以刷新资产管理组件）
   const [assetRefreshTrigger, setAssetRefreshTrigger] = useState(0);
+  const [assetRestoreRevision, setAssetRestoreRevision] = useState(0);
+  const requestAssetLibrarySync = useCallback(() => {
+    setAssetRestoreRevision(previous => previous + 1);
+  }, []);
+  const assetRecoverySyncTimersRef = useRef<number[]>([]);
+  const scheduleAssetLibraryRecovery = useCallback(() => {
+    assetRecoverySyncTimersRef.current.forEach(timer => window.clearTimeout(timer));
+    assetRecoverySyncTimersRef.current = ASSET_RECOVERY_SYNC_DELAYS_MS.map(delay => window.setTimeout(
+      requestAssetLibrarySync,
+      delay
+    ));
+  }, [requestAssetLibrarySync]);
+
+  useEffect(() => () => {
+    assetRecoverySyncTimersRef.current.forEach(timer => window.clearTimeout(timer));
+    assetRecoverySyncTimersRef.current = [];
+  }, []);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [appConnectionSettings, setAppConnectionSettings] = useState<AppConnectionSettings>(DEFAULT_APP_CONNECTION_SETTINGS);
   const [settingsLoading, setSettingsLoading] = useState(false);
   const [settingsSaving, setSettingsSaving] = useState(false);
   const [loginRequiredOpen, setLoginRequiredOpen] = useState(false);
   const [loginRequiredMessage, setLoginRequiredMessage] = useState(LOGIN_REQUIRED_PROMPT);
+  const paidActionAuthCacheRef = useRef<{ accountId: string; checkedAt: number } | null>(null);
+  const paidActionAuthRequestRef = useRef<Promise<boolean> | null>(null);
 
   const showLoginRequired = useCallback((message = LOGIN_REQUIRED_PROMPT) => {
     setLoginRequiredMessage(message);
@@ -1327,19 +1659,61 @@ export default function StoryboardGenerator() {
   }, []);
 
   const requireLoginBeforePaidAction = useCallback(async () => {
-    try {
-      const response = await fetch('/api/creation-points', { cache: 'no-store' });
-      const result = await response.json();
-      if (!response.ok || !result?.account?.id) {
-        showLoginRequired(LOGIN_REQUIRED_PROMPT);
-        return false;
-      }
+    const cachedAuth = paidActionAuthCacheRef.current;
+    if (cachedAuth && Date.now() - cachedAuth.checkedAt < PAID_ACTION_AUTH_CACHE_MS) {
       return true;
-    } catch {
-      showLoginRequired('暂时无法确认登录状态，请先登录账号后再重试。新账号首次登录赠送 500 创作点。');
-      return false;
+    }
+
+    if (paidActionAuthRequestRef.current) return paidActionAuthRequestRef.current;
+
+    const authRequest = (async () => {
+      const controller = new AbortController();
+      const timeout = window.setTimeout(() => controller.abort(), PAID_ACTION_AUTH_TIMEOUT_MS);
+      try {
+        const response = await fetch('/api/auth/session', {
+          cache: 'no-store',
+          signal: controller.signal,
+        });
+        const result = await response.json();
+        if (!response.ok || !result?.authenticated || !result?.account?.id) {
+          paidActionAuthCacheRef.current = null;
+          showLoginRequired(LOGIN_REQUIRED_PROMPT);
+          return false;
+        }
+        paidActionAuthCacheRef.current = {
+          accountId: result.account.id,
+          checkedAt: Date.now(),
+        };
+        return true;
+      } catch (error) {
+        paidActionAuthCacheRef.current = null;
+        const timedOut = error instanceof DOMException && error.name === 'AbortError';
+        showLoginRequired(timedOut
+          ? '登录状态校验超时，请稍后重试。新账号首次登录赠送 500 创作点。'
+          : '暂时无法确认登录状态，请先登录账号后再重试。新账号首次登录赠送 500 创作点。');
+        return false;
+      } finally {
+        window.clearTimeout(timeout);
+      }
+    })();
+
+    paidActionAuthRequestRef.current = authRequest;
+    try {
+      return await authRequest;
+    } finally {
+      if (paidActionAuthRequestRef.current === authRequest) {
+        paidActionAuthRequestRef.current = null;
+      }
     }
   }, [showLoginRequired]);
+
+  useEffect(() => {
+    const invalidatePaidActionAuth = () => {
+      paidActionAuthCacheRef.current = null;
+    };
+    window.addEventListener('manfei:wallet-updated', invalidatePaidActionAuth);
+    return () => window.removeEventListener('manfei:wallet-updated', invalidatePaidActionAuth);
+  }, []);
 
   const updateAppConnectionSetting = useCallback((
     section: keyof AppConnectionSettings,
@@ -1476,6 +1850,9 @@ export default function StoryboardGenerator() {
   const toggleSection = (section: string) => {
     setExpandedSections(prev => ({ ...prev, [section]: !prev[section] }));
   };
+  const hasExpandedExtractionCollection =
+    activeTab === 'extraction' &&
+    (expandedSections.scenes || expandedSections.characters || expandedSections.props);
 
   const togglePromptChapterCollapsed = (chapterNumber: number) => {
     const key = String(chapterNumber);
@@ -1554,6 +1931,27 @@ export default function StoryboardGenerator() {
   const [voiceLibraryLoading, setVoiceLibraryLoading] = useState(false);
   const [propsData, setPropsData] = usePersistentState<any>(STORAGE_KEYS.PROPS_DATA, null);
   const [outline, setOutline] = usePersistentState<Outline | null>(STORAGE_KEYS.OUTLINE, null);
+
+  useEffect(() => {
+    if (!characterVoiceData?.profiles?.length) return;
+    const retainedProfiles = characterVoiceData.profiles.filter(profile => (
+      Number(profile.totalDialogueCount) >= MIN_DIALOGUE_LINES_FOR_VOICE_PROFILE
+    ));
+    if (retainedProfiles.length === characterVoiceData.profiles.length) return;
+
+    setCharacterVoiceData(previous => {
+      if (!previous) return previous;
+      const profiles = previous.profiles.filter(profile => (
+        Number(profile.totalDialogueCount) >= MIN_DIALOGUE_LINES_FOR_VOICE_PROFILE
+      ));
+      if (profiles.length === previous.profiles.length) return previous;
+      return {
+        ...previous,
+        totalSpeakers: profiles.length,
+        profiles,
+      };
+    });
+  }, [characterVoiceData, setCharacterVoiceData]);
 
   useEffect(() => {
     setVoiceLibrary(previous => {
@@ -1770,6 +2168,24 @@ export default function StoryboardGenerator() {
     allProps: any[];  // 已提取的所有道具
   }
   const [propBatchInfo, setPropBatchInfo] = usePersistentState<PropBatchInfo | null>(STORAGE_KEYS.PROP_BATCH_INFO, null);
+  const sceneRenderItems = useMemo(() => {
+    const source = (sceneBatchInfo?.allScenes?.length ?? 0) > 0
+      ? sceneBatchInfo?.allScenes
+      : scenesData?.scenes;
+    return buildSceneRenderItems((source || []) as Scene[]);
+  }, [sceneBatchInfo?.allScenes, scenesData?.scenes]);
+  const characterRenderItems = useMemo(() => {
+    const source = (charactersData?.characters?.length ?? 0) > 0
+      ? charactersData?.characters
+      : characterBatchInfo?.allCharacters;
+    return (source || []) as Character[];
+  }, [characterBatchInfo?.allCharacters, charactersData?.characters]);
+  const propRenderItems = useMemo(() => {
+    const source = (propBatchInfo?.allProps?.length ?? 0) > 0
+      ? propBatchInfo?.allProps
+      : propsData?.props;
+    return buildPropRenderItems((source || []) as Prop[]);
+  }, [propBatchInfo?.allProps, propsData?.props]);
   const [extractionReview, setExtractionReview] = usePersistentState<ExtractionReviewState>(
     STORAGE_KEYS.EXTRACTION_REVIEW,
     INITIAL_EXTRACTION_REVIEW
@@ -2014,6 +2430,7 @@ export default function StoryboardGenerator() {
     name: string;
     type: string;
   } | null>(null);
+  const [isPreviewImageLoading, setIsPreviewImageLoading] = useState(false);
   const [previewZoom, setPreviewZoom] = useState(1);
 
   const buildExecutionScriptSourceSignature = useCallback((content: string, fileName: string) => {
@@ -2249,12 +2666,14 @@ export default function StoryboardGenerator() {
   // 打开图片预览
   const openImagePreview = useCallback((url: string, name: string, type: string) => {
     setPreviewImage({ url, name, type });
+    setIsPreviewImageLoading(true);
     setPreviewZoom(1);
   }, []);
 
   // 关闭图片预览
   const closeImagePreview = useCallback(() => {
     setPreviewImage(null);
+    setIsPreviewImageLoading(false);
     setPreviewZoom(1);
   }, []);
 
@@ -2421,6 +2840,7 @@ export default function StoryboardGenerator() {
   const [assetImages, setAssetImagesLocal] = useState<Map<string, AssetImages>>(new Map());
   // 生成反馈独立于持久化图片，避免无 URL 的临时占位被同步清理后界面失去进度提示。
   const [assetGenerationStatuses, setAssetGenerationStatuses] = useState<Record<string, string>>({});
+  const [assetGenerationErrors, setAssetGenerationErrors] = useState<Record<string, string>>({});
   const activeAssetGenerationIdsRef = useRef<Set<string>>(new Set());
 
   // 使用 ref 追踪上一次的值，避免循环同步
@@ -2931,6 +3351,7 @@ export default function StoryboardGenerator() {
   // 用于取消角色造型图片生成的 AbortController
   const lookAbortControllers = useRef<Map<string, AbortController>>(new Map());
   const manuallyStoppedLookGenerations = useRef<Set<string>>(new Set());
+  const pendingLookGenerationRequests = useRef<Set<string>>(new Set());
 
   const getLookGenerationKey = (character: any, lookId: string) => {
     return `${character?.id ?? character?.name ?? 'unknown'}-${character?.name ?? 'unknown'}-${lookId}`;
@@ -2939,6 +3360,7 @@ export default function StoryboardGenerator() {
   // 仅停止当前页面等待；外部任务提交后无法在这里真正撤销
   const cancelLookGeneration = (character: any, lookId: string) => {
     const generationKey = getLookGenerationKey(character, lookId);
+    const wasPendingSubmission = pendingLookGenerationRequests.current.delete(generationKey);
     // 先中止正在进行的请求
     const controller = lookAbortControllers.current.get(generationKey);
     if (controller) {
@@ -2947,8 +3369,14 @@ export default function StoryboardGenerator() {
       lookAbortControllers.current.delete(generationKey);
     }
     // 无论是否有 controller，都重置状态（防止点击时 controller 尚未注册的竞态）
-    updateLookById(lookId, { isGenerating: false, generatingStatus: undefined }, character);
-    toast.warning('已停止在当前页面等待。外部生图任务可能仍会在后台完成并按成功结果扣点，请稍后到资产管理查看');
+    updateLookById(lookId, {
+      isGenerating: false,
+      generatingStatus: undefined,
+      generationError: undefined,
+    }, character);
+    toast.warning(wasPendingSubmission
+      ? '已取消本次造型任务提交'
+      : '已停止在当前页面等待。外部生图任务可能仍会在后台完成并按成功结果扣点，请稍后到资产管理查看');
   };
 
   // 当章节成功生成分镜但 storyboardConfirmed 为 false 时自动修复
@@ -3462,11 +3890,18 @@ export default function StoryboardGenerator() {
     const restoreSignature = (['scene', 'character', 'prop'] as const)
       .map(type => {
         const identities = knownAssets[type]
-          .map(item => normalizeAssetIdentity(item?.name))
+          .map(item => {
+            const assetIdentity = normalizeAssetIdentity(item?.name);
+            if (type !== 'character') return assetIdentity;
+            const lookIds = Array.isArray(item?.looks)
+              ? item.looks.map((look: CharacterLook) => String(look?.id || '').trim()).filter(Boolean).sort()
+              : [];
+            return `${assetIdentity}[${lookIds.join('|')}]`;
+          })
           .filter(Boolean);
         return `${type}:${Array.from(new Set(identities)).sort().join('|')}`;
       })
-      .join('::');
+      .join('::') + `::revision:${assetRestoreRevision}`;
 
     if (!Object.values(knownAssets).some(items => items.length > 0)) return;
     if (assetRestoreSignatureRef.current === restoreSignature) return;
@@ -3510,6 +3945,50 @@ export default function StoryboardGenerator() {
             index: number;
           }> = [];
 
+          const characterFiles = Array.isArray(data.assetImages.character)
+            ? data.assetImages.character as RestoredAssetImage[]
+            : [];
+          const validAssetFileUrls = Object.fromEntries(
+            (['scene', 'character', 'prop'] as const).map(type => [
+              type,
+              new Set(
+                (Array.isArray(data.assetImages[type]) ? data.assetImages[type] as RestoredAssetImage[] : [])
+                  .map(file => file.url)
+                  .filter(Boolean)
+              ),
+            ])
+          ) as Record<'scene' | 'character' | 'prop', Set<string>>;
+          const validCharacterFileUrls = new Set(characterFiles.map(file => file.url).filter(Boolean));
+          const latestCharacterFileByBase = new Map<string, RestoredAssetImage>();
+          characterFiles.forEach(file => {
+            if (file?.name && file?.url && !latestCharacterFileByBase.has(file.name)) {
+              latestCharacterFileByBase.set(file.name, file);
+            }
+          });
+
+          const restoredCharacterLooks = new Map<string, {
+            image?: RestoredAssetImage;
+            fourView?: RestoredAssetImage;
+          }>();
+          knownAssets.character.forEach((character: Character) => {
+            if (!character?.name || !Array.isArray(character.looks)) return;
+            const characterName = String(character.name);
+            const normalBase = getAssetStorageFileBase(characterName);
+            const fourViewBase = getAssetStorageFileBase(`${characterName}的四视图`);
+            character.looks.forEach((look: CharacterLook) => {
+              const lookId = String(look?.id || '').trim();
+              if (!lookId) return;
+              const matchKey = `${characterName}\u0000${lookId}`;
+              const existing = restoredCharacterLooks.get(matchKey) || {};
+              const image = existing.image || latestCharacterFileByBase.get(`${normalBase}_${lookId}`);
+              const fourView = existing.fourView || latestCharacterFileByBase.get(`${fourViewBase}_${lookId}`);
+              restoredCharacterLooks.set(matchKey, {
+                image,
+                fourView,
+              });
+            });
+          });
+
           (['scene', 'character', 'prop'] as const).forEach(type => {
             const files = Array.isArray(data.assetImages[type])
               ? data.assetImages[type] as RestoredAssetImage[]
@@ -3525,37 +4004,125 @@ export default function StoryboardGenerator() {
             });
           });
 
-          if (restoredMatches.length > 0) {
-            setAssetImages(prev => {
-              const next = new Map(prev);
-              restoredMatches.forEach(({ type, assetName, file, index }) => {
-                const assetId = `${type}-${assetName}`;
-                const existing = next.get(assetId);
-                const existingImages = existing?.images || [];
-                if (existingImages.some(image => image.imageUrl === file.url)) return;
+          setAssetImages(prev => {
+            const next = new Map(prev);
+            let changed = false;
+            next.forEach((asset, assetId) => {
+              const validUrls = validAssetFileUrls[asset.type];
+              const images = (asset.images || []).filter(image => (
+                !image.imageUrl?.includes('/api/assets-view?') || validUrls.has(image.imageUrl)
+              ));
+              if (images.length !== (asset.images || []).length) {
+                next.set(assetId, { ...asset, images });
+                changed = true;
+              }
+            });
+            restoredMatches.forEach(({ type, assetName, file, index }) => {
+              const assetId = `${type}-${assetName}`;
+              const existing = next.get(assetId);
+              const existingImages = existing?.images || [];
+              if (existingImages.some(image => image.imageUrl === file.url)) return;
 
-                const restoredImage: AssetSingleImage = {
-                  imageId: `restored-${type}-${file.timestamp || Date.now()}-${index}`,
-                  imageUrl: file.url,
-                  isCustom: false,
-                  isFromLibrary: true,
-                  originalName: file.name,
-                  isGenerating: false,
-                };
-                next.set(assetId, {
-                  assetId,
-                  type,
-                  name: assetName,
-                  images: [...existingImages, restoredImage].slice(0, MAX_IMAGES_PER_ASSET),
-                });
+              const restoredImage: AssetSingleImage = {
+                imageId: `restored-${type}-${file.timestamp || Date.now()}-${index}`,
+                imageUrl: file.url,
+                isCustom: false,
+                isFromLibrary: true,
+                originalName: file.name,
+                isGenerating: false,
+              };
+              next.set(assetId, {
+                assetId,
+                type,
+                name: assetName,
+                images: [...existingImages, restoredImage].slice(0, MAX_IMAGES_PER_ASSET),
               });
-              return next;
+              changed = true;
+            });
+            return changed ? next : prev;
+          });
+          if (restoredMatches.length > 0) {
+            setAssetGenerationErrors(prev => {
+              const next = { ...prev };
+              let changed = false;
+              restoredMatches.forEach(({ type, assetName }) => {
+                const assetId = `${type}-${assetName}`;
+                if (assetId in next) {
+                  delete next[assetId];
+                  changed = true;
+                }
+              });
+              return changed ? next : prev;
+            });
+          }
+
+          const resolveRestoredLocalUrl = (currentUrl: string | undefined, restored?: RestoredAssetImage) => {
+            const currentLocalFileIsMissing = Boolean(
+              currentUrl?.includes('/api/assets-view?') && !validCharacterFileUrls.has(currentUrl)
+            );
+            if (restored?.url && (!currentUrl || currentLocalFileIsMissing)) return restored.url;
+            if (currentLocalFileIsMissing) return undefined;
+            return currentUrl;
+          };
+          const restoreCharacterLookImages = (characters: Character[]) => {
+            let changed = false;
+            const nextCharacters = characters.map(character => {
+              if (!Array.isArray(character.looks) || character.looks.length === 0) return character;
+              let characterChanged = false;
+              const looks = character.looks.map(look => {
+                const restored = restoredCharacterLooks.get(`${character.name}\u0000${look.id}`);
+                if (!restored) return look;
+
+                const nextImageUrl = resolveRestoredLocalUrl(look.imageUrl, restored.image);
+                const nextFourViewUrl = resolveRestoredLocalUrl(look.fourViewImageUrl, restored.fourView);
+                const imageChanged = nextImageUrl !== look.imageUrl;
+                const fourViewChanged = nextFourViewUrl !== look.fourViewImageUrl;
+                const imageErrorChanged = Boolean(restored.image?.url && look.generationError);
+                const fourViewErrorChanged = Boolean(restored.fourView?.url && look.fourViewError);
+                if (!imageChanged && !fourViewChanged && !imageErrorChanged && !fourViewErrorChanged) return look;
+
+                characterChanged = true;
+                return {
+                  ...look,
+                  ...(imageChanged ? {
+                    imageUrl: nextImageUrl,
+                    isGenerating: false,
+                    generatingStatus: undefined,
+                  } : {}),
+                  ...(imageErrorChanged ? { generationError: undefined } : {}),
+                  ...(fourViewChanged ? {
+                    fourViewImageUrl: nextFourViewUrl,
+                    isGeneratingFourView: false,
+                    fourViewStatus: undefined,
+                  } : {}),
+                  ...(fourViewErrorChanged ? { fourViewError: undefined } : {}),
+                };
+              });
+              if (!characterChanged) return character;
+              changed = true;
+              return { ...character, looks };
+            });
+            return changed ? nextCharacters : characters;
+          };
+
+          if (restoredCharacterLooks.size > 0) {
+            setCharactersData((previous: any) => {
+              if (!Array.isArray(previous?.characters)) return previous;
+              const characters = restoreCharacterLookImages(previous.characters);
+              return characters === previous.characters ? previous : { ...previous, characters };
+            });
+            setCharacterBatchInfo((previous: any) => {
+              if (!Array.isArray(previous?.allCharacters)) return previous;
+              const allCharacters = restoreCharacterLookImages(previous.allCharacters);
+              return allCharacters === previous.allCharacters ? previous : { ...previous, allCharacters };
             });
           }
 
           console.log('[素材图片] 图片库同步完成，共',
             Object.values(data.assetImages as Record<string, RestoredAssetImage[]>).flat().length,
-            '张图片，自动关联', restoredMatches.length, '张');
+            '张图片，自动关联', restoredMatches.length, '张基础图、',
+            Array.from(restoredCharacterLooks.values()).filter(match => match.image || match.fourView).length,
+            '个造型槽位');
         }
       } catch (error) {
         console.error('恢复图片库失败:', error);
@@ -3571,7 +4138,10 @@ export default function StoryboardGenerator() {
     sceneBatchInfo,
     characterBatchInfo,
     propBatchInfo,
+    assetRestoreRevision,
     setAssetImages,
+    setCharactersData,
+    setCharacterBatchInfo,
   ]);
 
   // 单独重试某个提取
@@ -4446,7 +5016,7 @@ export default function StoryboardGenerator() {
       status: 'reviewing',
       error: undefined,
     }));
-    const toastId = toast.loading('正在通读原剧本，核验重复项与人物造型时间线...');
+    const toastId = toast.loading('正在通读执行剧本，核验重复项、人物性别、角色形态与造型时间线...');
 
     try {
       const response = await fetch('/api/review-extractions', {
@@ -4458,6 +5028,7 @@ export default function StoryboardGenerator() {
           scenes,
           characters,
           props,
+          creationBible: getCreationBiblePayload(),
         }),
       });
       const result = await response.json().catch(() => null);
@@ -4545,6 +5116,8 @@ export default function StoryboardGenerator() {
       setExtractionReview(nextReview);
       toast.dismiss(toastId);
       const lifecycleAdded = (nextReview.lifecycle?.repairedByModel || 0) + (nextReview.lifecycle?.fallbackAdded || 0);
+      const semanticCorrected = Number(result.review?.semantic?.genderCorrectedCount || 0)
+        + Number(result.review?.semantic?.creatureCorrectedCount || 0);
       const reviewDescription = [
         nextReview.mergedGroupCount > 0
           ? `合并 ${nextReview.mergedGroupCount} 组重复项（场景 ${nextReview.removedCount.scenes}、人物 ${nextReview.removedCount.characters}、道具 ${nextReview.removedCount.props}）`
@@ -4552,6 +5125,9 @@ export default function StoryboardGenerator() {
         lifecycleAdded > 0
           ? `补齐 ${lifecycleAdded} 项人物时期/状态造型`
           : `人物造型时间线已覆盖 ${nextReview.lifecycle?.requiredCount || 0} 项明确证据`,
+        semanticCorrected > 0
+          ? `修正 ${semanticCorrected} 项人物性别或非人角色形态`
+          : '人物性别与角色形态核验通过',
         (nextReview.lifecycle?.unresolvedCount || 0) > 0
           ? `仍有 ${nextReview.lifecycle?.unresolvedCount} 项需人工复核`
           : '',
@@ -4581,6 +5157,7 @@ export default function StoryboardGenerator() {
     scenesData,
     charactersData,
     propsData,
+    getCreationBiblePayload,
     getExtractionSourceContent,
     requireLoginBeforePaidAction,
     migrateReviewedAssetAliases,
@@ -7753,6 +8330,12 @@ export default function StoryboardGenerator() {
     );
 
     activeAssetGenerationIdsRef.current.add(assetId);
+    setAssetGenerationErrors(prev => {
+      if (!(assetId in prev)) return prev;
+      const next = { ...prev };
+      delete next[assetId];
+      return next;
+    });
     setAssetGenerationStatuses(prev => ({ ...prev, [assetId]: initialGeneratingStatus }));
     const processingStatusTimer = window.setTimeout(() => {
       setAssetGenerationStatuses(prev => (
@@ -7823,7 +8406,7 @@ export default function StoryboardGenerator() {
         }),
       });
 
-      const result = await response.json();
+      const result = await readImageGenerationResponse(response, '图片服务没有返回有效结果');
 
       if (result.success) {
         const generatedImage: AssetSingleImage = {
@@ -7862,10 +8445,18 @@ export default function StoryboardGenerator() {
           }
           return newMap;
         });
+        setAssetGenerationErrors(prev => {
+          if (!(assetId in prev)) return prev;
+          const next = { ...prev };
+          delete next[assetId];
+          return next;
+        });
+        requestAssetLibrarySync();
         options?.onSuccess?.(generatedImage);
         if (!options?.silent) toast.success(`${data.name} 图片生成成功`);
         return true;
       } else {
+        const failureReason = result.error || '图片生成失败：接口没有返回原因';
         // 移除生成中的占位图片
         setAssetImages(prev => {
           const newMap = new Map(prev);
@@ -7878,10 +8469,12 @@ export default function StoryboardGenerator() {
           }
           return newMap;
         });
-        if (!options?.silent) toast.error(result.error || '图片生成失败');
+        setAssetGenerationErrors(prev => ({ ...prev, [assetId]: failureReason }));
+        if (!options?.silent) toast.error(`${data.name}：${failureReason}`);
         return false;
       }
     } catch (error) {
+      const failureReason = getImageRequestFailureReason(error, '生成图片');
       // 移除生成中的占位图片
       setAssetImages(prev => {
         const newMap = new Map(prev);
@@ -7892,9 +8485,12 @@ export default function StoryboardGenerator() {
             images: existing.images.filter(img => img.imageId !== tempImageId),
           });
         }
-        return newMap;
+          return newMap;
       });
-      if (!options?.silent) toast.error(getNetworkErrorMessage(error, '生成图片'));
+      setAssetGenerationErrors(prev => ({ ...prev, [assetId]: failureReason }));
+      // 浏览器连接中断并不代表上游任务失败；后台若稍后落盘，自动把文件补回当前卡片。
+      scheduleAssetLibraryRecovery();
+      if (!options?.silent) toast.error(`${data.name}：${failureReason}`);
       return false;
     } finally {
       window.clearTimeout(processingStatusTimer);
@@ -8336,17 +8932,42 @@ export default function StoryboardGenerator() {
       toast.warning(reference.missingMessage);
       return;
     }
-    if (!(await requireLoginBeforePaidAction())) return;
+    const generationKey = getLookGenerationKey(character, lookId);
+    if (
+      pendingLookGenerationRequests.current.has(generationKey) ||
+      lookAbortControllers.current.has(generationKey)
+    ) {
+      toast.info(`${character.name} - ${look.scene || lookId} 正在提交或生成，请勿重复点击`);
+      return;
+    }
+
+    pendingLookGenerationRequests.current.add(generationKey);
+    updateLookById(lookId, {
+      isGenerating: true,
+      generatingStatus: '正在校验账号并准备提交造型任务...',
+      generationError: undefined,
+    }, character);
+
+    const loginReady = await requireLoginBeforePaidAction();
+    const submissionStillActive = pendingLookGenerationRequests.current.delete(generationKey);
+    if (!submissionStillActive) return;
+    if (!loginReady) {
+      updateLookById(lookId, {
+        isGenerating: false,
+        generatingStatus: undefined,
+      }, character);
+      return;
+    }
 
     setIsGeneratingImage(true);
-    const generationKey = getLookGenerationKey(character, lookId);
     let statusTimer1: ReturnType<typeof setTimeout> | undefined;
     let statusTimer2: ReturnType<typeof setTimeout> | undefined;
     let fetchTimeout: ReturnType<typeof setTimeout> | undefined;
     try {
       updateLookById(lookId, {
         isGenerating: true,
-        generatingStatus: `正在参考「${reference.label}」提交图生图任务...`,
+        generatingStatus: `账号已确认，正在参考「${reference.label}」提交图生图任务...`,
+        generationError: undefined,
       }, character);
       toast.info(`开始生成 ${character.name} - ${look.scene || lookId} 造型图片`);
 
@@ -8381,7 +9002,7 @@ export default function StoryboardGenerator() {
       statusTimer2 = undefined;
       lookAbortControllers.current.delete(generationKey);
 
-      const result = await response.json();
+      const result = await readImageGenerationResponse(response, '造型图片服务没有返回有效结果');
 
       if (result.success) {
         updateLookById(lookId, {
@@ -8389,29 +9010,42 @@ export default function StoryboardGenerator() {
           imagePrompt: result.prompt,
           isGenerating: false,
           generatingStatus: undefined,
+          generationError: undefined,
           identitySourceUrl: character.confirmedFaceImageUrl,
           identityNeedsReview: false,
           fourViewIdentityNeedsReview: Boolean(look.fourViewImageUrl),
         }, character);
+        requestAssetLibrarySync();
         toast.success(`${character.name} - ${look.scene || lookId} 造型图片生成成功`);
       } else {
-        updateLookById(lookId, { isGenerating: false, generatingStatus: undefined }, character);
-        toast.error(result.error || '造型图片生成失败');
+        const failureReason = result.error || '造型图片生成失败：接口没有返回原因';
+        updateLookById(lookId, {
+          isGenerating: false,
+          generatingStatus: undefined,
+          generationError: failureReason,
+        }, character);
+        toast.error(`${character.name} - ${look.scene || lookId}：${failureReason}`);
       }
     } catch (error: any) {
       if (fetchTimeout) clearTimeout(fetchTimeout);
       if (statusTimer1) clearTimeout(statusTimer1);
       if (statusTimer2) clearTimeout(statusTimer2);
       lookAbortControllers.current.delete(generationKey);
-      updateLookById(lookId, { isGenerating: false, generatingStatus: undefined }, character);
       const manuallyStopped = manuallyStoppedLookGenerations.current.delete(generationKey);
+      const failureReason = getImageRequestFailureReason(error, '造型图片生成');
+      updateLookById(lookId, {
+        isGenerating: false,
+        generatingStatus: undefined,
+        generationError: manuallyStopped ? undefined : failureReason,
+      }, character);
+      scheduleAssetLibraryRecovery();
       if (error?.name === 'AbortError') {
         if (!manuallyStopped) {
-          toast.error('造型图片等待超时（超过3分30秒）。后台任务可能仍在处理，请稍后到资产管理查看后再决定是否重试');
+          toast.error(`${character.name} - ${look.scene || lookId}：${failureReason}`);
         }
       } else {
         console.error('生成造型图片失败:', error);
-        toast.error('造型图片生成失败');
+        toast.error(`${character.name} - ${look.scene || lookId}：${failureReason}`);
       }
     } finally {
       setIsGeneratingImage(false);
@@ -8450,6 +9084,7 @@ export default function StoryboardGenerator() {
       updateLookById(lookId, {
         isGeneratingFourView: true,
         fourViewStatus: '正在提交四视图生成任务...',
+        fourViewError: undefined,
       }, character);
       toast.info(`开始生成 ${character.name}的四视图`);
 
@@ -8481,7 +9116,7 @@ export default function StoryboardGenerator() {
       clearTimeout(statusTimer2);
       statusTimer2 = undefined;
 
-      const result = await response.json();
+      const result = await readImageGenerationResponse(response, '四视图服务没有返回有效结果');
 
       if (result.success) {
         updateLookById(lookId, {
@@ -8489,25 +9124,38 @@ export default function StoryboardGenerator() {
           fourViewPrompt: result.prompt,
           isGeneratingFourView: false,
           fourViewStatus: undefined,
+          fourViewError: undefined,
           fourViewIdentitySourceUrl: character.confirmedFaceImageUrl,
           fourViewLookSourceUrl: referenceImageUrl,
           fourViewIdentityNeedsReview: false,
         }, character);
+        requestAssetLibrarySync();
         toast.success(`${character.name}的四视图生成成功`);
       } else {
-        updateLookById(lookId, { isGeneratingFourView: false, fourViewStatus: undefined }, character);
-        toast.error(result.error || '四视图生成失败');
+        const failureReason = result.error || '四视图生成失败：接口没有返回原因';
+        updateLookById(lookId, {
+          isGeneratingFourView: false,
+          fourViewStatus: undefined,
+          fourViewError: failureReason,
+        }, character);
+        toast.error(`${character.name}的四视图：${failureReason}`);
       }
     } catch (error: any) {
       if (fetchTimeout) clearTimeout(fetchTimeout);
       if (statusTimer1) clearTimeout(statusTimer1);
       if (statusTimer2) clearTimeout(statusTimer2);
-      updateLookById(lookId, { isGeneratingFourView: false, fourViewStatus: undefined }, character);
+      const failureReason = getImageRequestFailureReason(error, '四视图生成');
+      updateLookById(lookId, {
+        isGeneratingFourView: false,
+        fourViewStatus: undefined,
+        fourViewError: failureReason,
+      }, character);
+      scheduleAssetLibraryRecovery();
       if (error?.name === 'AbortError') {
-        toast.error('四视图等待超时（超过3分30秒）。后台任务可能仍在处理，请稍后到资产管理查看后再决定是否重试');
+        toast.error(`${character.name}的四视图：${failureReason}`);
       } else {
         console.error('生成四视图失败:', error);
-        toast.error('四视图生成失败');
+        toast.error(`${character.name}的四视图：${failureReason}`);
       }
     } finally {
       setIsGeneratingImage(false);
@@ -8521,6 +9169,7 @@ export default function StoryboardGenerator() {
       imageUrl: undefined,
       identitySourceUrl: undefined,
       identityNeedsReview: false,
+      generationError: undefined,
       fourViewIdentityNeedsReview: Boolean(look?.fourViewImageUrl),
     }, character);
     toast.success('造型图片已删除');
@@ -8542,6 +9191,7 @@ export default function StoryboardGenerator() {
           imageUrl,
           isCustom: true,
           isGenerating: false,
+          generationError: undefined,
           identitySourceUrl: character.confirmedFaceImageUrl,
           identityNeedsReview: false,
           fourViewIdentityNeedsReview: Boolean(
@@ -8578,7 +9228,11 @@ export default function StoryboardGenerator() {
 
     setIsGeneratingImage(true);
     try {
-      updateLookById(lookId, { isGenerating: true, generatingStatus: '正在参考当前造型重新生成...' }, character);
+      updateLookById(lookId, {
+        isGenerating: true,
+        generatingStatus: '正在参考当前造型重新生成...',
+        generationError: undefined,
+      }, character);
 
       const response = await fetch('/api/generate-asset-image', {
         method: 'POST',
@@ -8593,7 +9247,7 @@ export default function StoryboardGenerator() {
         }),
       });
 
-      const result = await response.json();
+      const result = await readImageGenerationResponse(response, '造型图片服务没有返回有效结果');
 
       if (result.success) {
         updateLookById(lookId, {
@@ -8601,21 +9255,34 @@ export default function StoryboardGenerator() {
           imagePrompt: result.prompt,
           isGenerating: false,
           generatingStatus: undefined,
+          generationError: undefined,
           identitySourceUrl: character.confirmedFaceImageUrl,
           identityNeedsReview: false,
           fourViewIdentityNeedsReview: Boolean(look.fourViewImageUrl),
         }, character);
+        requestAssetLibrarySync();
         toast.success(`${character.name} 造型图片重新生成成功`);
       } else {
-        updateLookById(lookId, { isGenerating: false, generatingStatus: undefined }, character);
-        toast.error(result.error || '造型图片重新生成失败');
+        const failureReason = result.error || '造型图片重新生成失败：接口没有返回原因';
+        updateLookById(lookId, {
+          isGenerating: false,
+          generatingStatus: undefined,
+          generationError: failureReason,
+        }, character);
+        toast.error(`${character.name} - ${look.scene || lookId}：${failureReason}`);
       }
     } catch (error: any) {
-      updateLookById(lookId, { isGenerating: false, generatingStatus: undefined }, character);
+      const failureReason = getImageRequestFailureReason(error, '造型图片重新生成');
+      updateLookById(lookId, {
+        isGenerating: false,
+        generatingStatus: undefined,
+        generationError: failureReason,
+      }, character);
+      scheduleAssetLibraryRecovery();
       if (error?.name !== 'AbortError') {
         console.error('重新生成造型图片失败:', error);
       }
-      toast.error('造型图片重新生成失败');
+      toast.error(`${character.name} - ${look.scene || lookId}：${failureReason}`);
     } finally {
       setIsGeneratingImage(false);
     }
@@ -8641,6 +9308,13 @@ export default function StoryboardGenerator() {
     if (!(await requireLoginBeforePaidAction())) return;
 
     const tempImageId = `temp-img2img-${Date.now()}`;
+
+    setAssetGenerationErrors(prev => {
+      if (!(assetId in prev)) return prev;
+      const next = { ...prev };
+      delete next[assetId];
+      return next;
+    });
 
     // 设置生成中状态
     setAssetImages(prev => {
@@ -8685,7 +9359,7 @@ export default function StoryboardGenerator() {
         }),
       });
 
-      const result = await response.json();
+      const result = await readImageGenerationResponse(response, '图生图服务没有返回有效结果');
 
       if (result.success) {
         setAssetImages(prev => {
@@ -8712,8 +9386,16 @@ export default function StoryboardGenerator() {
           }
           return newMap;
         });
+        setAssetGenerationErrors(prev => {
+          if (!(assetId in prev)) return prev;
+          const next = { ...prev };
+          delete next[assetId];
+          return next;
+        });
+        requestAssetLibrarySync();
         toast.success(`基于参考图片生成成功 (Seedream 模型)`);
       } else {
+        const failureReason = result.error || '图生图失败：接口没有返回原因';
         // 移除生成中的占位图片
         setAssetImages(prev => {
           const newMap = new Map(prev);
@@ -8726,9 +9408,11 @@ export default function StoryboardGenerator() {
           }
           return newMap;
         });
-        toast.error(result.error || '图生图失败');
+        setAssetGenerationErrors(prev => ({ ...prev, [assetId]: failureReason }));
+        toast.error(`${data.name}：${failureReason}`);
       }
     } catch (error) {
+      const failureReason = getImageRequestFailureReason(error, '图生图');
       // 移除生成中的占位图片
       setAssetImages(prev => {
         const newMap = new Map(prev);
@@ -8741,7 +9425,9 @@ export default function StoryboardGenerator() {
         }
         return newMap;
       });
-      toast.error('图生图失败');
+      setAssetGenerationErrors(prev => ({ ...prev, [assetId]: failureReason }));
+      scheduleAssetLibraryRecovery();
+      toast.error(`${data.name}：${failureReason}`);
     }
   };
 
@@ -9044,97 +9730,6 @@ export default function StoryboardGenerator() {
       outline: 'pending',
     });
   };
-
-  const getSceneMainSceneName = (scene: Scene) => getSceneMainLocation(scene) || scene.name;
-
-  const getSceneEpisodeNumbers = (scene: Scene): number[] => {
-    const fromEpisodes = Array.isArray(scene.episodeNumbers)
-      ? scene.episodeNumbers.filter((item): item is number => typeof item === 'number' && Number.isFinite(item))
-      : [];
-    const fromOccurrences = Array.isArray(scene.occurrences)
-      ? scene.occurrences
-        .map(item => item.episodeNumber)
-        .filter((item): item is number => typeof item === 'number' && Number.isFinite(item))
-      : [];
-    return Array.from(new Set([...fromEpisodes, ...fromOccurrences])).sort((a, b) => a - b);
-  };
-
-  const formatSceneEpisodeText = (scene: Scene) => {
-    const episodeNumbers = getSceneEpisodeNumbers(scene);
-    if (episodeNumbers.length > 0) {
-      return episodeNumbers.length <= 4
-        ? episodeNumbers.map(item => `第${item}集`).join('、')
-        : `${episodeNumbers.slice(0, 4).map(item => `第${item}集`).join('、')} 等${episodeNumbers.length}集`;
-    }
-    const labels = Array.isArray(scene.occurrences)
-      ? scene.occurrences
-        .map(item => item.episodeLabel)
-        .filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
-      : [];
-    return Array.from(new Set(labels)).join('、') || '未关联集数';
-  };
-
-  const getPropMainPropName = (prop: Prop) => (
-    prop.mainPropName ||
-    String(prop.name || '')
-      .replace(/[【\[]\s*(?:完整|基准|原始|破碎|碎裂|损坏|破损|裂开|断裂|旧化|陈旧|老旧|沾血|染血|血迹|烧毁|焦黑|修复|修好|打开|关闭|空的|空置|空瓶|空盒|空状态|装满|改造前|改造后|十年前|10年前|十年后|10年后|遗失|失效)\s*[】\]]/g, '')
-      .replace(/（\s*(?:完整|基准|原始|破碎|碎裂|损坏|破损|裂开|断裂|旧化|陈旧|老旧|沾血|染血|血迹|烧毁|焦黑|修复|修好|打开|关闭|空的|空置|空瓶|空盒|空状态|装满|改造前|改造后|十年前|10年前|十年后|10年后|遗失|失效)(?:状态)?\s*）/g, '')
-      .replace(/\(\s*(?:完整|基准|原始|破碎|碎裂|损坏|破损|裂开|断裂|旧化|陈旧|老旧|沾血|染血|血迹|烧毁|焦黑|修复|修好|打开|关闭|空的|空置|空瓶|空盒|空状态|装满|改造前|改造后|十年前|10年前|十年后|10年后|遗失|失效)(?:状态)?\s*\)/g, '')
-      .replace(/^(?:完整|基准|原始|破碎|碎裂|损坏|破损|裂开|断裂|旧化|陈旧|老旧|沾血|染血|血迹|烧毁|焦黑|修复|修好|打开|关闭|空的|空置|空瓶|空盒|空状态|装满|改造前|改造后|十年前|10年前|十年后|10年后|遗失|失效)的?/g, '')
-      .replace(/(?:完整|基准|原始|破碎|碎裂|损坏|破损|裂开|断裂|旧化|陈旧|老旧|沾血|染血|血迹|烧毁|焦黑|修复|修好|打开|关闭|空的|空置|空瓶|空盒|空状态|装满|改造前|改造后|十年前|10年前|十年后|10年后|遗失|失效)(?:状态|版|后|前)?$/g, '')
-      .replace(/\s+/g, '')
-      .trim() ||
-    prop.name
-  );
-
-  const getPropEpisodeNumbers = (prop: Prop): number[] => {
-    const fromEpisodes = Array.isArray(prop.episodeNumbers)
-      ? prop.episodeNumbers.filter((item): item is number => typeof item === 'number' && Number.isFinite(item))
-      : [];
-    const fromOccurrences = Array.isArray(prop.occurrences)
-      ? prop.occurrences
-        .map(item => item.episodeNumber)
-        .filter((item): item is number => typeof item === 'number' && Number.isFinite(item))
-      : [];
-    const fromStates = !prop.isStateUnit && Array.isArray(prop.stateVariants)
-      ? prop.stateVariants.flatMap(state => (
-          Array.isArray(state.episodeNumbers)
-            ? state.episodeNumbers.filter((item): item is number => typeof item === 'number' && Number.isFinite(item))
-            : []
-        ))
-      : [];
-    return Array.from(new Set([...fromEpisodes, ...fromOccurrences, ...fromStates])).sort((a, b) => a - b);
-  };
-
-  const formatPropEpisodeText = (prop: Prop) => {
-    const episodeNumbers = getPropEpisodeNumbers(prop);
-    if (episodeNumbers.length > 0) {
-      return episodeNumbers.length <= 4
-        ? episodeNumbers.map(item => `第${item}集`).join('、')
-        : `${episodeNumbers.slice(0, 4).map(item => `第${item}集`).join('、')} 等${episodeNumbers.length}集`;
-    }
-    const labels = [
-      ...(Array.isArray(prop.occurrences)
-        ? prop.occurrences
-          .map(item => item.episodeLabel)
-          .filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
-        : []),
-      ...(!prop.isStateUnit && Array.isArray(prop.stateVariants)
-        ? prop.stateVariants.flatMap(state => (
-            Array.isArray(state.occurrences)
-              ? state.occurrences
-                .map(item => item.episodeLabel)
-                .filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
-              : []
-          ))
-        : []),
-    ];
-    return Array.from(new Set(labels)).join('、') || '未关联集数';
-  };
-
-  const getPropStateCount = (prop: Prop) => (
-    prop.isStateUnit ? 1 : (Array.isArray(prop.stateVariants) && prop.stateVariants.length > 0 ? prop.stateVariants.length : 1)
-  );
 
   type AssetListExportType = 'scene' | 'character' | 'prop';
   type AssetListExportImage = {
@@ -9855,8 +10450,10 @@ export default function StoryboardGenerator() {
                 >
                   <div className={`relative w-full bg-black ${isPortrait ? 'aspect-[4/5]' : 'aspect-video'}`}>
                     <img
-                      src={image.imageUrl}
+                      src={getAssetThumbnailUrl(image.imageUrl, isPortrait ? 640 : 900)}
                       alt={`${assetImageChooserTarget?.name || '素材'}第 ${index + 1} 张`}
+                      loading="lazy"
+                      decoding="async"
                       className="h-full w-full object-contain transition-transform duration-200 group-hover/select:scale-[1.02]"
                     />
                     {isCurrentPrimary && (
@@ -9968,7 +10565,7 @@ export default function StoryboardGenerator() {
         <span className="mirror-line mirror-line-three" />
         <span className="mirror-line mirror-line-four" />
       </div>
-      <div className="black-mirror-content relative z-10 mx-auto max-w-[1480px]">
+      <div className="black-mirror-content relative z-10 mx-auto w-full max-w-[1920px]">
         {/* Header */}
         <div className="black-mirror-header mb-8">
           <div className="flex flex-col gap-5 xl:flex-row xl:items-start xl:justify-between">
@@ -10210,7 +10807,10 @@ export default function StoryboardGenerator() {
                 <Save className="w-3 h-3" />
                 自动保存+本地备份
               </div>
-              <AssetsFolderManager refreshTrigger={assetRefreshTrigger} />
+              <AssetsFolderManager
+                refreshTrigger={assetRefreshTrigger}
+                onAssetsChanged={requestAssetLibrarySync}
+              />
               <CreationPointsWallet />
               {/* 清除数据按钮 */}
               <AlertDialog>
@@ -10334,9 +10934,14 @@ export default function StoryboardGenerator() {
         </div>
 
         {/* Main Content */}
-        <div className="black-mirror-workspace grid grid-cols-1 gap-6 lg:grid-cols-3">
+        <div
+          className={`black-mirror-workspace grid grid-cols-1 gap-6 ${
+            hasExpandedExtractionCollection ? 'lg:grid-cols-1' : 'lg:grid-cols-3'
+          }`}
+          data-expanded-extraction={hasExpandedExtractionCollection ? 'true' : 'false'}
+        >
           {/* Left Panel - File Upload & Extraction Status */}
-          <div className="lg:col-span-1 space-y-6">
+          <div className={`${hasExpandedExtractionCollection ? 'lg:hidden' : 'lg:col-span-1'} space-y-6`}>
             {/* File Upload Card */}
             <Card>
               <CardHeader>
@@ -11197,7 +11802,7 @@ export default function StoryboardGenerator() {
           </div>
 
           {/* Right Panel - Extraction Results & Storyboard */}
-          <div className="lg:col-span-2">
+          <div className={hasExpandedExtractionCollection ? 'min-w-0 lg:col-span-1' : 'min-w-0 lg:col-span-2'}>
             <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
               <TabsList className="grid w-full grid-cols-6">
                 <TabsTrigger value="extraction">
@@ -11323,30 +11928,32 @@ export default function StoryboardGenerator() {
                           </div>
                         )}
 
-                        <div className={`grid grid-cols-1 gap-3 ${expandedSections.scenes ? '' : 'max-h-[520px]'} overflow-x-hidden overflow-y-auto transition-all duration-300`}>
-                          {(() => {
-                            const scenesToDisplay = (sceneBatchInfo?.allScenes?.length ?? 0) > 0 ? sceneBatchInfo?.allScenes : scenesData.scenes;
-
-                            if (!scenesToDisplay || scenesToDisplay.length === 0) {
-                              return (
-                                <div className="col-span-full text-center py-8 text-gray-400">
-                                  <Users className="w-12 h-12 mx-auto mb-2 opacity-50" />
-                                  <p className="text-sm">暂无场景数据</p>
-                                </div>
-                              );
-                            }
-
-                            return scenesToDisplay.map((scene: Scene, index: number) => {
-                            const mainSceneName = getSceneMainSceneName(scene);
-                            const previousScene = index > 0 ? scenesToDisplay[index - 1] as Scene : null;
-                            const shouldShowMainSceneHeader = !previousScene || getSceneMainSceneName(previousScene) !== mainSceneName;
-                            const siblingScenes = scenesToDisplay.filter((item: Scene) => getSceneMainSceneName(item) === mainSceneName);
-                            const siblingStateCount = siblingScenes.length;
-                            const siblingStateIndex = siblingScenes.findIndex((item: Scene) => item.name === scene.name);
-                            const siblingEpisodeNumbers = Array.from(new Set<number>(
-                              siblingScenes
-                                .flatMap((item: Scene) => getSceneEpisodeNumbers(item))
-                            )).sort((a, b) => a - b);
+                        {sceneRenderItems.length === 0 ? (
+                          <div className="py-8 text-center text-gray-400">
+                            <Users className="mx-auto mb-2 h-12 w-12 opacity-50" />
+                            <p className="text-sm">暂无场景数据</p>
+                          </div>
+                        ) : (
+                          <OnDemandCollection
+                            items={sceneRenderItems}
+                            expanded={expandedSections.scenes}
+                            collapsedCount={3}
+                            batchSize={6}
+                            className="grid grid-cols-1 gap-3 overflow-x-hidden transition-all duration-300"
+                            collapsedClassName="max-h-[520px] overflow-y-hidden"
+                            expandedClassName="max-h-none overflow-y-visible"
+                            itemClassName="grid grid-cols-1 gap-3 [content-visibility:auto] [contain-intrinsic-size:760px]"
+                            getKey={item => `scene-${item.scene.id}-${item.scene.name}-${item.sourceIndex}`}
+                            renderItem={(renderItem) => {
+                            const {
+                              scene,
+                              sourceIndex: index,
+                              mainSceneName,
+                              shouldShowMainSceneHeader,
+                              siblingStateCount,
+                              siblingStateIndex,
+                              siblingEpisodeNumbers,
+                            } = renderItem;
                             const assetData = getAssetImages('scene', scene.id, scene.name);
                             const images = assetData?.images || [];
                             const sceneReferenceImage = getSceneReferenceImage(scene);
@@ -11363,7 +11970,7 @@ export default function StoryboardGenerator() {
                             const isAssetsConfirmed = stepConfirmed.assets; // 素材是否已确认
 
                             return (
-                              <Fragment key={`scene-${scene.id}-${scene.name}-${index}`}>
+                              <Fragment>
                               {shouldShowMainSceneHeader && (
                                 <div className="col-span-full rounded border border-amber-400/25 bg-amber-500/10 px-3 py-2">
                                   <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
@@ -11392,6 +11999,7 @@ export default function StoryboardGenerator() {
                                   name={scene.name}
                                   type="scene"
                                   generationStatus={generationStatus}
+                                  failureReason={assetGenerationErrors[generationAssetId]}
                                   isGenerating={isGenerating}
                                   isAssetsConfirmed={isAssetsConfirmed}
                                   onOpenChooser={() => setAssetImageChooserTarget({ assetId: currentAssetId, type: 'scene', name: scene.name })}
@@ -11625,9 +12233,9 @@ export default function StoryboardGenerator() {
                               </div>
                               </Fragment>
                             );
-                          });
-                          })()}
-                        </div>
+                            }}
+                          />
+                        )}
                         <div className="text-center mt-2">
                           <Button variant="ghost" size="sm" className="text-xs text-gray-500" onClick={() => toggleSection('scenes')}>
                             {expandedSections.scenes ? '收起' : '展开全部'} {sceneBatchInfo?.allScenes?.length || scenesData?.scenes?.length || 0} 个状态
@@ -11722,25 +12330,26 @@ export default function StoryboardGenerator() {
                           </div>
                         )}
 
-                        <div className={`space-y-2 ${expandedSections.characters ? '' : 'max-h-[400px]'} overflow-x-hidden overflow-y-auto transition-all duration-300`}>
-                          {(() => {
-                            const displayCharacters = (charactersData?.characters && charactersData.characters.length > 0)
-                              ? charactersData.characters
-                              : (characterBatchInfo?.allCharacters || []);
-
-                            if (displayCharacters.length === 0) {
-                              return (
-                                <div className="p-4 text-center text-gray-500">
-                                  <Users className="w-8 h-8 mx-auto mb-2 opacity-50" />
-                                  <p>暂无人物数据</p>
-                                  {characterBatchInfo && (
-                                    <p className="text-xs mt-1">已提取 {characterBatchInfo.allCharacters?.length || 0} 个人物</p>
-                                  )}
-                                </div>
-                              );
-                            }
-
-                            return displayCharacters.map((char: Character, index: number) => {
+                        {characterRenderItems.length === 0 ? (
+                          <div className="p-4 text-center text-gray-500">
+                            <Users className="mx-auto mb-2 h-8 w-8 opacity-50" />
+                            <p>暂无人物数据</p>
+                            {characterBatchInfo && (
+                              <p className="mt-1 text-xs">已提取 {characterBatchInfo.allCharacters?.length || 0} 个人物</p>
+                            )}
+                          </div>
+                        ) : (
+                          <OnDemandCollection
+                            items={characterRenderItems}
+                            expanded={expandedSections.characters}
+                            collapsedCount={2}
+                            batchSize={4}
+                            className="space-y-2 overflow-x-hidden transition-all duration-300"
+                            collapsedClassName="max-h-[400px] overflow-y-hidden"
+                            expandedClassName="max-h-none overflow-y-visible"
+                            itemClassName="[content-visibility:auto] [contain-intrinsic-size:900px]"
+                            getKey={(char, index) => `char-${char.id}-${char.name}-${index}`}
+                            renderItem={(char: Character, index: number) => {
                             const assetData = getAssetImages('character', char.id, char.name);
                             const images = assetData?.images || [];
                             const generationAssetId = `character-${char.name}`;
@@ -11759,7 +12368,7 @@ export default function StoryboardGenerator() {
                             const displayGender = isUsefulText(char.gender) ? char.gender : '性别待定';
 
                             return (
-                              <div key={`char-${char.name}-${index}`} className={`min-w-0 overflow-hidden rounded-md border border-amber-400/20 bg-black/15 p-4 ${isAssetsConfirmed ? 'opacity-75' : ''}`}>
+                              <div className={`min-w-0 overflow-hidden rounded-md border border-amber-400/20 bg-black/15 p-4 ${isAssetsConfirmed ? 'opacity-75' : ''}`}>
                                 <div className="grid min-w-0 gap-4 md:grid-cols-[220px_minmax(0,1fr)] xl:grid-cols-[240px_minmax(0,1fr)]">
                                   {/* 人物图片区域 - 主图叠放选择 */}
                                   <div className="mx-auto w-full max-w-[280px] md:mx-0 md:max-w-none">
@@ -11768,6 +12377,7 @@ export default function StoryboardGenerator() {
                                       name={char.name}
                                       type="character"
                                       generationStatus={generationStatus}
+                                      failureReason={assetGenerationErrors[generationAssetId]}
                                       isGenerating={isGenerating}
                                       isAssetsConfirmed={isAssetsConfirmed}
                                       onOpenChooser={() => setAssetImageChooserTarget({ assetId: currentAssetId, type: 'character', name: char.name })}
@@ -12122,10 +12732,18 @@ export default function StoryboardGenerator() {
                                                       }`}
                                                       onClick={(e) => {
                                                         e.stopPropagation();
-                                                        handleGenerateCharacterLookImage(char, look.id);
+                                                        if (isBatchAssetGenerating) {
+                                                          toast.info('批量图片任务正在运行，请等待当前批量任务结束后再单独生成造型');
+                                                          return;
+                                                        }
+                                                        void handleGenerateCharacterLookImage(char, look.id);
                                                       }}
-                                                      disabled={Boolean(lookLocked || look.isGenerating || isBatchAssetGenerating)}
-                                                      title={lookLocked ? lookReference.missingMessage : `图生图参考：${lookReference.label}`}
+                                                      disabled={Boolean(lookLocked || look.isGenerating)}
+                                                      title={lookLocked
+                                                        ? lookReference.missingMessage
+                                                        : isBatchAssetGenerating
+                                                          ? '批量图片任务正在运行'
+                                                          : `图生图参考：${lookReference.label}`}
                                                     >
                                                       {lookLocked ? (
                                                         <>
@@ -12303,10 +12921,19 @@ export default function StoryboardGenerator() {
                                               ) : look.imageUrl ? (
                                                 <div className="group/look-image relative flex min-h-[340px] items-center justify-center overflow-hidden rounded-md border border-amber-400/20 bg-black/25">
                                                   <img
-                                                    src={look.imageUrl}
+                                                    src={getAssetThumbnailUrl(look.imageUrl, 720)}
                                                     alt={`${char.name} - ${look.scene || look.id}`}
+                                                    loading="lazy"
+                                                    decoding="async"
+                                                    fetchPriority="low"
                                                     className="block max-h-[560px] w-full cursor-zoom-in object-contain"
                                                     onClick={() => openImagePreview(look.imageUrl!, `${char.name} - ${look.scene || look.id}`, 'character')}
+                                                    onError={(event) => {
+                                                      const image = event.currentTarget;
+                                                      if (image.dataset.originalFallback === 'true') return;
+                                                      image.dataset.originalFallback = 'true';
+                                                      image.src = look.imageUrl!;
+                                                    }}
                                                   />
                                                   {/* 操作按钮组 */}
                                                   <div className={`absolute right-2 top-2 flex gap-1 transition-opacity ${isAssetsConfirmed ? 'hidden' : 'opacity-0 group-hover/look-image:opacity-100'}`}>
@@ -12360,6 +12987,11 @@ export default function StoryboardGenerator() {
                                                   <span className="text-xs">尚未生成造型图</span>
                                                 </div>
                                               )}
+                                              {look.generationError && !look.isGenerating && (
+                                                <div className="mt-2">
+                                                  <AssetGenerationFailure reason={look.generationError} />
+                                                </div>
+                                              )}
                                               {/* 显示该造型的四视图 */}
                                               {look.isGeneratingFourView ? (
                                                 <div className="mt-2">
@@ -12377,10 +13009,19 @@ export default function StoryboardGenerator() {
                                                     )}
                                                   </div>
                                                   <img
-                                                    src={look.fourViewImageUrl}
+                                                    src={getAssetThumbnailUrl(look.fourViewImageUrl, 960)}
                                                     alt={`${char.name}的四视图`}
+                                                    loading="lazy"
+                                                    decoding="async"
+                                                    fetchPriority="low"
                                                     className="w-full h-auto object-contain rounded max-h-64"
                                                     onClick={() => openImagePreview(look.fourViewImageUrl!, `${char.name}的四视图`, 'character')}
+                                                    onError={(event) => {
+                                                      const image = event.currentTarget;
+                                                      if (image.dataset.originalFallback === 'true') return;
+                                                      image.dataset.originalFallback = 'true';
+                                                      image.src = look.fourViewImageUrl!;
+                                                    }}
                                                   />
                                                   <div className={`absolute top-5 right-0 flex gap-0.5 transition-opacity ${isAssetsConfirmed ? 'hidden' : 'opacity-0 group-hover/four-view:opacity-100'}`}>
                                                     <Button
@@ -12417,6 +13058,7 @@ export default function StoryboardGenerator() {
                                                         e.stopPropagation();
                                                         updateLookById(look.id, {
                                                           fourViewImageUrl: undefined,
+                                                          fourViewError: undefined,
                                                           fourViewIdentitySourceUrl: undefined,
                                                           fourViewLookSourceUrl: undefined,
                                                           fourViewIdentityNeedsReview: false,
@@ -12428,6 +13070,11 @@ export default function StoryboardGenerator() {
                                                   </div>
                                                 </div>
                                               ) : null}
+                                              {look.fourViewError && !look.isGeneratingFourView && (
+                                                <div className="mt-2">
+                                                  <AssetGenerationFailure reason={look.fourViewError} />
+                                                </div>
+                                              )}
                                               {/* 上传按钮（没有图片时显示） */}
                                               {!look.imageUrl && !look.isGenerating && !isAssetsConfirmed && (
                                                 <div className="mt-2 flex gap-1">
@@ -12558,9 +13205,9 @@ export default function StoryboardGenerator() {
                                 </div>
                               </div>
                             );
-                          });
-                        })()}
-                        </div>
+                            }}
+                          />
+                        )}
                         <div className="text-center mt-2">
                           <Button variant="ghost" size="sm" className="text-xs text-gray-500" onClick={() => toggleSection('characters')}>
                             {expandedSections.characters ? '收起' : '展开全部'} {characterBatchInfo?.characterMarkers?.length || charactersData?.totalCharacters || 0} 个人物
@@ -12680,28 +13327,31 @@ export default function StoryboardGenerator() {
                           </div>
                         )}
 
-                        <div className={`grid grid-cols-1 gap-3 ${expandedSections.props ? '' : 'max-h-[520px]'} overflow-x-hidden overflow-y-auto transition-all duration-300`}>
-                          {(() => {
-                            const propsToDisplay = (propBatchInfo?.allProps?.length ?? 0) > 0 ? propBatchInfo?.allProps : propsData.props;
-
-                            if (!propsToDisplay || propsToDisplay.length === 0) {
-                              return (
-                                <div className="col-span-full text-center py-8 text-gray-400">
-                                  <Package className="w-12 h-12 mx-auto mb-2 opacity-50" />
-                                  <p className="text-sm">暂无道具数据</p>
-                                </div>
-                              );
-                            }
-
-                            return propsToDisplay.map((prop: Prop, index: number) => {
-                            const mainPropName = getPropMainPropName(prop);
-                            const previousProp = index > 0 ? propsToDisplay[index - 1] as Prop : null;
-                            const shouldShowMainPropHeader = !previousProp || getPropMainPropName(previousProp) !== mainPropName;
-                            const siblingProps = propsToDisplay.filter((item: Prop) => getPropMainPropName(item) === mainPropName);
-                            const siblingStateCount = siblingProps.reduce((total: number, item: Prop) => total + getPropStateCount(item), 0);
-                            const siblingEpisodeNumbers = Array.from(new Set<number>(
-                              siblingProps.flatMap((item: Prop) => getPropEpisodeNumbers(item))
-                            )).sort((a, b) => a - b);
+                        {propRenderItems.length === 0 ? (
+                          <div className="py-8 text-center text-gray-400">
+                            <Package className="mx-auto mb-2 h-12 w-12 opacity-50" />
+                            <p className="text-sm">暂无道具数据</p>
+                          </div>
+                        ) : (
+                          <OnDemandCollection
+                            items={propRenderItems}
+                            expanded={expandedSections.props}
+                            collapsedCount={3}
+                            batchSize={6}
+                            className="grid grid-cols-1 gap-3 overflow-x-hidden transition-all duration-300"
+                            collapsedClassName="max-h-[520px] overflow-y-hidden"
+                            expandedClassName="max-h-none overflow-y-visible"
+                            itemClassName="grid grid-cols-1 gap-3 [content-visibility:auto] [contain-intrinsic-size:760px]"
+                            getKey={item => `prop-${item.prop.id}-${item.prop.name}-${item.sourceIndex}`}
+                            renderItem={(renderItem) => {
+                            const {
+                              prop,
+                              sourceIndex: index,
+                              mainPropName,
+                              shouldShowMainPropHeader,
+                              siblingStateCount,
+                              siblingEpisodeNumbers,
+                            } = renderItem;
                             const assetData = getAssetImages('prop', prop.id, prop.name);
                             const images = assetData?.images || [];
                             const generationAssetId = `prop-${prop.name}`;
@@ -12718,7 +13368,7 @@ export default function StoryboardGenerator() {
                             const isAssetsConfirmed = stepConfirmed.assets; // 素材是否已确认
 
                             return (
-                              <Fragment key={`prop-group-${mainPropName}-${prop.name}-${index}`}>
+                              <Fragment>
                               {shouldShowMainPropHeader && (
                                 <div className="col-span-full rounded border border-amber-400/25 bg-amber-500/10 px-3 py-2">
                                   <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
@@ -12748,6 +13398,7 @@ export default function StoryboardGenerator() {
                                   name={prop.name}
                                   type="prop"
                                   generationStatus={generationStatus}
+                                  failureReason={assetGenerationErrors[generationAssetId]}
                                   isGenerating={isGenerating}
                                   isAssetsConfirmed={isAssetsConfirmed}
                                   onOpenChooser={() => setAssetImageChooserTarget({ assetId: currentAssetId, type: 'prop', name: prop.name })}
@@ -12929,9 +13580,9 @@ export default function StoryboardGenerator() {
                               </div>
                               </Fragment>
                             );
-                          });
-                          })()}
-                        </div>
+                            }}
+                          />
+                        )}
                         <div className="text-center mt-2">
                           <Button variant="ghost" size="sm" className="text-xs text-gray-500" onClick={() => toggleSection('props')}>
                             {expandedSections.props ? '收起' : '展开全部'} {new Set((((propBatchInfo?.allProps?.length ?? 0) > 0 ? propBatchInfo?.allProps : propsData?.props) || []).map((prop: Prop) => getPropMainPropName(prop))).size} 个物品 / {((propBatchInfo?.allProps?.length ?? 0) > 0 ? propBatchInfo?.allProps : propsData?.props)?.length || 0} 个状态
@@ -13609,8 +14260,10 @@ export default function StoryboardGenerator() {
                                                         <div className="flex items-center gap-2">
                                                           {reference.imageUrl ? (
                                                             <img
-                                                              src={reference.imageUrl}
+                                                              src={getAssetThumbnailUrl(reference.imageUrl, 180, 66)}
                                                               alt={reference.label}
+                                                              loading="lazy"
+                                                              decoding="async"
                                                               className="h-10 w-10 shrink-0 cursor-pointer rounded object-cover hover:opacity-80"
                                                               onClick={() => openImagePreview(reference.imageUrl, reference.label, 'character')}
                                                             />
@@ -13633,7 +14286,10 @@ export default function StoryboardGenerator() {
                                                       img.imageUrl ? (
                                                         <div key={`img-${img.imageId}-${idx}`} className="relative group">
                                                           <img
-                                                            src={img.imageUrl}
+                                                            src={getAssetThumbnailUrl(img.imageUrl, 180, 66)}
+                                                            alt={char.name}
+                                                            loading="lazy"
+                                                            decoding="async"
                                                             className="w-10 h-10 object-cover rounded cursor-pointer hover:opacity-80"
                                                             onClick={() => openImagePreview(img.imageUrl, char.name, 'character')}
                                                           />
@@ -13694,7 +14350,10 @@ export default function StoryboardGenerator() {
                                                       img.imageUrl ? (
                                                         <div key={`scene-img-${img.imageId}-${idx}`} className="relative group">
                                                           <img
-                                                            src={img.imageUrl}
+                                                            src={getAssetThumbnailUrl(img.imageUrl, 180, 66)}
+                                                            alt={scene.name}
+                                                            loading="lazy"
+                                                            decoding="async"
                                                             className="w-10 h-10 object-cover rounded cursor-pointer hover:opacity-80"
                                                             onClick={() => openImagePreview(img.imageUrl, scene.name, 'scene')}
                                                           />
@@ -13754,7 +14413,10 @@ export default function StoryboardGenerator() {
                                                       img.imageUrl ? (
                                                         <div key={`prop-img-${img.imageId}-${idx}`} className="relative group">
                                                           <img
-                                                            src={img.imageUrl}
+                                                            src={getAssetThumbnailUrl(img.imageUrl, 180, 66)}
+                                                            alt={prop.name}
+                                                            loading="lazy"
+                                                            decoding="async"
                                                             className="w-8 h-8 object-cover rounded cursor-pointer hover:opacity-80"
                                                             onClick={() => openImagePreview(img.imageUrl, prop.name, 'prop')}
                                                           />
@@ -14945,8 +15607,11 @@ export default function StoryboardGenerator() {
                                       <>
                                       <div className="relative group">
                                         <img
-                                          src={getDisplayImageUrl(pg.storyboardImageUrl)}
+                                          src={getAssetThumbnailUrl(pg.storyboardImageUrl, 1100, 74)}
                                           alt={`故事板第${pg.groupIndex}组`}
+                                          loading="lazy"
+                                          decoding="async"
+                                          fetchPriority="low"
                                           className="w-full cursor-zoom-in rounded-lg border shadow-sm max-h-[400px] object-cover"
                                           onClick={() => openImagePreview(
                                             getDisplayImageUrl(pg.storyboardImageUrl),
@@ -15489,7 +16154,13 @@ export default function StoryboardGenerator() {
                                                   title={`图${idx + 1}：${reference.name}`}
                                                   onClick={() => openImagePreview(reference.url, `第${pg.groupIndex}组 图${idx + 1} ${reference.name}`, 'storyboard')}
                                                 >
-                                                  <img src={reference.url} alt={reference.name} className="h-full w-full object-cover" />
+                                                  <img
+                                                    src={getAssetThumbnailUrl(reference.url, 180, 66)}
+                                                    alt={reference.name}
+                                                    loading="lazy"
+                                                    decoding="async"
+                                                    className="h-full w-full object-cover"
+                                                  />
                                                 </button>
                                               ))}
                                             </div>
@@ -16207,14 +16878,35 @@ export default function StoryboardGenerator() {
             </div>
 
             {/* 图片容器 */}
-            <div className="flex min-h-0 flex-1 items-center justify-center overflow-auto p-2 sm:p-3">
+            <div className="relative flex min-h-0 flex-1 items-center justify-center overflow-auto p-2 sm:p-3">
               {previewImage.url ? (
-                <img
-                  src={getDisplayImageUrl(previewImage.url)}
-                  alt={previewImage.name}
-                  className="max-w-full max-h-full object-contain transition-transform duration-200"
-                  style={{ transform: `scale(${previewZoom})` }}
-                />
+                <>
+                  {isPreviewImageLoading && (
+                    <div className="absolute inset-0 z-10 flex items-center justify-center bg-gray-900/80 text-amber-100">
+                      <div className="flex items-center gap-2 rounded-md border border-amber-300/25 bg-black/70 px-4 py-2 text-sm shadow-xl">
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                        正在加载高清预览
+                      </div>
+                    </div>
+                  )}
+                  <img
+                    src={getAssetPreviewUrl(getDisplayImageUrl(previewImage.url))}
+                    alt={previewImage.name}
+                    className={`max-h-full max-w-full object-contain transition-[transform,opacity] duration-200 ${isPreviewImageLoading ? 'opacity-0' : 'opacity-100'}`}
+                    style={{ transform: `scale(${previewZoom})` }}
+                    onLoad={() => setIsPreviewImageLoading(false)}
+                    onError={(event) => {
+                      const image = event.currentTarget;
+                      if (image.dataset.originalFallback === 'true') {
+                        setIsPreviewImageLoading(false);
+                        toast.error('图片预览加载失败，请稍后重试');
+                        return;
+                      }
+                      image.dataset.originalFallback = 'true';
+                      image.src = getDisplayImageUrl(previewImage.url);
+                    }}
+                  />
+                </>
               ) : (
                 <div className="text-gray-400">暂无图片</div>
               )}

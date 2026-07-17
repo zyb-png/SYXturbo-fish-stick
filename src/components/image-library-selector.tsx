@@ -12,6 +12,7 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Badge } from '@/components/ui/badge';
 import { Loader2, Image as ImageIcon, Check, FolderOpen } from 'lucide-react';
+import { getAssetThumbnailUrl } from '@/lib/asset-image-url';
 
 interface ImageFile {
   name: string;
@@ -187,8 +188,11 @@ export function ImageLibrarySelector({ open, onClose, onSelect, currentType }: I
                         >
                           {imageUrl ? (
                             <img
-                              src={imageUrl}
+                              src={getAssetThumbnailUrl(imageUrl, 420, 68)}
                               alt={displayName}
+                              loading="lazy"
+                              decoding="async"
+                              fetchPriority="low"
                               className="w-full h-full object-cover"
                             />
                           ) : null}

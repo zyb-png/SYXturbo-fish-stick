@@ -1,6 +1,8 @@
 export type VoiceVariantKind = 'base' | 'age' | 'transformation';
 export type VoiceSpeakerCategory = 'character' | 'system' | 'third_party';
 
+export const MIN_DIALOGUE_LINES_FOR_VOICE_PROFILE = 5;
+
 export interface VoiceTraits {
   genderPresentation: string;
   agePresentation: string;

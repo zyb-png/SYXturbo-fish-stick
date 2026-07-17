@@ -16,6 +16,11 @@ import {
   normalizeSceneLocationIdentity,
   normalizeSceneStateUnits,
 } from '@/lib/scene-state-utils';
+import {
+  inferCharacterEntityKind,
+  normalizeCharacterGender,
+  resolveCharacterGenderByPolicy,
+} from '@/lib/character-semantic-rules';
 
 export const maxDuration = 600;
 
@@ -744,6 +749,126 @@ function normalizeCharacterLookTimelines(characters: UnknownRecord[]): UnknownRe
   });
 }
 
+type CharacterSemanticRepairSummary = {
+  checkedCount: number;
+  genderCorrectedCount: number;
+  creatureCorrectedCount: number;
+  correctedCharacters: string[];
+};
+
+function repairCharacterSemantics(
+  characters: UnknownRecord[],
+  subjectRegion: string
+): { characters: UnknownRecord[]; summary: CharacterSemanticRepairSummary } {
+  const correctedCharacters: string[] = [];
+  let genderCorrectedCount = 0;
+  let creatureCorrectedCount = 0;
+
+  const repaired = characters.map(character => {
+    const name = cleanText(character?.name) || '该人物';
+    const entityKind = inferCharacterEntityKind(character);
+    const previousGender = normalizeCharacterGender(character?.gender);
+    const gender = resolveCharacterGenderByPolicy({
+      name,
+      currentGender: character?.gender,
+      character,
+    });
+    const genderWasCorrected = previousGender !== gender;
+    const isAnimalCreature = entityKind === 'animal-creature';
+    if (genderWasCorrected) genderCorrectedCount += 1;
+
+    let appearance = cleanText(character?.appearance);
+    let faceFeatures = { ...(character?.faceFeatures || {}) };
+    let looks = Array.isArray(character?.looks) ? character.looks.map((look: UnknownRecord) => ({ ...look })) : [];
+
+    if (isAnimalCreature) {
+      const appearanceIsHumanTemplate = /女性角色|男性角色|人类皮肤|面部线条柔和|眉眼灵动|人类发型|披发|马尾/.test(appearance);
+      if (appearanceIsHumanTemplate || !/犬|狼|兽|动物|吻部|皮毛|兽毛|四足|爪|獠牙/.test(appearance)) {
+        appearance = `${name}是动物特征占主导的奇幻生物。头骨、吻部、兽耳、眼睛、鼻头、牙齿和皮毛符合剧本物种设定，毛发顺应动物头骨与身体结构生长；不使用人类皮肤、人类五官比例、女性长发、披发、马尾或其他人类发型。`;
+        creatureCorrectedCount += 1;
+      }
+      faceFeatures = {
+        faceShape: cleanText(faceFeatures?.faceShape) && /犬|狼|兽|吻部/.test(cleanText(faceFeatures?.faceShape)) ? faceFeatures.faceShape : '符合物种的动物头骨与吻部轮廓，动物特征占主导',
+        eyes: cleanText(faceFeatures?.eyes) || '符合剧情设定的兽类眼睛，目光与情绪清晰',
+        nose: cleanText(faceFeatures?.nose) && /鼻头|吻部|兽/.test(cleanText(faceFeatures?.nose)) ? faceFeatures.nose : '动物鼻头与吻部结构清楚，不使用人类鼻型',
+        mouth: cleanText(faceFeatures?.mouth) && /牙|口吻|兽|犬|狼/.test(cleanText(faceFeatures?.mouth)) ? faceFeatures.mouth : '兽类口吻与牙齿结构，不使用人类唇形',
+        skinTone: cleanText(faceFeatures?.skinTone) && /毛|鳞|兽/.test(cleanText(faceFeatures?.skinTone)) ? faceFeatures.skinTone : '符合物种设定的皮毛、鳞片或兽类表面材质',
+      };
+      looks = looks.map((look: UnknownRecord) => ({
+        ...look,
+        costume: !cleanText(look?.costume) || /生活装|职业装|商务装/.test(cleanText(look?.costume))
+          ? '无；除非剧本明确要求护甲、项圈或装饰'
+          : look.costume,
+        hairstyle: !cleanText(look?.hairstyle) || /披发|马尾|盘发|人类发型/.test(cleanText(look?.hairstyle))
+          ? '毛发顺应动物头骨与身体结构生长，不使用任何人类发型'
+          : look.hairstyle,
+        makeup: !cleanText(look?.makeup) || /淡妆|浓妆|修饰/.test(cleanText(look?.makeup))
+          ? '无；保持动物面部与皮毛自然材质'
+          : look.makeup,
+      }));
+    } else if (genderWasCorrected) {
+      const specificPrefix = appearance.split(new RegExp(`${name}是`))[0].replace(/[，。；;\s]+$/, '');
+      const facialStyle = gender === '男'
+        ? '发型干净利落，面部轮廓清晰稳定，眉眼有辨识度，鼻唇比例自然'
+        : '发型轮廓自然清晰，面部线条柔和但有辨识度，眼神灵动，鼻唇比例协调';
+      appearance = `${specificPrefix ? `${specificPrefix}。` : ''}${name}是${cleanText(character?.age) || '成年'}的${gender}性角色。${facialStyle}，肤色均匀，皮肤清爽并保留自然纹理。`;
+      const usesFemaleDefaults = /鹅蛋脸或柔和椭圆脸/.test(cleanText(faceFeatures?.faceShape));
+      const usesMaleDefaults = /椭圆脸或方中带圆/.test(cleanText(faceFeatures?.faceShape));
+      if ((gender === '男' && usesFemaleDefaults) || (gender === '女' && usesMaleDefaults)) {
+        faceFeatures = gender === '男'
+          ? {
+              faceShape: '椭圆脸或方中带圆的脸型，轮廓稳定',
+              eyes: '眼神专注，眉眼有辨识度',
+              nose: '鼻梁自然端正，符合人物身份与族裔特征',
+              mouth: '唇线清楚，表情克制有力度',
+              skinTone: '肤色均匀，保留自然皮肤质感',
+            }
+          : {
+              faceShape: '鹅蛋脸或柔和椭圆脸，轮廓自然清晰',
+              eyes: '眼型清晰有神，情绪表达明显',
+              nose: '鼻梁自然端正，符合人物身份与族裔特征',
+              mouth: '唇形自然，表情变化细腻',
+              skinTone: '肤色均匀，保留自然皮肤质感',
+            };
+      }
+      looks = looks.map((look: UnknownRecord) => gender === '男' ? {
+        ...look,
+        costume: /简洁生活装或职业装/.test(cleanText(look?.costume)) ? '简洁日常装或商务装，剪裁利落，贴合人物身份' : look.costume,
+        hairstyle: /自然披发|低马尾|盘发/.test(cleanText(look?.hairstyle)) ? '干净短发或自然整理发型' : look.hairstyle,
+        makeup: /自然淡妆|精致妆容/.test(cleanText(look?.makeup)) ? '自然无妆或轻微修饰' : look.makeup,
+      } : look);
+    }
+
+    if (genderWasCorrected || isAnimalCreature) correctedCharacters.push(name);
+    return {
+      ...character,
+      gender,
+      appearance,
+      faceFeatures,
+      looks,
+      entityKind,
+      semanticAudit: {
+        status: 'complete',
+        gender,
+        genderCorrected: genderWasCorrected,
+        entityKind,
+        subjectRegion: subjectRegion || '',
+        checkedAt: Date.now(),
+      },
+    };
+  });
+
+  return {
+    characters: repaired,
+    summary: {
+      checkedCount: characters.length,
+      genderCorrectedCount,
+      creatureCorrectedCount,
+      correctedCharacters: Array.from(new Set(correctedCharacters)),
+    },
+  };
+}
+
 function buildLifecycleFallbackLook(
   character: UnknownRecord,
   requirement: CharacterLifecycleRequirement,
@@ -968,6 +1093,7 @@ export async function POST(request: NextRequest) {
     const scenes = Array.isArray(body?.scenes) ? body.scenes.filter(Boolean) : [];
     const characters = Array.isArray(body?.characters) ? body.characters.filter(Boolean) : [];
     const props = Array.isArray(body?.props) ? body.props.filter(Boolean) : [];
+    const subjectRegion = cleanText(body?.creationBible?.subjectRegion);
     if (!content) return NextResponse.json({ error: '缺少用于核验的剧本内容' }, { status: 400 });
     if (sourceType !== 'execution-script') {
       return NextResponse.json({ error: '质量核验只接受已确认的执行剧本' }, { status: 400 });
@@ -998,7 +1124,8 @@ export async function POST(request: NextRequest) {
 
     const sceneResult = mergeScenes(scenes, sceneGroups);
     const characterResult = mergeCharacters(characters, characterGroups);
-    const normalizedCharacters = normalizeCharacterLookTimelines(characterResult.characters);
+    const semanticResult = repairCharacterSemantics(characterResult.characters, subjectRegion);
+    const normalizedCharacters = normalizeCharacterLookTimelines(semanticResult.characters);
     const lifecycleResult = await repairCharacterLifecycleLooks(content, normalizedCharacters);
     const propResult = mergeProps(props, propGroups);
     const sceneMainCount = new Set(sceneResult.scenes.map(scene => normalizeSceneLocationIdentity(getSceneMainLocation(scene)))).size;
@@ -1030,6 +1157,7 @@ export async function POST(request: NextRequest) {
           props: Math.max(0, props.length - propResult.props.length),
         },
         groups,
+        semantic: semanticResult.summary,
         lifecycle: lifecycleResult.summary,
         reviewedAt: Date.now(),
       },

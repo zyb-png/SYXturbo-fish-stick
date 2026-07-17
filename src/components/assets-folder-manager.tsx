@@ -34,6 +34,7 @@ import {
   ZoomOut
 } from 'lucide-react';
 import { toast } from 'sonner';
+import { getAssetPreviewUrl } from '@/lib/asset-image-url';
 
 interface AssetFile {
   name: string;
@@ -110,9 +111,10 @@ function downloadBlob(blob: Blob, filename: string) {
 
 interface AssetsFolderManagerProps {
   refreshTrigger?: number; // 当此值变化时刷新数据
+  onAssetsChanged?: () => void;
 }
 
-export function AssetsFolderManager({ refreshTrigger }: AssetsFolderManagerProps) {
+export function AssetsFolderManager({ refreshTrigger, onAssetsChanged }: AssetsFolderManagerProps) {
   const [isOpen, setIsOpen] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
@@ -128,7 +130,11 @@ export function AssetsFolderManager({ refreshTrigger }: AssetsFolderManagerProps
   const [downloadingFolder, setDownloadingFolder] = useState<string | null>(null);
   
   // 预览状态
-  const [previewFile, setPreviewFile] = useState<{ folder: string; filename: string } | null>(null);
+  const [previewFile, setPreviewFile] = useState<{
+    folder: string;
+    filename: string;
+    originalUrl: string;
+  } | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [isLoadingPreview, setIsLoadingPreview] = useState(false);
   const [previewZoom, setPreviewZoom] = useState(1);
@@ -155,6 +161,7 @@ export function AssetsFolderManager({ refreshTrigger }: AssetsFolderManagerProps
         setConfig(data.config);
         setAssetsExist(data.assetsExist);
         setAssetStats(data.assetStats);
+        onAssetsChanged?.();
       }
     } catch (error) {
       console.error('加载配置失败:', error);
@@ -313,45 +320,23 @@ export function AssetsFolderManager({ refreshTrigger }: AssetsFolderManagerProps
     const filename = file.name;
     setIsLoadingPreview(true);
     setPreviewZoom(1);
-    try {
-      let blob: Blob;
-      
-      // 如果是 S3 文件，使用 S3 URL
-      if (file.key && file.url) {
-        const response = await fetch(file.url);
-        if (!response.ok) {
-          throw new Error('加载预览失败');
-        }
-        blob = await response.blob();
-      } else {
-        // 本地文件
-        const folderName = FOLDER_MAP[folderKey]?.name || folderKey;
-        const response = await fetch(`/api/assets-download?folder=${encodeURIComponent(folderName)}&filename=${encodeURIComponent(filename)}`);
-        
-        if (!response.ok) {
-          throw new Error('加载预览失败');
-        }
-        blob = await response.blob();
-      }
-      
-      const url = window.URL.createObjectURL(blob);
-      setPreviewUrl(url);
-      setPreviewFile({ folder: folderKey, filename });
-    } catch (error) {
-      console.error('预览失败:', error);
-      toast.error('预览失败');
-    } finally {
-      setIsLoadingPreview(false);
-    }
+    const folderName = FOLDER_MAP[folderKey]?.name || folderKey;
+    const originalUrl = file.key && file.url
+      ? file.url
+      : `/api/assets-view?folder=${encodeURIComponent(folderName)}&filename=${encodeURIComponent(filename)}`;
+
+    setPreviewUrl(getAssetPreviewUrl(originalUrl));
+    setPreviewFile({ folder: folderKey, filename, originalUrl });
   };
 
   // 关闭预览
   const closePreview = useCallback(() => {
-    if (previewUrl) {
+    if (previewUrl?.startsWith('blob:')) {
       window.URL.revokeObjectURL(previewUrl);
     }
     setPreviewUrl(null);
     setPreviewFile(null);
+    setIsLoadingPreview(false);
     setPreviewZoom(1);
   }, [previewUrl]);
 
@@ -852,12 +837,31 @@ export function AssetsFolderManager({ refreshTrigger }: AssetsFolderManagerProps
                 </div>
               </div>
 
-              <div className="flex min-h-0 flex-1 items-center justify-center overflow-auto p-2 sm:p-3">
+              <div className="relative flex min-h-0 flex-1 items-center justify-center overflow-auto p-2 sm:p-3">
+                {isLoadingPreview && (
+                  <div className="absolute inset-0 z-10 flex items-center justify-center bg-gray-900/80 text-amber-100">
+                    <div className="flex items-center gap-2 rounded-md border border-amber-300/25 bg-black/70 px-4 py-2 text-sm shadow-xl">
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                      正在加载高清预览
+                    </div>
+                  </div>
+                )}
                 <img
                   src={previewUrl}
                   alt={previewFile.filename}
-                  className="max-w-full max-h-full object-contain transition-transform duration-200"
+                  className={`max-h-full max-w-full object-contain transition-[transform,opacity] duration-200 ${isLoadingPreview ? 'opacity-0' : 'opacity-100'}`}
                   style={{ transform: `scale(${previewZoom})` }}
+                  onLoad={() => setIsLoadingPreview(false)}
+                  onError={(event) => {
+                    const image = event.currentTarget;
+                    if (image.dataset.originalFallback === 'true') {
+                      setIsLoadingPreview(false);
+                      toast.error('图片预览加载失败，请稍后重试');
+                      return;
+                    }
+                    image.dataset.originalFallback = 'true';
+                    image.src = previewFile.originalUrl;
+                  }}
                 />
               </div>
             </div>

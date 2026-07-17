@@ -9,6 +9,10 @@ import { getManfeiVideoStatus } from '@/lib/manfei';
 
 export const dynamic = 'force-dynamic';
 
+const RECONCILE_INTERVAL_MS = 60_000;
+let lastReconcileStartedAt = 0;
+let reconcilePromise: Promise<void> | null = null;
+
 async function reconcilePendingVideoTasks() {
   const pendingTasks = (await getPendingExternalCreationPointTasks('generate_video')).slice(0, 20);
   await Promise.allSettled(pendingTasks.map(async (task) => {
@@ -30,12 +34,27 @@ async function reconcilePendingVideoTasks() {
   }));
 }
 
+function schedulePendingVideoReconciliation() {
+  const now = Date.now();
+  if (reconcilePromise || now - lastReconcileStartedAt < RECONCILE_INTERVAL_MS) return;
+
+  lastReconcileStartedAt = now;
+  reconcilePromise = reconcilePendingVideoTasks()
+    .catch((error) => {
+      console.warn('[创作点] 后台视频任务对账失败:', error);
+    })
+    .finally(() => {
+      reconcilePromise = null;
+    });
+}
+
 export async function GET() {
   try {
-    await reconcilePendingVideoTasks();
+    const snapshot = await getCreationPointSnapshot();
+    schedulePendingVideoReconciliation();
     return NextResponse.json({
       success: true,
-      ...(await getCreationPointSnapshot()),
+      ...snapshot,
     });
   } catch (error) {
     console.error('[创作点] 读取钱包失败:', error);
