@@ -121,6 +121,8 @@ import {
   sumStoryboardDurations,
 } from '@/lib/storyboard-duration-groups';
 
+const STORYBOARD_BATCH_CONCURRENCY = 4;
+
 interface Chapter {
   chapterNumber: number;
   title: string;
@@ -2413,7 +2415,7 @@ export default function StoryboardGenerator() {
   const [executionScriptError, setExecutionScriptError] = useState<string | null>(null);
   const [showExecutionScriptPreview, setShowExecutionScriptPreview] = useState(false);
   const [showExecutionScriptSuccessDialog, setShowExecutionScriptSuccessDialog] = useState(false);
-  const storyboardAbortControllerRef = useRef<AbortController | null>(null);
+  const storyboardAbortControllersRef = useRef<Map<string, AbortController>>(new Map());
   const storyboardBatchCancelledRef = useRef(false);
   const [editingPrompt, setEditingPrompt] = useState<{ type: 'image' | 'video'; shotNumber: number; prompt: string; chapterNumber?: number; frameType?: 'start' | 'end' } | null>(null);
   const [regeneratingShot, setRegeneratingShot] = useState<number | null>(null);
@@ -7057,11 +7059,8 @@ export default function StoryboardGenerator() {
 
   const stopStoryboardGeneration = () => {
     storyboardBatchCancelledRef.current = true;
-    if (storyboardAbortControllerRef.current) {
-      storyboardAbortControllerRef.current.abort();
-      storyboardAbortControllerRef.current = null;
-    }
-    setIsProcessing(false);
+    storyboardAbortControllersRef.current.forEach(controller => controller.abort());
+    storyboardAbortControllersRef.current.clear();
     setGenerationTasks(prev => prev.map(task =>
       task.type === 'storyboard' && (task.status === 'generating' || task.status === 'pending')
         ? { ...task, status: 'error', error: '已手动停止，可继续生成未完成分集', endTime: Date.now(), message: `第 ${task.chapterNumber} 集已停止` }
@@ -7082,12 +7081,15 @@ export default function StoryboardGenerator() {
       });
       return next;
     });
-    toast.info('已停止文字分镜生成，可点击继续生成未完成分集');
+    toast.info('正在停止全部文字分镜任务，请稍候...');
   };
 
   // 生成单个章节的文字分镜（用于并行生成）- SSE流式版本，支持逐行显示
-  const generateSingleStoryboard = async (chapter: Chapter): Promise<{ chapter: Chapter; storyboard: Storyboard | null; error?: string }> => {
-    if (!(await requireLoginBeforePaidAction())) {
+  const generateSingleStoryboard = async (
+    chapter: Chapter,
+    options: { skipLoginCheck?: boolean } = {}
+  ): Promise<{ chapter: Chapter; storyboard: Storyboard | null; error?: string }> => {
+    if (!options.skipLoginCheck && !(await requireLoginBeforePaidAction())) {
       return { chapter, storyboard: null, error: '请先登录账号后再生成文字分镜' };
     }
 
@@ -7116,7 +7118,7 @@ export default function StoryboardGenerator() {
     let shots: any[] = [];
     let chapterTitleResult = chapter.title;
     const controller = new AbortController();
-    storyboardAbortControllerRef.current = controller;
+    storyboardAbortControllersRef.current.set(taskId, controller);
 
     try {
       const response = await fetch('/api/generate-storyboard', {
@@ -7226,7 +7228,14 @@ export default function StoryboardGenerator() {
         } else if (json.type === 'complete') {
           // 更新token统计
           if (json.tokenUsage) {
-            setTokenUsage(prev => ({ ...prev, generateStoryboard: json.tokenUsage }));
+            setTokenUsage(prev => ({
+              ...prev,
+              generateStoryboard: {
+                input: prev.generateStoryboard.input + (Number(json.tokenUsage.input) || 0),
+                output: prev.generateStoryboard.output + (Number(json.tokenUsage.output) || 0),
+                timestamp: Number(json.tokenUsage.timestamp) || Date.now(),
+              },
+            }));
           }
 
         } else if (json.type === 'error') {
@@ -7328,9 +7337,7 @@ export default function StoryboardGenerator() {
 
       return { chapter, storyboard: null, error: isAbort ? '已停止生成' : error?.message };
     } finally {
-      if (storyboardAbortControllerRef.current === controller) {
-        storyboardAbortControllerRef.current = null;
-      }
+      storyboardAbortControllersRef.current.delete(taskId);
     }
   };
 
@@ -7445,31 +7452,29 @@ export default function StoryboardGenerator() {
     const startIdx = resumeBatch * BATCH_SIZE;
     const endIdx = Math.min(startIdx + BATCH_SIZE, chapters.length);
     const batchLabel = `第 ${resumeBatch + 1}/${totalBatches} 批（${startIdx + 1}-${endIdx} 集）`;
-    const loadingToast = toast.loading(`正在生成 ${batchLabel}...`);
+    const loadingToast = toast.loading(
+      `正在生成 ${batchLabel}，最多 ${STORYBOARD_BATCH_CONCURRENCY} 集同时进行...`
+    );
     setBatchInfo({ active: true, batchSize: BATCH_SIZE, totalBatches, completedBatches: resumeBatch });
 
     const batchResults: { chapterNumber: number; success: boolean; skipped?: boolean; error?: string }[] = [];
 
     try {
-      // 逐章串行生成（仅当前批次的章节）
-      for (let i = startIdx; i < endIdx; i++) {
-        if (storyboardBatchCancelledRef.current) {
-          break;
-        }
-
-        const chapter = chapters[i];
+      const batchChapters = chapters.slice(startIdx, endIdx);
+      const processChapter = async (
+        chapter: Chapter
+      ): Promise<{ chapterNumber: number; success: boolean; skipped?: boolean; error?: string }> => {
         const chapterNum = chapter.chapterNumber;
 
         if (successfulChapterNumbers.has(chapterNum)) {
-          batchResults.push({ chapterNumber: chapterNum, success: true, skipped: true });
-          continue;
+          return { chapterNumber: chapterNum, success: true, skipped: true };
         }
 
-        toast.loading(`正在生成第 ${chapterNum} 集...（${batchLabel}）`, { id: loadingToast });
+        const chapterToast = toast.loading(`第 ${chapterNum} 集正在生成...`);
         setCollapsedStoryboardChapters(prev => ({ ...prev, [String(chapterNum)]: false }));
 
         let lastError = '';
-        let result = null;
+        let result: Awaited<ReturnType<typeof generateSingleStoryboard>> | null = null;
 
         // 自动重试（最多 2 次）
         for (let attempt = 0; attempt < 3; attempt++) {
@@ -7478,11 +7483,16 @@ export default function StoryboardGenerator() {
           }
 
           if (attempt > 0) {
-            toast.loading(`第 ${chapterNum} 集第 ${attempt + 1} 次重试...（${batchLabel}）`, { id: loadingToast });
+            toast.loading(`第 ${chapterNum} 集第 ${attempt + 1} 次重试...`, { id: chapterToast });
+            setGenerationTasks(prev => prev.filter(task =>
+              !(task.type === 'storyboard'
+                && task.chapterNumber === chapterNum
+                && task.status === 'error')
+            ));
             await new Promise(resolve => setTimeout(resolve, 3000));
           }
 
-          result = await generateSingleStoryboard(chapter);
+          result = await generateSingleStoryboard(chapter, { skipLoginCheck: true });
 
           if (result.storyboard) {
             break;
@@ -7493,23 +7503,49 @@ export default function StoryboardGenerator() {
           lastError = result.error || '未知错误';
         }
 
-        if (storyboardBatchCancelledRef.current) {
-          break;
+        if (storyboardBatchCancelledRef.current || !result) {
+          toast.dismiss(chapterToast);
+          return { chapterNumber: chapterNum, success: false, error: '已停止生成' };
         }
 
-        batchResults.push({
+        const chapterResult = {
           chapterNumber: chapterNum,
-          success: !!result!.storyboard,
-          error: result!.storyboard ? undefined : lastError,
-        });
+          success: !!result.storyboard,
+          error: result.storyboard ? undefined : lastError,
+        };
 
-        if (result!.storyboard) {
+        if (result.storyboard) {
           successfulChapterNumbers.add(chapterNum);
-          toast.success(`第 ${chapterNum} 集 ✅`, { id: loadingToast });
+          toast.success(`第 ${chapterNum} 集生成成功`, { id: chapterToast });
         } else {
-          toast.error(`第 ${chapterNum} 集失败: ${lastError}`, { id: loadingToast });
+          toast.error(`第 ${chapterNum} 集失败: ${lastError}`, { id: chapterToast });
         }
-      }
+
+        return chapterResult;
+      };
+
+      let nextChapterIndex = 0;
+      const concurrentResults: Array<{
+        chapterNumber: number;
+        success: boolean;
+        skipped?: boolean;
+        error?: string;
+      } | undefined> = new Array(batchChapters.length);
+
+      const runWorker = async () => {
+        while (!storyboardBatchCancelledRef.current) {
+          const chapterIndex = nextChapterIndex;
+          if (chapterIndex >= batchChapters.length) return;
+          nextChapterIndex += 1;
+          concurrentResults[chapterIndex] = await processChapter(batchChapters[chapterIndex]);
+        }
+      };
+
+      const workerCount = Math.min(STORYBOARD_BATCH_CONCURRENCY, batchChapters.length);
+      await Promise.all(Array.from({ length: workerCount }, () => runWorker()));
+      batchResults.push(...concurrentResults.filter(
+        (result): result is NonNullable<typeof result> => Boolean(result)
+      ));
 
       // 当前批次完成
       toast.dismiss(loadingToast);
@@ -13740,7 +13776,7 @@ export default function StoryboardGenerator() {
                       {isProcessing ? (
                         <>
                           <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                          正在生成文字分镜...
+                          正在并行生成文字分镜（最多 4 集）...
                         </>
                       ) : batchInfo.active ? (
                         <>
@@ -13759,7 +13795,7 @@ export default function StoryboardGenerator() {
                             if (successCount >= totalChapters && totalChapters > 0) {
                               return '全部分集文字分镜已生成';
                             }
-                            return '一键生成所有分集文字分镜';
+                            return '一键并行生成所有分集文字分镜';
                           })()}
                         </>
                       )}
