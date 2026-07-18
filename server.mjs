@@ -666,16 +666,19 @@ async function fetchManfeiBalance() {
   };
 }
 
-async function assertQuotaWithinApiBalance(totalCents) {
-  if (totalCents <= 0) return null;
+async function assertQuotaWithinApiBalance(totalCents, currentQuota = null) {
+  const availableCents = currentQuota
+    ? Math.max(0, Number(totalCents) - Number(currentQuota.used_cents || 0) - Number(currentQuota.frozen_cents || 0))
+    : Number(totalCents);
+  if (availableCents <= 0) return null;
   const balance = await fetchManfeiBalance();
   if (!balance.ok) {
     const error = new Error(`${balance.error}，暂时不能分配额度`);
     error.status = 503;
     throw error;
   }
-  if (totalCents > balance.balance_cents) {
-    const error = new Error(`分配额度不能超过 Manfei API 当前余额 ${balance.balance_rmb} 元`);
+  if (availableCents > balance.balance_cents) {
+    const error = new Error(`账号可用余额不能超过 Manfei API 当前余额 ${balance.balance_rmb} 元。本次设置后可用余额为 ${yuanFromCents(availableCents)} 元`);
     error.status = 400;
     throw error;
   }
@@ -1402,7 +1405,7 @@ async function handleAccountsApi(req, res, session, url) {
       const nextDailyLimit = ('daily_limit_cents' in data || 'daily_limit_rmb' in data)
         ? normalizeCents(data.daily_limit_cents ?? centsFromYuan(data.daily_limit_rmb))
         : currentQuota.daily_limit_cents;
-      await assertQuotaWithinApiBalance(nextTotal);
+      await assertQuotaWithinApiBalance(nextTotal, currentQuota);
       applyQuotaDelta(target.id, {
         total_cents: nextTotal,
         daily_limit_cents: nextDailyLimit,
@@ -1635,7 +1638,7 @@ async function handleQuotaAdjustApi(req, res, session) {
   const dailyLimitCents = ('daily_limit_cents' in data || 'daily_limit_rmb' in data)
     ? normalizeCents(data.daily_limit_cents ?? centsFromYuan(data.daily_limit_rmb))
     : getQuota(target.id).daily_limit_cents;
-  await assertQuotaWithinApiBalance(totalCents);
+  await assertQuotaWithinApiBalance(totalCents, getQuota(target.id));
   applyQuotaDelta(target.id, {
     total_cents: totalCents,
     daily_limit_cents: dailyLimitCents,

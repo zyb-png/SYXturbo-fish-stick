@@ -180,7 +180,7 @@ async function handleAccountAction(action, accountId) {
     } else if (action === 'quota') {
       const value = await openAdminDialog({
         title: '设置账号额度',
-        hint: `账号：${account.username}。额度单位为元，不能超过 Manfei API 当前余额。`,
+        hint: `账号：${account.username}。填写账号总额度；当前已用 ${account.quota?.used_rmb ?? 0} 元，设置后的可用余额不能超过 Manfei API 当前余额。`,
         value: account.quota?.total_rmb ?? 0,
         type: 'number',
         step: '0.01',
