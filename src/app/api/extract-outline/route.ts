@@ -4,6 +4,10 @@ import { estimateMessagesTokens, estimateTokens } from '@/lib/token-utils';
 import { tryExtractAndFixJSON } from '@/lib/json-utils';
 import { requireUserLoginResponse } from '@/lib/auth-guard';
 import { getCanonicalEpisodeTitle, normalizeEpisodeChapterTitles } from '@/lib/outline-utils';
+import {
+  resolveEpisodeContentRanges,
+  type PositionedEpisodeMarker,
+} from '@/lib/episode-content-boundaries';
 
 // 每批处理的章节数
 const BATCH_SIZE = 5;
@@ -104,7 +108,11 @@ export async function POST(request: NextRequest) {
     console.log(`处理第 ${batch}/${totalBatches} 批，集数:`, currentBatchEpisodes.map(e => `[${e.number}] ${e.marker}`).join(', '));
 
     // 从原文中提取每个章节的实际内容，再用模型生成短剧情概括
-    const batchResult = extractChapterContentFromOriginal(content, currentBatchEpisodes);
+    const batchResult = extractChapterContentFromOriginal(
+      content,
+      currentBatchEpisodes,
+      episodeMarkers,
+    );
     const summaryResult = await summarizeChapterContents(batchResult.chapters);
     
     const hasMore = batch < totalBatches;
@@ -424,7 +432,8 @@ async function summarizeChapterContents(
  */
 function extractChapterContentFromOriginal(
   content: string,
-  episodes: EpisodeMarker[]
+  episodes: EpisodeMarker[],
+  allEpisodes: EpisodeMarker[] = episodes,
 ): { chapters: any[]; inputTokens: number; outputTokens: number } {
   const chapters: any[] = [];
   const source = normalizeLineEndings(content);
@@ -432,18 +441,18 @@ function extractChapterContentFromOriginal(
   console.log(`[章节提取] 开始提取章节内容，总长度: ${source.length}`);
   console.log(`[章节提取] 需要提取的集数:`, episodes.map(e => `[${e.number}] ${e.marker}`).join(', '));
   
-  // 找到每个章节标记的位置（使用实际标记文本）
-  const positions: { ep: number; marker: string; start: number; end: number }[] = [];
-  
-  for (const { number, marker } of episodes) {
-    const episode = episodes.find(item => item.number === number && item.marker === marker);
+  // 使用完整集数列表计算正文边界，避免每批最后一集被错误截取到全文末尾。
+  const allPositions: PositionedEpisodeMarker[] = [];
+
+  for (const episode of allEpisodes) {
+    const { number, marker } = episode;
     const index = typeof episode?.start === 'number'
       ? episode.start
       : findEpisodeMarkerPosition(source, marker, number);
     if (index !== -1) {
       console.log(`[章节提取] 找到章节标记: 第${number}集 "${marker}"，位置: ${index}`);
-      positions.push({
-        ep: number,
+      allPositions.push({
+        number,
         marker,
         start: index,
         end: typeof episode?.end === 'number' ? episode.end : index + marker.length
@@ -452,39 +461,41 @@ function extractChapterContentFromOriginal(
       console.warn(`[章节提取] 未找到章节标记: 第${number}集 "${marker}"`);
     }
   }
-  
-  // 按位置排序
-  positions.sort((a, b) => a.start - b.start);
+
+  const positions = resolveEpisodeContentRanges(
+    episodes.map(episode => episode.number),
+    allPositions,
+    source.length,
+  );
   console.log(`[章节提取] 共找到 ${positions.length} 个章节标记`);
   
   // 提取每个章节的内容
   for (let i = 0; i < positions.length; i++) {
     const current = positions[i];
-    const next = positions[i + 1];
     
     // 章节内容从当前标记结束位置开始，到下一个标记开始位置结束
-    const contentStart = current.end;
-    const contentEnd = next ? next.start : source.length;
+    const contentStart = current.contentStart;
+    const contentEnd = current.contentEnd;
     
     // 提取章节内容
     let chapterContent = source.substring(contentStart, contentEnd).trim();
     
     // 如果提取的内容为空，尝试从标记之前提取
-    if (chapterContent.length === 0 && next) {
+    if (chapterContent.length === 0 && current.contentEnd < source.length) {
       // 尝试从前一个章节到当前章节之间提取
       const prev = positions[i - 1];
       if (prev) {
-        const altStart = prev.end;
+        const altStart = prev.contentStart;
         const altEnd = current.start;
         chapterContent = source.substring(altStart, altEnd).trim();
-        console.log(`[章节提取] 使用备用方案提取第${current.ep}集内容，长度: ${chapterContent.length}`);
+        console.log(`[章节提取] 使用备用方案提取第${current.number}集内容，长度: ${chapterContent.length}`);
       }
     }
     
-    console.log(`[章节提取] 第${current.ep}集提取内容长度: ${chapterContent.length}`);
+    console.log(`[章节提取] 第${current.number}集提取内容长度: ${chapterContent.length}`);
     
     // 分集标题由当前集号唯一确定，不能读取上一集结尾的台词、动作或转场标记。
-    const title = getCanonicalEpisodeTitle(current.ep);
+    const title = getCanonicalEpisodeTitle(current.number);
     
     // 截取内容长度限制（避免太长）
     // 保留最多 8000 字符用于分镜生成
@@ -495,11 +506,11 @@ function extractChapterContentFromOriginal(
     // 如果内容仍然为空，添加默认内容
     if (chapterContent.length === 0) {
       chapterContent = '该章节内容较少，建议手动补充';
-      console.warn(`[章节提取] 第${current.ep}集内容为空，使用默认内容`);
+      console.warn(`[章节提取] 第${current.number}集内容为空，使用默认内容`);
     }
     
     chapters.push({
-      chapterNumber: current.ep,
+      chapterNumber: current.number,
       title: title,
       summary: buildLocalChapterSummary(chapterContent),
       characters: [], // 人物将从原文中提取
