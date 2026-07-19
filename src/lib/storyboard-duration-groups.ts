@@ -1,6 +1,6 @@
 export const STORYBOARD_GROUP_MIN_SECONDS = 14;
 export const STORYBOARD_GROUP_MAX_SECONDS = 15;
-export const STORYBOARD_DURATION_GROUPING_STRATEGY = 'duration-14-15-v1';
+export const STORYBOARD_DURATION_GROUPING_STRATEGY = 'planned-unit-14-15-v2';
 
 const DURATION_PRECISION = 10;
 const DURATION_EPSILON = 0.0001;
@@ -50,20 +50,22 @@ export interface StoryboardDurationGroup<T> {
   totalDuration: number;
 }
 
-interface GroupByDurationOptions {
+interface GroupByDurationOptions<T> {
   minDuration?: number;
   maxDuration?: number;
   fallbackDuration?: number;
+  getGroupKey?: (item: T) => string | number | undefined;
 }
 
 /**
  * Groups adjacent shots without reordering them. A group closes once it reaches
- * the target window, or before the next complete shot would exceed the maximum.
+ * the target window, before the next complete shot would exceed the maximum, or
+ * when the model-planned video-unit key changes.
  */
 export function groupContiguousItemsByDuration<T>(
   items: readonly T[],
   getDuration: (item: T) => unknown,
-  options: GroupByDurationOptions = {},
+  options: GroupByDurationOptions<T> = {},
 ): Array<StoryboardDurationGroup<T>> {
   const minDuration = options.minDuration ?? STORYBOARD_GROUP_MIN_SECONDS;
   const maxDuration = options.maxDuration ?? STORYBOARD_GROUP_MAX_SECONDS;
@@ -96,6 +98,19 @@ export function groupContiguousItemsByDuration<T>(
   };
 
   normalizedEntries.forEach((entry, index) => {
+    const currentGroupKey = currentEntries.length > 0
+      ? options.getGroupKey?.(currentEntries[0].item)
+      : undefined;
+    const entryGroupKey = options.getGroupKey?.(entry.item);
+    const startsNewPlannedUnit = currentEntries.length > 0
+      && currentGroupKey !== undefined
+      && entryGroupKey !== undefined
+      && currentGroupKey !== entryGroupKey;
+
+    if (startsNewPlannedUnit) {
+      closeCurrentGroup();
+    }
+
     if (
       currentEntries.length > 0
       && currentDuration + entry.duration > maxDuration + DURATION_EPSILON
@@ -107,10 +122,17 @@ export function groupContiguousItemsByDuration<T>(
     currentDuration = roundDuration(currentDuration + entry.duration);
 
     const nextEntry = normalizedEntries[index + 1];
+    const nextGroupKey = nextEntry ? options.getGroupKey?.(nextEntry.item) : undefined;
+    const plannedUnitEnds = entryGroupKey !== undefined
+      && nextGroupKey !== undefined
+      && entryGroupKey !== nextGroupKey;
     const nextWouldExceed = !nextEntry
       || currentDuration + nextEntry.duration > maxDuration + DURATION_EPSILON;
 
-    if (currentDuration >= minDuration - DURATION_EPSILON && nextWouldExceed) {
+    if (
+      plannedUnitEnds
+      || (currentDuration >= minDuration - DURATION_EPSILON && nextWouldExceed)
+    ) {
       closeCurrentGroup();
     }
   });

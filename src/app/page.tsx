@@ -1160,8 +1160,13 @@ interface Shot {
     props: string[];
   };
   cameraMovement: string;
-  duration: string;
+  duration: string | number;
   notes: string;
+  videoUnitId?: string;
+  videoUnitIndex?: number;
+  videoUnitSubIndex?: number;
+  videoUnitTitle?: string;
+  plannedUnitDuration?: number;
   emotionalBeat?: string;
   focalLength?: string;
   aperture?: string;
@@ -1320,7 +1325,7 @@ interface PromptGroup {
   groupIndex: number;
   shotNumbers: number[];
   totalDuration?: number;        // 本组镜头实际总时长（兼容旧项目时可缺省）
-  groupingStrategy?: string;     // 新分组使用 duration-14-15-v1
+  groupingStrategy?: string;     // 新分组优先使用模型规划单元，并保持单组不超过15秒
   combinedPrompt: string;      // 合并后的连贯故事版面板描述
   storyboardImageUrl?: string; // 故事板图片URL
   storyboardImageKey?: string; // 故事板图片存储key
@@ -1666,6 +1671,7 @@ export default function StoryboardGenerator() {
 
   // 当前激活的标签页（已持久化，刷新后回到之前的位置）
   const [activeTab, setActiveTab] = usePersistentState<string>('storyboard_active_tab', 'extraction');
+  const assetChapterCardRefs = useRef<Record<number, HTMLDivElement | null>>({});
   const [collapsedPromptChapters, setCollapsedPromptChapters] = usePersistentState<Record<string, boolean>>('storyboard_collapsed_prompt_chapters', {});
   const [collapsedStoryboardChapters, setCollapsedStoryboardChapters] = usePersistentState<Record<string, boolean>>('storyboard_collapsed_storyboard_chapters', {});
   const [collapsedStoryboardTotalChapters, setCollapsedStoryboardTotalChapters] = usePersistentState<Record<string, boolean>>('storyboard_collapsed_storyboard_total_chapters', {});
@@ -5825,6 +5831,11 @@ export default function StoryboardGenerator() {
 
   // 确认章节素材
   const confirmChapterAssets = (chapterNumber: number) => {
+    const remainingChapters = Object.values(chapterStoryboards)
+      .filter(cs => cs.storyboardConfirmed && !cs.assetsConfirmed && cs.chapterNumber !== chapterNumber)
+      .sort((a, b) => a.chapterNumber - b.chapterNumber);
+    const nextChapter = remainingChapters.find(cs => cs.chapterNumber > chapterNumber) ?? remainingChapters[0];
+
     setChapterStoryboards(prev => {
       const cs = prev[chapterNumber];
 
@@ -5854,12 +5865,25 @@ export default function StoryboardGenerator() {
         setProgress(70);
       }
 
-      // 跳转到提示词标签页
-      setActiveTab('prompts');
-
       return updated;
     });
-    toast.success(`第 ${chapterNumber} 集素材已确认，请前往提示词标签页生成提示词`);
+
+    if (nextChapter) {
+      window.setTimeout(() => {
+        assetChapterCardRefs.current[nextChapter.chapterNumber]?.scrollIntoView({
+          behavior: 'smooth',
+          block: 'start',
+        });
+      }, 120);
+      toast.success(`第 ${chapterNumber} 集素材已确认`, {
+        description: `已定位到第 ${nextChapter.chapterNumber} 集，请继续确认素材。`,
+      });
+      return;
+    }
+
+    toast.success(`第 ${chapterNumber} 集素材已确认`, {
+      description: '全部分集素材已确认，可手动进入“提示词”模块。',
+    });
   };
 
   // 获取有效的视频比例（用于视频生成 API）
@@ -6182,6 +6206,9 @@ export default function StoryboardGenerator() {
     const durationGroups = groupContiguousItemsByDuration(
       orderedPrompts,
       item => item.duration ?? shotByNumber.get(item.shotNumber)?.duration,
+      {
+        getGroupKey: item => shotByNumber.get(item.shotNumber)?.videoUnitId,
+      },
     );
 
     const groups = durationGroups.map((durationGroup, groupIndex): PromptGroup => {
@@ -7161,10 +7188,16 @@ export default function StoryboardGenerator() {
         }
 
         if (json.type === 'start') {
+          const plannedUnits = Number(json.totalVideoUnits || json.totalSegments || 0);
+          const estimatedShots = Number(json.targetShotCount || 0);
           // 更新任务进度
           setGenerationTasks(prev => prev.map(t =>
             t.taskId === taskId
-              ? { ...t, total: json.targetShotCount, message: `第 ${chapter.chapterNumber} 集开始生成分镜 (目标${json.targetShotCount}个)...` }
+              ? {
+                  ...t,
+                  total: estimatedShots,
+                  message: `第 ${chapter.chapterNumber} 集正在生成 ${plannedUnits} 个视频单元（预计约 ${estimatedShots} 镜）...`,
+                }
               : t
           ));
 
@@ -14245,7 +14278,13 @@ export default function StoryboardGenerator() {
                       .filter(cs => cs.storyboardConfirmed)
                       .sort((a, b) => a.chapterNumber - b.chapterNumber)
                       .map((cs) => (
-                      <Card key={`assets-card-${cs.chapterNumber}`}>
+                      <Card
+                        key={`assets-card-${cs.chapterNumber}`}
+                        ref={(element) => {
+                          assetChapterCardRefs.current[cs.chapterNumber] = element;
+                        }}
+                        className="scroll-mt-24"
+                      >
                         <CardHeader>
                           <div className="flex items-center justify-between">
                             <div>
