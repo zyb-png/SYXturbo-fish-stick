@@ -16,6 +16,10 @@ import {
 } from '@/lib/creation-points';
 import { calculateStoryboardTokenCreationPoints } from '@/lib/provider-pricing';
 import { requireUserLoginResponse } from '@/lib/auth-guard';
+import {
+  normalizeOpeningShotActionChange,
+  normalizeOpeningShotContinuity,
+} from '@/lib/storyboard-opening-shot';
 
 interface Segment {
   id: number;
@@ -277,7 +281,9 @@ ${prevLastShot}
 4. 有台词的镜头必须给足自然说完原文的时间，长台词按原文标点拆镜；系统会校验并小幅微调时长，但不会修改台词和剧情
 5. 每个分镜必须包含：景别、运镜、镜头角度、机位、人物相对站位、人物肢体动作、脸部动作/表情、动作变化标注
 6. 人物站位必须写清楚，例如：A 在画面左前景，B 在右后景，两人相距约 1 米，A 面向 B，B 侧身避开视线
-7. 连续镜头必须标注"较上一镜动作变化"，如：从坐直变成后退半步、从低头变成抬眼、右手从桌沿移到胸前
+7. ${prevLastShot
+  ? '本段首镜不是本集第一镜，必须承接上方【上一段末镜衔接信息】并标注"较上一镜动作变化"，禁止重新写成"首镜建立动作"'
+  : '本段首镜就是本集第一镜，没有上一镜，必须写"首镜建立动作"并建立人物站位、表情和道具状态，禁止出现"上一镜/前一镜"'}；从本集第二镜开始，动作变化应写清从坐直变成后退半步、从低头变成抬眼、右手从桌沿移到胸前等具体变化
 8. 台词必须来自上方【本段原文台词锁定表】，一字不改；长台词按原文标点拆成连续分镜，不能改写、概括或新编
 9. 空镜、反应镜头、道具或手部特写只在能建立空间、传递信息、推动情绪或保证连续性时使用，不要机械插入
 10. 每个镜头都必须新增剧情动作、人物反应、空间信息或情绪变化；删除该镜头后若不影响理解，就不应生成
@@ -315,7 +321,7 @@ const SKILL5_SYSTEM_PROMPT = `你是专业的影视分镜专家（AI 视频分�
   "cameraAngle": "眼平平视",           // 镜头角度：眼平平视/低角度仰拍/高角度俯拍/过肩视角/主观视角/侧面平视（必填）
   "actorBlocking": "花十坐在画面右前景，露夏坐在左后景，两人隔桌相对，露夏身体略向后缩，花十身体前倾。",
                                         // 人物相对位置/站位（必填）：必须写清谁在左/右/前景/后景，谁面向谁，距离与身体朝向
-  "actionChange": "较上一镜：花十从低头夹烟变成抬眼看露夏，露夏从搅拌奶茶变成手指停在杯沿。",
+  "actionChange": "首镜建立动作：花十抬眼看向露夏，露夏手指停在杯沿，建立两人的初始动作和站位。",
                                         // 动作变化（必填）：首镜写"首镜建立动作"，后续镜头写清较上一镜哪些肢体/脸部动作发生变化
   "characters": [                     // 出场人物列表（必填）
     {
@@ -329,7 +335,7 @@ const SKILL5_SYSTEM_PROMPT = `你是专业的影视分镜专家（AI 视频分�
       "expression": "眼尾轻挑，嘴角带一点试探笑意",
       "facialAction": "说话前先短促吸气，吐字时眉心轻轻舒展",
       "gesture": "食指轻弹烟灰",
-      "actionChange": "较上一镜：从看窗外转为看向露夏",
+      "actionChange": "首镜建立动作：抬眼看向露夏，右手夹烟停在半空",
       "performance": "微微仰头，吐出烟雾，眼神停在露夏脸上"
     }
   ],
@@ -351,7 +357,7 @@ const SKILL5_SYSTEM_PROMPT = `你是专业的影视分镜专家（AI 视频分�
                                         // ★ 主体动作/表情（必填，台词嵌入此行，不另立项）
                                         //   格式：[角色] + [动作或语气描述] + ： "[台词原文]"
                                         //   无台词时只写动作，不留"台词：无"占位
-  "continuity": "桌上奶茶杯仍在露夏右手边，烟雾从花十右侧向画面左上方散开，保持上一镜道具状态",
+  "continuity": "首镜建立奶茶杯、烟灰缸和人物视线方向，作为后续镜头的连续性基准",
   "notes": "反应镜头前置，为下一句台词留出情绪停顿",
   "restrictions": "不允许出现字幕/水印/任何文字"
                                         // 限制（可选）：仅当 AI 模型可能出错时填写
@@ -397,7 +403,7 @@ E11=干脆决断(微距标点镜头+静切动)   E12=释放释怀(中焦+俯拍+
 3. 道具状态连续：杯中液体量、烟头长度等在相邻镜头间必须一致
 4. 景别跳跃：避免连续 3 镜以上同景别
 5. 每一个有人物的镜头都必须确认 actorBlocking 与 characters[].position
-6. 每一个连续镜头都必须在 actionChange 中标注较上一镜发生改变的肢体动作、脸部动作或表情；没有改变时也要写"较上一镜：动作保持，仅眼神/呼吸变化"
+6. 本集第一镜必须在 actionChange 中建立初始肢体动作、脸部动作、表情和站位，禁止引用不存在的上一镜；从本集第二镜开始，每一个连续镜头都必须标注较上一镜发生的变化，没有改变时也要写"较上一镜：动作保持，仅眼神/呼吸变化"
 
 【绝对禁止】
 1. 不能编造或修改台词，必须来自剧本原文
@@ -1185,9 +1191,10 @@ function normalizeShot(
         ? `${characterNames[0]}位于画面左前景，${characterNames[1]}位于右后景，两人保持同一轴线相对，距离随剧情保持连续。`
         : `${characterNames[0] || '人物'}位于画面中心偏左，身体朝向主要行动方向，背景保留场景空间。`
     ),
-    actionChange: rawShot?.actionChange || rawShot?.movementChange || (shotNumber === 1
-      ? '首镜建立动作和人物站位'
-      : '较上一镜：动作保持连续，眼神、呼吸或手部细节发生细微变化'),
+    actionChange: normalizeOpeningShotActionChange(
+      shotNumber,
+      rawShot?.actionChange || rawShot?.movementChange,
+    ),
     scene: {
       location: resolveStoryboardSceneContext(rawShot?.scene?.location, segment, globalContext),
       time: rawShot?.scene?.time || '日间',
@@ -1215,7 +1222,11 @@ function normalizeShot(
         expression,
         facialAction: existing?.facialAction || existing?.facialExpression || '',
         gesture,
-        actionChange: existing?.actionChange || existing?.movementChange || '',
+        actionChange: normalizeOpeningShotActionChange(
+          shotNumber,
+          existing?.actionChange || existing?.movementChange,
+          'character',
+        ),
         performance: existing?.performance || [action, expression, gesture].filter(Boolean).join('，') || '根据台词和动作做出自然反应',
       };
     }),
@@ -1227,7 +1238,10 @@ function normalizeShot(
     cameraPosition: rawShot?.cameraPosition || `摄影机位于主体正前方，眼平高度，以平视拍摄人物动作，景别为中景。`,
     composition: rawShot?.composition || '主体位于画面中心偏左，背景保留场景信息',
     actionAndDialogue: actionAndDialogue || rawShot?.description || segment.description || '人物完成当前剧情动作',
-    continuity: rawShot?.continuity || rawShot?.continuityNotes || '保持上一镜人物站位、道具状态和视线方向连续',
+    continuity: normalizeOpeningShotContinuity(
+      shotNumber,
+      rawShot?.continuity || rawShot?.continuityNotes,
+    ),
     notes: rawShot?.notes || `${rawShot?.shotPurpose || plannedStyle.shotPurpose}，突出当前节拍的动作和反应。`,
     restrictions: rawShot?.restrictions || '不允许出现字幕/水印/任何文字',
   };
@@ -1463,7 +1477,7 @@ function createFallbackShots(
     const isEmpty = plannedStyle.shotPurpose.includes('空镜');
 
     return normalizeShot({
-      shotNumber: index + 1,
+      shotNumber: absoluteIndex + 1,
       shotType: plannedStyle.shotType,
       shotPurpose: plannedStyle.shotPurpose,
       cameraAngle: plannedStyle.cameraAngle,
@@ -1502,7 +1516,7 @@ function createFallbackShots(
       cameraMovement: plannedStyle.cameraMovement,
       duration: isReaction ? 2 : 3,
       actionAndDialogue: isEmpty ? `${sceneContext}的空镜承接情绪，道具和光线保持连续` : description,
-    }, index + 1, segment, globalContext, sourceContent || segment.content, dialogueLocks);
+    }, absoluteIndex + 1, segment, globalContext, sourceContent || segment.content, dialogueLocks);
   });
 }
 
@@ -1833,7 +1847,7 @@ ${finalContent}
             const normalizeCollectedShots = (rawShots: any[]) => rawShots.map((rawShot, index) => (
               normalizeShot(
                 rawShot,
-                index + 1,
+                globalShotCount + index + 1,
                 segment,
                 globalContext,
                 finalContent,
@@ -1883,7 +1897,7 @@ ${finalContent}
                 segment,
                 globalContext,
                 segment.suggestedShots,
-                0,
+                globalShotCount,
                 finalContent,
                 segmentDialogueLocks,
               );

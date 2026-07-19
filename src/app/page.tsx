@@ -120,6 +120,10 @@ import {
   STORYBOARD_GROUP_MAX_SECONDS,
   sumStoryboardDurations,
 } from '@/lib/storyboard-duration-groups';
+import {
+  normalizeOpeningShotActionChange,
+  normalizeOpeningShotContinuity,
+} from '@/lib/storyboard-opening-shot';
 
 const STORYBOARD_BATCH_CONCURRENCY = 4;
 
@@ -5665,8 +5669,16 @@ export default function StoryboardGenerator() {
     if (shot.actorBlocking) {
       parts.push(`人物相对站位：${shot.actorBlocking}`);
     }
-    if (shot.actionChange) {
-      parts.push(`较上一镜动作变化：${shot.actionChange}`);
+    const normalizedShotActionChange = normalizeOpeningShotActionChange(
+      shot.shotNumber,
+      shot.actionChange,
+    );
+    if (normalizedShotActionChange) {
+      parts.push(
+        shot.shotNumber === 1
+          ? `首镜动作建立：${normalizedShotActionChange}`
+          : `较上一镜动作变化：${normalizedShotActionChange}`,
+      );
     }
 
     // 4. 人物描述（包含姓名、对白、反应、表演、表情、动作）
@@ -5723,8 +5735,13 @@ export default function StoryboardGenerator() {
         if (char.gesture) {
           charDesc.push(`手势：${char.gesture}`);
         }
-        if (char.actionChange) {
-          charDesc.push(`动作变化：${char.actionChange}`);
+        const normalizedCharacterActionChange = normalizeOpeningShotActionChange(
+          shot.shotNumber,
+          char.actionChange,
+          'character',
+        );
+        if (normalizedCharacterActionChange) {
+          charDesc.push(`动作变化：${normalizedCharacterActionChange}`);
         }
 
         parts.push(charDesc.join('，'));
@@ -5763,8 +5780,12 @@ export default function StoryboardGenerator() {
     if (shot.notes) {
       parts.push(`备注：${shot.notes}`);
     }
-    if (shot.continuity) {
-      parts.push(`连续性：${shot.continuity}`);
+    const normalizedShotContinuity = normalizeOpeningShotContinuity(
+      shot.shotNumber,
+      shot.continuity,
+    );
+    if (normalizedShotContinuity) {
+      parts.push(`连续性：${normalizedShotContinuity}`);
     }
 
     // 10. 应用用户选择的风格
@@ -6518,7 +6539,11 @@ export default function StoryboardGenerator() {
       const characterText = (shot.characters || []).map(char => {
         return [char.name, char.position, char.action, char.expression].filter(Boolean).join('/');
       }).join('；');
-      return `镜头${shot.shotNumber}：${shot.description || shot.actionAndDialogue || ''}；景别${shot.shotType || '中景'}；运镜${shot.cameraMovement || '稳定运镜'}；站位${shot.actorBlocking || characterText || '按故事版总控图执行'}；动作变化${shot.actionChange || '保持连续动作变化'}`;
+      const actionChange = normalizeOpeningShotActionChange(
+        shot.shotNumber,
+        shot.actionChange || (shot.shotNumber === 1 ? '' : '保持连续动作变化'),
+      );
+      return `镜头${shot.shotNumber}：${shot.description || shot.actionAndDialogue || ''}；景别${shot.shotType || '中景'}；运镜${shot.cameraMovement || '稳定运镜'}；站位${shot.actorBlocking || characterText || '按故事版总控图执行'}；动作变化${actionChange}`;
     }).join('\n');
 
     return [
@@ -14038,11 +14063,17 @@ export default function StoryboardGenerator() {
                                       {shot.actorBlocking && (
                                         <div><span className="font-medium">人物站位：</span>{shot.actorBlocking}</div>
                                       )}
-                                      {shot.actionChange && (
-                                        <div><span className="font-medium">动作变化：</span>{shot.actionChange}</div>
+                                      {(shot.actionChange || shot.shotNumber === 1) && (
+                                        <div>
+                                          <span className="font-medium">动作变化：</span>
+                                          {normalizeOpeningShotActionChange(shot.shotNumber, shot.actionChange)}
+                                        </div>
                                       )}
-                                      {shot.continuity && (
-                                        <div><span className="font-medium">连续性：</span>{shot.continuity}</div>
+                                      {(shot.continuity || shot.shotNumber === 1) && (
+                                        <div>
+                                          <span className="font-medium">连续性：</span>
+                                          {normalizeOpeningShotContinuity(shot.shotNumber, shot.continuity)}
+                                        </div>
                                       )}
                                     </div>
                                   )}
@@ -14100,10 +14131,14 @@ export default function StoryboardGenerator() {
                                             </div>
                                           )}
 
-                                          {char.actionChange && (
+                                          {(char.actionChange || shot.shotNumber === 1) && (
                                             <div className="text-sm pl-3 text-gray-600 dark:text-gray-400">
                                               <span className="text-gray-500 text-xs">动作变化：</span>
-                                              {char.actionChange}
+                                              {normalizeOpeningShotActionChange(
+                                                shot.shotNumber,
+                                                char.actionChange,
+                                                'character',
+                                              )}
                                             </div>
                                           )}
                                         </div>
