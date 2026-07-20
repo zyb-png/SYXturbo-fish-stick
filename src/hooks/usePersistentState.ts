@@ -4,6 +4,8 @@ import LZString from 'lz-string';
 const PROJECT_STATE_API = '/api/project-state';
 const ESTIMATED_LOCAL_STORAGE_QUOTA = 5 * 1024 * 1024;
 const MAX_LOCAL_STORAGE_VALUE_SIZE = 200 * 1024;
+const LOCAL_STORAGE_SAFETY_BUFFER = 256 * 1024;
+const STORAGE_USAGE_CACHE_MS = 2000;
 const SAVE_DEBOUNCE_MS = 900;
 const PROJECT_SYNC_POLL_MS = 1500;
 const PROJECT_SYNC_BACKGROUND_POLL_MS = 10_000;
@@ -28,6 +30,8 @@ const PROTECTED_NON_EMPTY_KEYS = new Set<string>([
   'storyboard_chapter_storyboards',
   'storyboard_asset_images',
 ]);
+let cachedLocalStorageUsage = 0;
+let cachedLocalStorageUsageExpiresAt = 0;
 
 function persistenceDebugLog(...args: unknown[]): void {
   if (PERSISTENCE_DEBUG) {
@@ -622,16 +626,21 @@ function checkStorageSpace(requiredSize: number): boolean {
   if (typeof window === 'undefined') return false;
 
   try {
-    // 估算已使用的空间
-    let usedSpace = 0;
-    for (let i = 0; i < window.localStorage.length; i++) {
-      const key = window.localStorage.key(i);
-      if (key) {
-        const value = window.localStorage.getItem(key);
-        if (value) {
-          usedSpace += new Blob([value]).size;
+    const now = Date.now();
+    let usedSpace = cachedLocalStorageUsage;
+    if (now >= cachedLocalStorageUsageExpiresAt) {
+      usedSpace = 0;
+      for (let i = 0; i < window.localStorage.length; i++) {
+        const key = window.localStorage.key(i);
+        if (key) {
+          const value = window.localStorage.getItem(key);
+          if (value) {
+            usedSpace += new Blob([value]).size;
+          }
         }
       }
+      cachedLocalStorageUsage = usedSpace;
+      cachedLocalStorageUsageExpiresAt = now + STORAGE_USAGE_CACHE_MS;
     }
 
     // localStorage 通常限制在 5-10MB；这里保守按 5MB 估算。
@@ -639,7 +648,7 @@ function checkStorageSpace(requiredSize: number): boolean {
 
     persistenceDebugLog(`[持久化] 存储空间: 已用 ${(usedSpace / 1024).toFixed(2)} KB, 剩余 ${(remainingSpace / 1024).toFixed(2)} KB, 需要 ${(requiredSize / 1024).toFixed(2)} KB`);
 
-    return remainingSpace > requiredSize;
+    return remainingSpace > requiredSize + LOCAL_STORAGE_SAFETY_BUFFER;
   } catch (error) {
     console.error('[持久化] 检查存储空间失败:', error);
     return false;
@@ -663,6 +672,7 @@ export function usePersistentState<T>(
   const hasHydratedRef = useRef(false);
   const stateRef = useRef(state);
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const idleSaveHandleRef = useRef<number | null>(null);
   const saveRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingSaveRef = useRef<T | null>(null);
   const pendingSaveVersionRef = useRef(0);
@@ -683,6 +693,10 @@ export function usePersistentState<T>(
       if (saveTimerRef.current) {
         clearTimeout(saveTimerRef.current);
         saveTimerRef.current = null;
+      }
+      if (idleSaveHandleRef.current !== null) {
+        window.cancelIdleCallback?.(idleSaveHandleRef.current);
+        idleSaveHandleRef.current = null;
       }
       if (saveRetryTimerRef.current) {
         clearTimeout(saveRetryTimerRef.current);
@@ -844,6 +858,10 @@ export function usePersistentState<T>(
           if (saveTimerRef.current) {
             clearTimeout(saveTimerRef.current);
             saveTimerRef.current = null;
+          }
+          if (idleSaveHandleRef.current !== null) {
+            window.cancelIdleCallback?.(idleSaveHandleRef.current);
+            idleSaveHandleRef.current = null;
           }
           if (saveRetryTimerRef.current) {
             clearTimeout(saveRetryTimerRef.current);
@@ -1019,33 +1037,58 @@ export function usePersistentState<T>(
     if (saveTimerRef.current) {
       clearTimeout(saveTimerRef.current);
     }
+    if (idleSaveHandleRef.current !== null) {
+      window.cancelIdleCallback?.(idleSaveHandleRef.current);
+      idleSaveHandleRef.current = null;
+    }
 
     saveTimerRef.current = setTimeout(() => {
       saveTimerRef.current = null;
-      const pendingValue = pendingSaveRef.current;
-      const pendingVersion = pendingSaveVersionRef.current;
-      pendingSaveRef.current = null;
-      pendingSaveVersionRef.current = 0;
-      const hasPendingValue = hasPendingSaveRef.current;
-      hasPendingSaveRef.current = false;
-      if (hasPendingValue) {
-        saveToStorage(pendingValue as T, undefined, pendingVersion);
+      const flushPendingSave = () => {
+        idleSaveHandleRef.current = null;
+        const pendingValue = pendingSaveRef.current;
+        const pendingVersion = pendingSaveVersionRef.current;
+        pendingSaveRef.current = null;
+        pendingSaveVersionRef.current = 0;
+        const hasPendingValue = hasPendingSaveRef.current;
+        hasPendingSaveRef.current = false;
+        if (hasPendingValue) {
+          saveToStorage(pendingValue as T, undefined, pendingVersion);
+        }
+      };
+
+      if (typeof window.requestIdleCallback === 'function') {
+        idleSaveHandleRef.current = window.requestIdleCallback(flushPendingSave, {
+          timeout: 1200,
+        });
+      } else {
+        // Safari currently has no requestIdleCallback. Yield a paint frame
+        // before doing JSON/LZ work so clicks and scrolling stay responsive.
+        saveTimerRef.current = setTimeout(flushPendingSave, 80);
       }
     }, SAVE_DEBOUNCE_MS);
   }, [saveToStorage]);
 
   // 更新状态并保存
   const setValue = useCallback((value: T | ((prev: T) => T)) => {
-    const mutationVersion = localMutationVersionRef.current + 1;
-    localMutationVersionRef.current = mutationVersion;
     if (value instanceof Function) {
       setState((prev) => {
         const newValue = value(prev);
+        if (Object.is(newValue, prev)) {
+          return prev;
+        }
+        const mutationVersion = localMutationVersionRef.current + 1;
+        localMutationVersionRef.current = mutationVersion;
         stateRef.current = newValue;
         scheduleSaveToStorage(newValue, mutationVersion);
         return newValue;
       });
     } else {
+      if (Object.is(value, stateRef.current)) {
+        return;
+      }
+      const mutationVersion = localMutationVersionRef.current + 1;
+      localMutationVersionRef.current = mutationVersion;
       stateRef.current = value;
       setState(value);
       scheduleSaveToStorage(value, mutationVersion);
@@ -1060,6 +1103,10 @@ export function usePersistentState<T>(
       if (saveTimerRef.current) {
         clearTimeout(saveTimerRef.current);
         saveTimerRef.current = null;
+      }
+      if (idleSaveHandleRef.current !== null) {
+        window.cancelIdleCallback?.(idleSaveHandleRef.current);
+        idleSaveHandleRef.current = null;
       }
       if (saveRetryTimerRef.current) {
         clearTimeout(saveRetryTimerRef.current);
@@ -1087,6 +1134,10 @@ export function usePersistentState<T>(
       if (saveTimerRef.current) {
         clearTimeout(saveTimerRef.current);
         saveTimerRef.current = null;
+      }
+      if (idleSaveHandleRef.current !== null) {
+        window.cancelIdleCallback?.(idleSaveHandleRef.current);
+        idleSaveHandleRef.current = null;
       }
       pendingSaveRef.current = null;
       pendingSaveVersionRef.current = 0;

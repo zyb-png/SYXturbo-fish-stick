@@ -19,6 +19,7 @@ import {
 } from '@/lib/storyboard-duration-groups';
 import fs from 'fs';
 import path from 'path';
+import { createHash } from 'crypto';
 
 // 设置 API 路由超时时间
 export const maxDuration = 600;
@@ -41,6 +42,12 @@ const IS_QUALITY_MODE = STORYBOARD_IMAGE_MODE === 'quality';
 const STORYBOARD_RESOLUTION: '1k' | '2k' | '4k' = '4k';
 const STORYBOARD_QUALITY: 'low' | 'medium' | 'high' = 'medium';
 const STORYBOARD_REF_IMAGE_LIMIT = readPositiveInt('STORYBOARD_REF_IMAGE_LIMIT', IS_QUALITY_MODE ? 8 : 4);
+const STORYBOARD_REF_UPLOAD_CONCURRENCY = readPositiveInt('STORYBOARD_REF_UPLOAD_CONCURRENCY', 4);
+const STORYBOARD_REF_UPLOAD_CACHE_TTL_MS = readPositiveInt(
+  'STORYBOARD_REF_UPLOAD_CACHE_TTL_MS',
+  20 * 60 * 60 * 1000
+);
+const STORYBOARD_REF_UPLOAD_CACHE_MAX_ENTRIES = readPositiveInt('STORYBOARD_REF_UPLOAD_CACHE_MAX_ENTRIES', 600);
 const MAX_POLL_RETRIES = readPositiveInt('STORYBOARD_IMAGE_MAX_POLL_RETRIES', IS_QUALITY_MODE ? 200 : 60);
 const POLL_INTERVAL_MS = readPositiveInt('STORYBOARD_IMAGE_POLL_INTERVAL_MS', IS_QUALITY_MODE ? 3000 : 2500);
 const CREATE_TASK_RETRIES = IS_QUALITY_MODE ? 3 : 2;
@@ -49,6 +56,59 @@ const ENABLE_LLM_IMAGE_PROMPT = process.env.ENABLE_LLM_STORYBOARD_IMAGE_PROMPT =
 function readPositiveInt(name: string, fallback: number): number {
   const value = Number(process.env[name]);
   return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+type ReferenceUploadCacheEntry = {
+  url: string;
+  expiresAt: number;
+};
+
+type StoryboardReferenceUploadCache = {
+  resolved: Map<string, ReferenceUploadCacheEntry>;
+  pending: Map<string, Promise<string>>;
+};
+
+const globalWithStoryboardReferenceCache = globalThis as typeof globalThis & {
+  __storyboardReferenceUploadCache?: StoryboardReferenceUploadCache;
+};
+
+const storyboardReferenceUploadCache = globalWithStoryboardReferenceCache.__storyboardReferenceUploadCache
+  ?? {
+    resolved: new Map<string, ReferenceUploadCacheEntry>(),
+    pending: new Map<string, Promise<string>>(),
+  };
+
+globalWithStoryboardReferenceCache.__storyboardReferenceUploadCache = storyboardReferenceUploadCache;
+
+function pruneReferenceUploadCache(now = Date.now()) {
+  for (const [key, entry] of storyboardReferenceUploadCache.resolved) {
+    if (entry.expiresAt <= now) storyboardReferenceUploadCache.resolved.delete(key);
+  }
+
+  while (storyboardReferenceUploadCache.resolved.size > STORYBOARD_REF_UPLOAD_CACHE_MAX_ENTRIES) {
+    const oldestKey = storyboardReferenceUploadCache.resolved.keys().next().value;
+    if (!oldestKey) break;
+    storyboardReferenceUploadCache.resolved.delete(oldestKey);
+  }
+}
+
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  concurrency: number,
+  worker: (item: T, index: number) => Promise<R>
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+  const workerCount = Math.min(Math.max(1, concurrency), items.length);
+
+  await Promise.all(Array.from({ length: workerCount }, async () => {
+    while (nextIndex < items.length) {
+      const index = nextIndex++;
+      results[index] = await worker(items[index], index);
+    }
+  }));
+
+  return results;
 }
 
 function cleanText(value: unknown, fallback = ''): string {
@@ -186,6 +246,30 @@ function resolveLocalAssetFilePath(account: PublicAccount, urlString: string): {
   };
 }
 
+async function getReferenceUploadCacheKey(
+  account: PublicAccount,
+  imageUrl: string,
+  request: NextRequest,
+  endpoints: ReturnType<typeof buildRunningHubEndpoints>
+): Promise<string> {
+  const localAsset = resolveLocalAssetFilePath(account, imageUrl);
+  let sourceIdentity = imageUrl;
+
+  if (localAsset) {
+    const stats = await fs.promises.stat(localAsset.filePath);
+    sourceIdentity = `file:${localAsset.filePath}:${stats.size}:${stats.mtimeMs}`;
+  } else if (imageUrl.startsWith('data:')) {
+    sourceIdentity = `data:${createHash('sha256').update(imageUrl).digest('hex')}`;
+  } else {
+    const parsed = new URL(imageUrl, request.url);
+    sourceIdentity = `url:${parsed.toString()}`;
+  }
+
+  return createHash('sha256')
+    .update(`${account.id}|${endpoints.mediaUpload}|${sourceIdentity}`)
+    .digest('hex');
+}
+
 async function readReferenceImage(
   account: PublicAccount,
   imageUrl: string,
@@ -276,6 +360,49 @@ async function uploadReferenceImageToRunningHub(
   return downloadUrl;
 }
 
+async function getOrUploadReferenceImage(
+  apiKey: string,
+  endpoints: ReturnType<typeof buildRunningHubEndpoints>,
+  account: PublicAccount,
+  imageUrl: string,
+  request: NextRequest,
+  index: number
+): Promise<{ url: string; fileName: string; cached: boolean } | null> {
+  const cacheKey = await getReferenceUploadCacheKey(account, imageUrl, request, endpoints);
+  const now = Date.now();
+  pruneReferenceUploadCache(now);
+
+  const cached = storyboardReferenceUploadCache.resolved.get(cacheKey);
+  if (cached && cached.expiresAt > now) {
+    storyboardReferenceUploadCache.resolved.delete(cacheKey);
+    storyboardReferenceUploadCache.resolved.set(cacheKey, cached);
+    return { url: cached.url, fileName: `参考图${index}`, cached: true };
+  }
+
+  const pending = storyboardReferenceUploadCache.pending.get(cacheKey);
+  if (pending) {
+    return { url: await pending, fileName: `参考图${index}`, cached: true };
+  }
+
+  const image = await readReferenceImage(account, imageUrl, request, index);
+  if (!image) return null;
+
+  const uploadPromise = uploadReferenceImageToRunningHub(apiKey, endpoints, image);
+  storyboardReferenceUploadCache.pending.set(cacheKey, uploadPromise);
+
+  try {
+    const uploadedUrl = await uploadPromise;
+    storyboardReferenceUploadCache.resolved.set(cacheKey, {
+      url: uploadedUrl,
+      expiresAt: Date.now() + STORYBOARD_REF_UPLOAD_CACHE_TTL_MS,
+    });
+    pruneReferenceUploadCache();
+    return { url: uploadedUrl, fileName: image.fileName, cached: false };
+  } finally {
+    storyboardReferenceUploadCache.pending.delete(cacheKey);
+  }
+}
+
 async function normalizeReferenceImages(
   apiKey: string,
   endpoints: ReturnType<typeof buildRunningHubEndpoints>,
@@ -289,29 +416,40 @@ async function normalizeReferenceImages(
     .filter((url): url is string => typeof url === 'string' && url.trim().length > 0)
     .slice(0, STORYBOARD_REF_IMAGE_LIMIT);
 
-  const normalized: string[] = [];
-  for (const [index, imageUrl] of candidates.entries()) {
-    try {
-      const parsed = new URL(imageUrl, request.url);
-      const isLocalUrl = parsed.protocol === 'data:' || parsed.pathname === '/api/assets-view' || isLocalHostName(parsed.hostname);
+  const normalized = await mapWithConcurrency(
+    candidates,
+    STORYBOARD_REF_UPLOAD_CONCURRENCY,
+    async (imageUrl, index): Promise<string> => {
+      try {
+        const parsed = new URL(imageUrl, request.url);
+        const isLocalUrl = parsed.protocol === 'data:' || parsed.pathname === '/api/assets-view' || isLocalHostName(parsed.hostname);
 
-      if (!isLocalUrl && (parsed.protocol === 'http:' || parsed.protocol === 'https:')) {
-        normalized.push(parsed.toString());
-        continue;
+        if (!isLocalUrl && (parsed.protocol === 'http:' || parsed.protocol === 'https:')) {
+          return parsed.toString();
+        }
+
+        const result = await getOrUploadReferenceImage(
+          apiKey,
+          endpoints,
+          account,
+          imageUrl,
+          request,
+          index + 1
+        );
+        if (!result) return '';
+
+        console.log(
+          `[RunningHub 参考图] ${result.cached ? '复用缓存' : '上传完成'} ${index + 1}/${candidates.length}: ${result.fileName}`
+        );
+        return result.url;
+      } catch (error) {
+        console.warn(`[RunningHub 参考图] 跳过无效参考图 ${index + 1}:`, error);
+        return '';
       }
-
-      const image = await readReferenceImage(account, imageUrl, request, index + 1);
-      if (!image) continue;
-
-      const uploadedUrl = await uploadReferenceImageToRunningHub(apiKey, endpoints, image);
-      normalized.push(uploadedUrl);
-      console.log(`[RunningHub 参考图] 已上传本地参考图 ${index + 1}/${candidates.length}: ${image.fileName}`);
-    } catch (error) {
-      console.warn(`[RunningHub 参考图] 跳过无效参考图 ${index + 1}:`, error);
     }
-  }
+  );
 
-  return normalized;
+  return normalized.filter(Boolean);
 }
 
 /**
@@ -531,9 +669,15 @@ async function runRunningHubImageToImage(
 }
 
 /**
- * 保存图片。没有对象存储配置时保存到本地资产目录。
+ * 原图始终先保存到当前账号的本地资产目录，以便页面使用缓存缩略图快速展示。
+ * 配置了对象存储时再同步备份一份，但页面不直接加载临时签名的 4K 原图。
  */
-async function saveGeneratedImage(account: PublicAccount, imageUrl: string): Promise<{ url: string; key: string }> {
+async function saveGeneratedImage(
+  account: PublicAccount,
+  imageUrl: string,
+  chapterTitle: string,
+  groupIndex: number
+): Promise<{ url: string; key: string; remoteKey?: string }> {
   const imageResponse = await fetch(imageUrl);
   if (!imageResponse.ok) {
     throw new Error(`下载图片失败: ${imageResponse.status}`);
@@ -543,9 +687,17 @@ async function saveGeneratedImage(account: PublicAccount, imageUrl: string): Pro
   const contentType = imageResponse.headers.get('content-type') || 'image/png';
   const ext = contentType.includes('jpeg') ? 'jpg' : contentType.includes('webp') ? 'webp' : 'png';
   const timestamp = Date.now();
-  const rand = Math.random().toString(36).substring(2, 8);
-  const fileName = `storyboard_${timestamp}_${rand}.${ext}`;
+  const safeChapterTitle = cleanText(chapterTitle, '未命名章节')
+    .replace(/[<>:"/\\|?*\u0000-\u001F]/g, '_')
+    .replace(/\s+/g, ' ')
+    .slice(0, 80);
+  const fileName = `${safeChapterTitle}_分镜${Math.max(1, Number(groupIndex) || 1)}_${timestamp}.${ext}`;
+  const folderName = '分镜图片';
+  const folderPath = path.join(getAccountAssetsPath(account), folderName);
+  await fs.promises.mkdir(folderPath, { recursive: true });
+  await fs.promises.writeFile(path.join(folderPath, fileName), imageBuffer);
 
+  let remoteKey: string | undefined;
   if (process.env.COZE_BUCKET_ENDPOINT_URL && process.env.COZE_BUCKET_NAME) {
     try {
       const key = getAccountRemoteKey(account, `storyboards/${fileName}`);
@@ -556,31 +708,22 @@ async function saveGeneratedImage(account: PublicAccount, imageUrl: string): Pro
         bucketName: process.env.COZE_BUCKET_NAME,
         region: "cn-beijing",
       });
-      const imageKey = await storage.uploadFile({ fileContent: imageBuffer, fileName: key, contentType });
-      const presignedUrl = await storage.generatePresignedUrl({
-        key: imageKey,
-        expireTime: 86400 * 30,
-      });
-      return { url: presignedUrl, key: imageKey };
+      remoteKey = await storage.uploadFile({ fileContent: imageBuffer, fileName: key, contentType });
     } catch (storageError) {
-      console.warn('对象存储保存失败，改为保存到本地资产目录:', storageError);
+      console.warn('对象存储备份失败，继续使用本地资产原图:', storageError);
     }
   }
-
-  const folderName = '分镜图片';
-  const folderPath = path.join(getAccountAssetsPath(account), folderName);
-  await fs.promises.mkdir(folderPath, { recursive: true });
-  const filePath = path.join(folderPath, fileName);
-  await fs.promises.writeFile(filePath, imageBuffer);
 
   return {
     url: `/api/assets-view?folder=${encodeURIComponent(folderName)}&filename=${encodeURIComponent(fileName)}`,
     key: fileName,
+    remoteKey,
   };
 }
 
 export async function POST(request: NextRequest) {
   let creationPointTaskId = '';
+  const requestStartedAt = Date.now();
   const auth = await requireUserLoginResponse();
   if (auth.response) return auth.response;
 
@@ -671,8 +814,18 @@ export async function POST(request: NextRequest) {
     let imageUrl: string;
     let imageModel = TEXT_TO_IMAGE_MODEL;
 
-    const normalizedReferenceImages = await normalizeReferenceImages(runninghubKey, runninghubEndpoints, referenceImages, request, auth.account);
+    const referencesStartedAt = Date.now();
+    const normalizedReferenceImages = await normalizeReferenceImages(
+      runninghubKey,
+      runninghubEndpoints,
+      referenceImages,
+      request,
+      auth.account
+    );
+    const referencesDurationMs = Date.now() - referencesStartedAt;
+    console.log(`⏱️ 故事板参考图准备耗时: ${referencesDurationMs}ms`);
 
+    const generationStartedAt = Date.now();
     if (normalizedReferenceImages.length > 0) {
       console.log(`🖼️ 使用图生图模式（rhart-image-g-2-official/image-to-image），参考图数量: ${normalizedReferenceImages.length}，实际传入最多 ${STORYBOARD_REF_IMAGE_LIMIT} 张`);
       imageModel = IMAGE_TO_IMAGE_MODEL;
@@ -685,6 +838,8 @@ export async function POST(request: NextRequest) {
         runninghubKey, runninghubEndpoints, concisePrompt, aspectRatio, STORYBOARD_RESOLUTION
       );
     }
+    const generationDurationMs = Date.now() - generationStartedAt;
+    console.log(`⏱️ 故事板模型生成耗时: ${generationDurationMs}ms`);
 
     console.log(`✅ RunningHub 返回图片: ${imageUrl?.substring(0, 60)}...`);
 
@@ -694,9 +849,18 @@ export async function POST(request: NextRequest) {
 
     // 第三步：持久化保存
     console.log('💾 保存图片...');
-    const { url: signedUrl, key } = await saveGeneratedImage(auth.account, imageUrl);
+    const persistenceStartedAt = Date.now();
+    const {
+      url: localUrl,
+      key,
+      remoteKey,
+    } = await saveGeneratedImage(auth.account, imageUrl, chapterTitle, groupIndex);
+    const persistenceDurationMs = Date.now() - persistenceStartedAt;
 
-    console.log(`✅ 故事板图片生成成功: ${signedUrl?.substring(0, 60)}...`);
+    console.log(`✅ 故事板图片生成成功: ${localUrl?.substring(0, 60)}...`);
+    console.log(
+      `⏱️ 故事板总耗时: ${Date.now() - requestStartedAt}ms（参考图 ${referencesDurationMs}ms / 模型 ${generationDurationMs}ms / 保存 ${persistenceDurationMs}ms）`
+    );
 
     await completeCreationPointTask(creationPointTaskId, imagePoints, {
       description: `故事板图片完成扣除（${STORYBOARD_RESOLUTION.toUpperCase()} / ${STORYBOARD_QUALITY}）`,
@@ -707,13 +871,20 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({
       success: true,
-      imageUrl: signedUrl,
+      imageUrl: localUrl,
       imageKey: key,
+      remoteImageKey: remoteKey,
       concisePrompt,
       groupIndex,
       shotCount: shots.length,
       provider: 'runninghub',
       model: imageModel,
+      timings: {
+        referencePreparationMs: referencesDurationMs,
+        providerGenerationMs: generationDurationMs,
+        persistenceMs: persistenceDurationMs,
+        totalMs: Date.now() - requestStartedAt,
+      },
     });
 
   } catch (error: any) {

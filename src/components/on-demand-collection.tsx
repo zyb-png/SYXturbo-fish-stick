@@ -1,6 +1,7 @@
 'use client';
 
 import {
+  startTransition,
   useCallback,
   useEffect,
   useMemo,
@@ -24,6 +25,19 @@ interface OnDemandCollectionProps<T> {
 }
 
 export function OnDemandCollection<T>({
+  ...props
+}: OnDemandCollectionProps<T>) {
+  // Changing the mode remounts the loading session. Collapsing a long list
+  // therefore releases cards that were mounted while scrolling.
+  return (
+    <OnDemandCollectionSession
+      key={props.expanded ? 'expanded' : 'collapsed'}
+      {...props}
+    />
+  );
+}
+
+function OnDemandCollectionSession<T>({
   items,
   expanded,
   collapsedCount,
@@ -50,7 +64,9 @@ export function OnDemandCollection<T>({
 
   const loadNextBatch = useCallback(() => {
     if (!expanded) return;
-    setExpandedVisibleCount(current => Math.min(items.length, current + batchSize));
+    startTransition(() => {
+      setExpandedVisibleCount(current => Math.min(items.length, current + batchSize));
+    });
   }, [batchSize, expanded, items.length]);
 
   useEffect(() => {
@@ -71,7 +87,7 @@ export function OnDemandCollection<T>({
       },
       {
         root: null,
-        rootMargin: '1200px 0px',
+        rootMargin: '500px 0px',
       },
     );
 

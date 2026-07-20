@@ -1332,7 +1332,8 @@ interface PromptGroup {
   groupingStrategy?: string;     // 新分组优先使用模型规划单元，并保持单组不超过15秒
   combinedPrompt: string;      // 合并后的连贯故事版面板描述
   storyboardImageUrl?: string; // 故事板图片URL
-  storyboardImageKey?: string; // 故事板图片存储key
+  storyboardImageKey?: string; // 本地故事板图片文件名
+  storyboardRemoteImageKey?: string; // 可选的对象存储备份 key
   isGeneratingStoryboard?: boolean;  // 是否正在生成故事板
   storyboardStatus?: string;        // 生成进度文本
   isEditing?: boolean;
@@ -3420,7 +3421,7 @@ export default function StoryboardGenerator() {
     }
   }, []);
 
-  // 自动修复 storyboardConfirmed 状态
+  // 兼容旧项目中已生成但尚未写入自动确认状态的文字分镜
   // 用于取消角色造型图片生成的 AbortController
   const lookAbortControllers = useRef<Map<string, AbortController>>(new Map());
   const manuallyStoppedLookGenerations = useRef<Set<string>>(new Set());
@@ -3465,6 +3466,9 @@ export default function StoryboardGenerator() {
     if (chaptersToFix.length > 0) {
       storyboardFixAppliedRef.current = true;
       console.log(`[自动修复] 发现 ${chaptersToFix.length} 个章节的 storyboardConfirmed 状态需要修复`);
+      const collapsedChapterKeys = Object.fromEntries(
+        chaptersToFix.map(chapter => [String(chapter.chapterNumber), true])
+      ) as Record<string, boolean>;
 
       setChapterStoryboards(prev => {
         const updated = { ...prev };
@@ -3480,8 +3484,63 @@ export default function StoryboardGenerator() {
         });
         return updated;
       });
+      setCollapsedStoryboardChapters(prev => ({ ...prev, ...collapsedChapterKeys }));
+      setStepConfirmed(prev => ({ ...prev, storyboard: true }));
+      setCurrentStep(current => Math.max(current, 3));
+      setProgress(current => Math.max(current, 50));
     }
   }, [chapterStoryboards, setChapterStoryboards]);
+
+  // 故事版面板描述生成成功后默认确认，并兼容旧项目中的待确认数据。
+  const promptAutoConfirmMigrationAppliedRef = useRef(false);
+  useEffect(() => {
+    if (promptAutoConfirmMigrationAppliedRef.current) return;
+
+    const assetConfirmedChapters = Object.values(chapterStoryboards).filter(
+      chapter => chapter.assetsConfirmed
+    );
+    if (assetConfirmedChapters.length === 0) return;
+    promptAutoConfirmMigrationAppliedRef.current = true;
+
+    const hasGeneratedPrompts = (chapter: ChapterStoryboard) =>
+      (chapter.videoPrompts?.length ?? 0) > 0 || (chapter.promptGroups?.length ?? 0) > 0;
+    const chaptersToAutoConfirm = assetConfirmedChapters.filter(
+      chapter => hasGeneratedPrompts(chapter) && !chapter.promptsConfirmed
+    );
+
+    if (chaptersToAutoConfirm.length > 0) {
+      const chapterNumbers = new Set(
+        chaptersToAutoConfirm.map(chapter => chapter.chapterNumber)
+      );
+      setChapterStoryboards(prev => {
+        const updated = { ...prev };
+        chapterNumbers.forEach(chapterNumber => {
+          const chapter = updated[chapterNumber];
+          if (chapter) {
+            updated[chapterNumber] = {
+              ...chapter,
+              promptsConfirmed: true,
+            };
+          }
+        });
+        return updated;
+      });
+    }
+
+    const allPromptChaptersReady = assetConfirmedChapters.every(hasGeneratedPrompts);
+    if (allPromptChaptersReady && !stepConfirmed.prompts) {
+      setStepConfirmed(prev => ({ ...prev, prompts: true }));
+      setCurrentStep(current => Math.max(current, 5));
+      setProgress(current => Math.max(current, 90));
+    }
+  }, [
+    chapterStoryboards,
+    setChapterStoryboards,
+    setCurrentStep,
+    setProgress,
+    setStepConfirmed,
+    stepConfirmed.prompts,
+  ]);
 
   // 清除所有数据（包括本地状态和S3资产）
   const handleClearAllData = useCallback(async () => {
@@ -5575,39 +5634,6 @@ export default function StoryboardGenerator() {
     ]);
   };
 
-  // 确认章节文字分镜
-  const confirmChapterStoryboard = (chapterNumber: number) => {
-    const collapsedKey = String(chapterNumber);
-    setChapterStoryboards(prev => {
-      const updated = {
-        ...prev,
-        [chapterNumber]: {
-          ...prev[chapterNumber],
-          storyboardConfirmed: true,
-        }
-      };
-
-      // 检查是否所有章节都确认了分镜
-      const allChapters = Object.values(updated);
-      const allConfirmed = allChapters.every(cs => cs.storyboardConfirmed);
-
-      // 更新进度：只要确认了分镜就前进到素材确认步骤
-      setCurrentStep(3);
-      setProgress(50);
-
-      // 如果所有章节都确认了分镜，更新全局确认状态
-      if (allConfirmed && allChapters.length > 0) {
-        setStepConfirmed(prevState => ({ ...prevState, storyboard: true }));
-        // 跳转到素材确认标签页
-        setActiveTab('assets');
-      }
-
-      return updated;
-    });
-    setCollapsedStoryboardChapters(prev => ({ ...prev, [collapsedKey]: true }));
-    toast.success(`第 ${chapterNumber} 集文字分镜已确认`);
-  };
-
   // 生成单个分镜的提示词（前端预览用，与后端API保持一致）
   const buildShotPrompt = (
     shot: Shot,
@@ -6666,6 +6692,13 @@ export default function StoryboardGenerator() {
           imageUrls.push(item.imageUrlEndFrame);
         }
       });
+      cs.promptGroups?.forEach(group => {
+        if (group.storyboardImageKey) imageKeys.push(group.storyboardImageKey);
+        if (group.storyboardRemoteImageKey) imageKeys.push(group.storyboardRemoteImageKey);
+        if (group.storyboardImageUrl && !group.storyboardImageKey) {
+          imageUrls.push(group.storyboardImageUrl);
+        }
+      });
     });
 
     // 收集视频结果中的图片
@@ -6761,8 +6794,7 @@ export default function StoryboardGenerator() {
         toast.info('请选择分集生成分镜');
         break;
       case 'storyboard': {
-        // 分镜确认后进入素材确认步骤
-        // 为所有成功生成分镜的章节设置 storyboardConfirmed = true
+        // 兼容旧入口：所有成功生成的分镜统一补齐自动确认状态
         const confirmedStoryboardChapterKeys = Object.fromEntries(
           Object.values(chapterStoryboards)
             .filter(chapter => chapter.status === 'success' && chapter.storyboard?.shots && chapter.storyboard.shots.length > 0)
@@ -7093,11 +7125,11 @@ export default function StoryboardGenerator() {
         if (data.tokenUsage) {
           setTokenUsage(prev => ({ ...prev, generateStoryboard: data.tokenUsage }));
         }
-        toast.success('分镜脚本生成成功，请确认后继续');
+        toast.success('分镜脚本生成成功，已自动确认');
         setProgress(45);
         setCurrentStep(2);
 
-        // 分镜生成完成，等待用户确认后再生成图片
+        // 旧的单章生成入口保留结果兼容，主流程会自动确认章节分镜。
       } else {
         throw new Error(data.error);
       }
@@ -7355,6 +7387,7 @@ export default function StoryboardGenerator() {
           [chapter.chapterNumber]: {
             ...prev[chapter.chapterNumber],
             status: 'success',
+            storyboardConfirmed: true,
             storyboard: {
               chapterTitle: chapterTitleResult,
               shots: shots,
@@ -7362,6 +7395,13 @@ export default function StoryboardGenerator() {
             }
           }
         }));
+        setCollapsedStoryboardChapters(prev => ({
+          ...prev,
+          [String(chapter.chapterNumber)]: true,
+        }));
+        setStepConfirmed(prev => ({ ...prev, storyboard: true }));
+        setCurrentStep(current => Math.max(current, 3));
+        setProgress(current => Math.max(current, 50));
 
         return { chapter, storyboard: { chapterTitle: chapterTitleResult, shots, totalShots: shots.length } };
       } else {
@@ -13989,7 +14029,7 @@ export default function StoryboardGenerator() {
                               <div className="flex flex-col gap-3 rounded-lg border border-dashed border-gray-300 p-4 text-sm text-gray-600 dark:border-gray-700 dark:text-gray-400 sm:flex-row sm:items-center sm:justify-between">
                                 <div>
                                   <div className="font-medium text-gray-900 dark:text-gray-100">
-                                    第 {cs.chapterNumber} 集文字分镜已收起
+                                    第 {cs.chapterNumber} 集文字分镜已自动确认并收起
                                   </div>
                                   <div className="text-xs">
                                     共 {cs.storyboard?.shots.length || 0} 个镜头，可随时展开查看或继续修改。
@@ -14205,47 +14245,16 @@ export default function StoryboardGenerator() {
                               ))}
                             </div>
 
-                            {/* 分步确认流程 */}
+                            {/* 文字分镜生成成功后默认确认，无需额外操作 */}
                             {cs.status === 'success' && (
-                              <div className="border-t pt-4 space-y-4">
-                                {/* 步骤1: 确认文字分镜 */}
-                                <div className="p-3 bg-blue-50 dark:bg-blue-900/20 rounded-lg">
-                                  <div className="flex items-center justify-between">
-                                    <div className="flex items-center gap-2">
-                                      <div className={`w-6 h-6 rounded-full flex items-center justify-center text-xs ${cs.storyboardConfirmed ? 'bg-green-500' : 'bg-blue-500'} text-white`}>
-                                        {cs.storyboardConfirmed ? <CheckCircle2 className="w-3 h-3" /> : '1'}
-                                      </div>
-                                      <span className="text-sm font-medium">文字分镜</span>
-                                    </div>
-                                    {!cs.storyboardConfirmed ? (
-                                      <Button
-                                        size="sm"
-                                        onClick={() => confirmChapterStoryboard(cs.chapterNumber)}
-                                      >
-                                        <CheckCircle2 className="w-4 h-4 mr-1" />
-                                        确认文字分镜
-                                      </Button>
-                                    ) : (
-                                      <div className="flex items-center gap-2 text-green-600 dark:text-green-400">
-                                        <CheckCircle2 className="w-4 h-4" />
-                                        <span className="text-sm">文字分镜已确认</span>
-                                      </div>
-                                    )}
+                              <div className="border-t pt-4">
+                                <div className="flex flex-col gap-2 rounded-lg bg-green-50 p-3 text-green-700 dark:bg-green-900/20 dark:text-green-400 sm:flex-row sm:items-center sm:justify-between">
+                                  <div className="flex items-center gap-2">
+                                    <CheckCircle2 className="w-4 h-4" />
+                                    <span className="text-sm font-medium">文字分镜已自动确认</span>
                                   </div>
+                                  <span className="text-xs text-gray-500">可继续确认本集素材</span>
                                 </div>
-
-                                {/* 提示：确认后前往素材确认Tab */}
-                                {cs.storyboardConfirmed && (
-                                  <div className="p-3 bg-green-50 dark:bg-green-900/20 rounded-lg">
-                                    <div className="flex items-center justify-between">
-                                      <div className="flex items-center gap-2 text-green-600 dark:text-green-400">
-                                        <CheckCircle2 className="w-4 h-4" />
-                                        <span className="text-sm">文字分镜已确认</span>
-                                      </div>
-                                      <span className="text-xs text-gray-500">请前往"素材确认"标签页继续下一步</span>
-                                    </div>
-                                  </div>
-                                )}
                               </div>
                             )}
                               </>
@@ -14256,7 +14265,6 @@ export default function StoryboardGenerator() {
                         );
                       })}
 
-                    {/* 移除全局确认按钮 - 每个章节单独确认 */}
                   </div>
                 ) : (
                   <Card>
@@ -14655,7 +14663,7 @@ export default function StoryboardGenerator() {
                     <CardContent className="flex items-center justify-center h-64">
                       <div className="text-center text-gray-500">
                         <Package className="w-16 h-16 mx-auto mb-4 opacity-50" />
-                        <p>请先在"文字分镜"标签页确认文字分镜</p>
+                        <p>请先在"文字分镜"标签页生成文字分镜</p>
                       </div>
                     </CardContent>
                   </Card>
@@ -14763,16 +14771,16 @@ export default function StoryboardGenerator() {
                   </CardContent>
                 </Card>
 
-                {/* 故事版面板描述确认模块 */}
+                {/* 故事版面板描述模块 */}
                 {Object.values(chapterStoryboards).some(cs => cs.assetsConfirmed) ? (
                   <Card className="mb-4">
                     <CardHeader className="pb-2">
                       <CardTitle className="text-base flex items-center gap-2">
                         <Video className="w-4 h-4" />
-                        故事版面板描述确认
+                        故事版面板描述
                       </CardTitle>
                       <CardDescription>
-                        基于分镜数据和素材生成故事版面板描述，确认后可生成视频
+                        基于分镜数据和素材生成，生成成功后自动确认
                       </CardDescription>
                     </CardHeader>
                     <CardContent>
@@ -14823,13 +14831,18 @@ export default function StoryboardGenerator() {
                                       导出本集提示词
                                     </Button>
                                   )}
-                                  {cs.promptsConfirmed ? (
+                                  {generatingPromptsChapters.includes(cs.chapterNumber) ? (
+                                    <Badge variant="outline" className="text-blue-500">
+                                      <Loader2 className="w-3 h-3 mr-1 animate-spin" />
+                                      生成中
+                                    </Badge>
+                                  ) : cs.promptsConfirmed ? (
                                     <Badge className="bg-green-500">
                                       <CheckCircle2 className="w-3 h-3 mr-1" />
-                                      已确认
+                                      已自动确认
                                     </Badge>
                                   ) : (
-                                    <Badge variant="outline">待确认</Badge>
+                                    <Badge variant="outline">待生成</Badge>
                                   )}
                                 </div>
                               </div>
@@ -15039,7 +15052,14 @@ export default function StoryboardGenerator() {
                                                         [cs.chapterNumber]: {
                                                           ...prev[cs.chapterNumber],
                                                           promptGroups: prev[cs.chapterNumber].promptGroups?.map((g, idx) =>
-                                                            idx === gi ? { ...g, storyboardImageUrl: data.imageUrl, storyboardImageKey: data.imageKey, isGeneratingStoryboard: false, storyboardStatus: '' } : g
+                                                            idx === gi ? {
+                                                              ...g,
+                                                              storyboardImageUrl: data.imageUrl,
+                                                              storyboardImageKey: data.imageKey,
+                                                              storyboardRemoteImageKey: data.remoteImageKey,
+                                                              isGeneratingStoryboard: false,
+                                                              storyboardStatus: '',
+                                                            } : g
                                                           ),
                                                         }
                                                       }));
@@ -15176,7 +15196,14 @@ export default function StoryboardGenerator() {
                                                           [cs.chapterNumber]: {
                                                             ...prev[cs.chapterNumber],
                                                             promptGroups: prev[cs.chapterNumber].promptGroups?.map((g, idx) =>
-                                                              idx === gi ? { ...g, storyboardImageUrl: data.imageUrl, storyboardImageKey: data.imageKey, isGeneratingStoryboard: false, storyboardStatus: '' } : g
+                                                              idx === gi ? {
+                                                                ...g,
+                                                                storyboardImageUrl: data.imageUrl,
+                                                                storyboardImageKey: data.imageKey,
+                                                                storyboardRemoteImageKey: data.remoteImageKey,
+                                                                isGeneratingStoryboard: false,
+                                                                storyboardStatus: '',
+                                                              } : g
                                                             ),
                                                           }
                                                         }));
@@ -15361,48 +15388,6 @@ export default function StoryboardGenerator() {
                                   ))}
                                 </div>
                               )}
-
-
-
-                              {/* 确认按钮 */}
-                              {!cs.promptsConfirmed && (
-                                <Button
-                                  size="sm"
-                                  className="w-full"
-                                  onClick={() => {
-                                    setChapterStoryboards(prev => {
-                                      const updated = {
-                                        ...prev,
-                                        [cs.chapterNumber]: {
-                                          ...prev[cs.chapterNumber],
-                                          promptsConfirmed: true,
-                                        }
-                                      };
-
-                                      // 检查是否所有已确认素材的章节都确认了提示词
-                                      const allAssetsConfirmed = Object.values(updated).filter(c => c.assetsConfirmed);
-                                      const allPromptsConfirmed = allAssetsConfirmed.every(c => c.promptsConfirmed);
-
-                                      // 只要确认了提示词就前进到生成视频步骤
-                                      setCurrentStep(5);
-                                      setProgress(80);
-
-                                      // 如果所有章节提示词都已确认，更新全局确认状态
-                                      if (allPromptsConfirmed && allAssetsConfirmed.length > 0) {
-                                        setStepConfirmed(prevState => ({ ...prevState, prompts: true }));
-                                        setProgress(90);
-                                      }
-
-                                      return updated;
-                                    });
-                                    toast.success(`第 ${cs.chapterNumber} 集故事版面板描述已确认`);
-                                  }}
-                                >
-                                  <CheckCircle2 className="w-4 h-4 mr-1" />
-                                  确认本章故事版面板描述
-                                </Button>
-                              )}
-
                               {/* 重新生成按钮 */}
                               <AlertDialog>
                                 <AlertDialogTrigger asChild>
@@ -15439,6 +15424,7 @@ export default function StoryboardGenerator() {
                                           [cs.chapterNumber]: {
                                             ...prev[cs.chapterNumber],
                                             videoPrompts: [],
+                                            promptGroups: [],
                                             promptsConfirmed: false,
                                           }
                                         }));
@@ -15500,12 +15486,14 @@ export default function StoryboardGenerator() {
                                                 ...prev[cs.chapterNumber],
                                                 videoPrompts: data.connectingPrompts.shotPrompts.map((sp: any) => ({ ...sp, videoPrompt: sp.panelDescription || sp.videoPrompt || '' })),
                                                 promptGroups: groupShotsIntoPromptGroups(data.connectingPrompts.shotPrompts.map((sp: any) => ({ ...sp, videoPrompt: sp.panelDescription || sp.videoPrompt || '' })), shots),
-                                                promptsConfirmed: false,
+                                                promptsConfirmed: true,
                                                 // 分组边界已变化，旧负数索引的视频不能继续挂到同序号的新分组。
                                                 shotVideos: (prev[cs.chapterNumber].shotVideos || []).filter(shotVideo => shotVideo.shotNumber >= 0),
                                               }
                                             }));
-                                            toast.success(`第 ${cs.chapterNumber} 集故事版面板描述重新生成成功`);
+                                            setCurrentStep(current => Math.max(current, 5));
+                                            setProgress(current => Math.max(current, 80));
+                                            toast.success(`第 ${cs.chapterNumber} 集故事版面板描述重新生成成功，已自动确认`);
                                           } else {
                                             toast.error(data.error || '生成失败');
                                           }
@@ -15595,11 +15583,13 @@ export default function StoryboardGenerator() {
                                         ...prev[cs.chapterNumber],
                                         videoPrompts: data.connectingPrompts.shotPrompts.map((sp: any) => ({ ...sp, videoPrompt: sp.panelDescription || sp.videoPrompt || '' })),
                                         promptGroups: groupShotsIntoPromptGroups(data.connectingPrompts.shotPrompts.map((sp: any) => ({ ...sp, videoPrompt: sp.panelDescription || sp.videoPrompt || '' })), shots),
-                                        promptsConfirmed: false,
+                                        promptsConfirmed: true,
                                         shotVideos: (prev[cs.chapterNumber].shotVideos || []).filter(shotVideo => shotVideo.shotNumber >= 0),
                                       }
                                     }));
-                                    toast.success(`第 ${cs.chapterNumber} 集故事版面板描述生成成功`);
+                                    setCurrentStep(current => Math.max(current, 5));
+                                    setProgress(current => Math.max(current, 80));
+                                    toast.success(`第 ${cs.chapterNumber} 集故事版面板描述生成成功，已自动确认`);
                                   } else {
                                     toast.error(data.error || '生成失败');
                                   }
@@ -15855,7 +15845,14 @@ export default function StoryboardGenerator() {
                                                   [cs.chapterNumber]: {
                                                     ...prev[cs.chapterNumber],
                                                     promptGroups: prev[cs.chapterNumber].promptGroups?.map((g, idx) =>
-                                                      idx === gi ? { ...g, storyboardImageUrl: data.imageUrl, storyboardImageKey: data.imageKey, isGeneratingStoryboard: false, storyboardStatus: '' } : g
+                                                      idx === gi ? {
+                                                        ...g,
+                                                        storyboardImageUrl: data.imageUrl,
+                                                        storyboardImageKey: data.imageKey,
+                                                        storyboardRemoteImageKey: data.remoteImageKey,
+                                                        isGeneratingStoryboard: false,
+                                                        storyboardStatus: '',
+                                                      } : g
                                                     ),
                                                   }
                                                 }));
@@ -16013,7 +16010,14 @@ export default function StoryboardGenerator() {
                                                         [cs.chapterNumber]: {
                                                           ...prev[cs.chapterNumber],
                                                           promptGroups: prev[cs.chapterNumber].promptGroups?.map((g, idx) =>
-                                                            idx === gi ? { ...g, storyboardImageUrl: data.imageUrl, storyboardImageKey: data.imageKey, isGeneratingStoryboard: false, storyboardStatus: '' } : g
+                                                            idx === gi ? {
+                                                              ...g,
+                                                              storyboardImageUrl: data.imageUrl,
+                                                              storyboardImageKey: data.imageKey,
+                                                              storyboardRemoteImageKey: data.remoteImageKey,
+                                                              isGeneratingStoryboard: false,
+                                                              storyboardStatus: '',
+                                                            } : g
                                                           ),
                                                         }
                                                       }));

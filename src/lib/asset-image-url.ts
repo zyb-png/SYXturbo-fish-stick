@@ -1,4 +1,5 @@
 const LOCAL_ASSET_VIEW_PATH = '/api/assets-view';
+const REMOTE_IMAGE_CACHE_PATH = '/api/image-cache';
 const ASSET_PREVIEW_WIDTH = 1600;
 const ASSET_PREVIEW_QUALITY = 82;
 
@@ -13,15 +14,28 @@ export function getAssetThumbnailUrl(
   try {
     const isRelative = value.startsWith('/') && !value.startsWith('//');
     const parsed = new URL(value, 'http://local.asset');
-    if (parsed.pathname !== LOCAL_ASSET_VIEW_PATH) return value;
+    if (parsed.pathname === LOCAL_ASSET_VIEW_PATH) {
+      parsed.searchParams.set('thumbnail', '1');
+      parsed.searchParams.set('width', String(Math.round(width)));
+      parsed.searchParams.set('quality', String(Math.round(quality)));
 
-    parsed.searchParams.set('thumbnail', '1');
-    parsed.searchParams.set('width', String(Math.round(width)));
-    parsed.searchParams.set('quality', String(Math.round(quality)));
+      return isRelative
+        ? `${parsed.pathname}${parsed.search}`
+        : parsed.toString();
+    }
 
-    return isRelative
-      ? `${parsed.pathname}${parsed.search}`
-      : parsed.toString();
+    if (isRelative) return value;
+
+    if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+      const search = new URLSearchParams({
+        src: value,
+        width: String(Math.round(width)),
+        quality: String(Math.round(quality)),
+      });
+      return `${REMOTE_IMAGE_CACHE_PATH}?${search.toString()}`;
+    }
+
+    return value;
   } catch {
     return value;
   }
