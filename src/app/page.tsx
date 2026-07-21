@@ -12146,6 +12146,7 @@ export default function StoryboardGenerator() {
                             collapsedClassName="max-h-[520px] overflow-y-hidden"
                             expandedClassName="max-h-none overflow-y-visible"
                             itemClassName="grid grid-cols-1 gap-3 [content-visibility:auto] [contain-intrinsic-size:760px]"
+                            estimatedItemHeight={760}
                             getKey={item => `scene-${item.scene.id}-${item.scene.name}-${item.sourceIndex}`}
                             renderItem={(renderItem) => {
                             const {
@@ -12551,6 +12552,7 @@ export default function StoryboardGenerator() {
                             collapsedClassName="max-h-[400px] overflow-y-hidden"
                             expandedClassName="max-h-none overflow-y-visible"
                             itemClassName="[content-visibility:auto] [contain-intrinsic-size:900px]"
+                            estimatedItemHeight={900}
                             getKey={(char, index) => `char-${char.id}-${char.name}-${index}`}
                             renderItem={(char: Character, index: number) => {
                             const assetData = getAssetImages('character', char.id, char.name);
@@ -13545,6 +13547,7 @@ export default function StoryboardGenerator() {
                             collapsedClassName="max-h-[520px] overflow-y-hidden"
                             expandedClassName="max-h-none overflow-y-visible"
                             itemClassName="grid grid-cols-1 gap-3 [content-visibility:auto] [contain-intrinsic-size:760px]"
+                            estimatedItemHeight={760}
                             getKey={item => `prop-${item.prop.id}-${item.prop.name}-${item.sourceIndex}`}
                             renderItem={(renderItem) => {
                             const {

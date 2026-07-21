@@ -7,8 +7,8 @@ const MAX_LOCAL_STORAGE_VALUE_SIZE = 200 * 1024;
 const LOCAL_STORAGE_SAFETY_BUFFER = 256 * 1024;
 const STORAGE_USAGE_CACHE_MS = 2000;
 const SAVE_DEBOUNCE_MS = 900;
-const PROJECT_SYNC_POLL_MS = 1500;
-const PROJECT_SYNC_BACKGROUND_POLL_MS = 10_000;
+const PROJECT_SYNC_POLL_MS = 4000;
+const PROJECT_SYNC_BACKGROUND_POLL_MS = 20_000;
 const PROJECT_SYNC_RETRY_MS = 5000;
 const PROJECT_SYNC_CHANNEL_NAME = 'manfei:project-state-sync';
 const PERSISTENCE_DEBUG = false;
@@ -411,13 +411,16 @@ function ensureProjectStateSyncChannel(): void {
 function subscribeProjectStateSync(
   accountId: string,
   key: string,
-  listener: ProjectStateSyncListener
+  listener: ProjectStateSyncListener,
+  initialRevision = 0
 ): () => void {
   if (projectStateSyncAccountId !== accountId) {
     projectStateSyncAccountId = accountId;
-    projectStateSyncRevision = 0;
+    projectStateSyncRevision = initialRevision;
     projectStateSyncGeneration += 1;
     projectStateSyncInFlight = false;
+  } else if (initialRevision > projectStateSyncRevision) {
+    projectStateSyncRevision = initialRevision;
   }
 
   const listeners = projectStateSyncListeners.get(key) || new Set<ProjectStateSyncListener>();
@@ -464,8 +467,62 @@ function publishProjectStateSyncUpdate(
 
 let accountIdPromise: Promise<string | null> | null = null;
 
+interface ProjectStateBootstrapResult {
+  state: Record<string, string>;
+  blockedByLogin: boolean;
+  revision: number;
+  keyRevisions: Record<string, number>;
+}
+
+let projectStateBootstrapAccountId: string | null = null;
+let projectStateBootstrapPromise: Promise<ProjectStateBootstrapResult> | null = null;
+
+function resetProjectStateBootstrap(): void {
+  projectStateBootstrapAccountId = null;
+  projectStateBootstrapPromise = null;
+}
+
+function loadProjectStateBootstrap(accountId: string): Promise<ProjectStateBootstrapResult> {
+  if (projectStateBootstrapAccountId !== accountId) {
+    projectStateBootstrapAccountId = accountId;
+    projectStateBootstrapPromise = null;
+  }
+
+  if (!projectStateBootstrapPromise) {
+    projectStateBootstrapPromise = fetch(PROJECT_STATE_API, {
+      cache: 'no-store',
+      headers: { 'X-Skip-Login-Prompt': '1' },
+    }).then(async (response) => {
+      if (response.status === 401) {
+        return { state: {}, blockedByLogin: true, revision: 0, keyRevisions: {} };
+      }
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+
+      const result = await response.json();
+      return {
+        state: result?.success && result.state && typeof result.state === 'object'
+          ? result.state as Record<string, string>
+          : {},
+        blockedByLogin: false,
+        revision: Number(result?.revision) || 0,
+        keyRevisions: result?.keyRevisions && typeof result.keyRevisions === 'object'
+          ? result.keyRevisions as Record<string, number>
+          : {},
+      };
+    }).catch((error) => {
+      console.warn('[持久化] 批量读取项目状态失败，将使用浏览器缓存:', error);
+      return { state: {}, blockedByLogin: false, revision: 0, keyRevisions: {} };
+    });
+  }
+
+  return projectStateBootstrapPromise;
+}
+
 export function notifyPersistenceAccountChanged(): void {
   accountIdPromise = null;
+  resetProjectStateBootstrap();
   if (typeof window !== 'undefined') {
     window.dispatchEvent(new CustomEvent(ACCOUNT_SCOPE_CHANGED_EVENT));
   }
@@ -474,7 +531,7 @@ export function notifyPersistenceAccountChanged(): void {
 async function resolvePersistenceAccountId(): Promise<string | null> {
   if (typeof window === 'undefined') return null;
   if (!accountIdPromise) {
-    accountIdPromise = fetch('/api/creation-points', {
+    accountIdPromise = fetch('/api/creation-points?view=summary', {
       cache: 'no-store',
       headers: { 'X-Skip-Login-Prompt': '1' },
     })
@@ -563,7 +620,7 @@ async function backupStateToServer(
   return false;
 }
 
-async function restoreStateFromServer(key: string): Promise<{
+async function restoreStateFromServer(key: string, accountId: string): Promise<{
   value: string | null;
   blockedByLogin: boolean;
   revision: number;
@@ -574,25 +631,12 @@ async function restoreStateFromServer(key: string): Promise<{
   }
 
   try {
-    const response = await fetch(`${PROJECT_STATE_API}?key=${encodeURIComponent(key)}`, {
-      cache: 'no-store',
-      headers: { 'X-Skip-Login-Prompt': '1' },
-    });
-
-    if (response.status === 401) {
-      return { value: null, blockedByLogin: true, revision: 0, keyRevision: 0 };
-    }
-
-    if (!response.ok) {
-      return { value: null, blockedByLogin: false, revision: 0, keyRevision: 0 };
-    }
-
-    const data = await response.json();
+    const data = await loadProjectStateBootstrap(accountId);
     return {
-      value: data?.success && typeof data.value === 'string' ? data.value : null,
-      blockedByLogin: false,
-      revision: Number(data?.revision) || 0,
-      keyRevision: Number(data?.keyRevision) || 0,
+      value: typeof data.state[key] === 'string' ? data.state[key] : null,
+      blockedByLogin: data.blockedByLogin,
+      revision: data.revision,
+      keyRevision: Number(data.keyRevisions[key]) || 0,
     };
   } catch (error) {
     console.warn(`[持久化] 读取本地文件备份失败: ${key}`, error);
@@ -737,7 +781,7 @@ export function usePersistentState<T>(
           return;
         }
 
-        const backupResult = await restoreStateFromServer(key);
+        const backupResult = await restoreStateFromServer(key, accountId);
         if (backupResult.blockedByLogin) {
           persistenceDebugLog(`[持久化] 未登录，跳过状态恢复: ${key}`);
           return;
@@ -805,7 +849,10 @@ export function usePersistentState<T>(
       } catch (error) {
         console.error(`[持久化] 读取失败: ${key}`, error);
 
-        const backupResult = await restoreStateFromServer(key);
+        const accountId = accountIdRef.current || await resolvePersistenceAccountId();
+        const backupResult = accountId
+          ? await restoreStateFromServer(key, accountId)
+          : { value: null, blockedByLogin: true, revision: 0, keyRevision: 0 };
         const backup = backupResult.blockedByLogin ? null : backupResult.value;
         if (backup) {
           try {
@@ -844,6 +891,9 @@ export function usePersistentState<T>(
     const subscribe = async () => {
       const accountId = await resolvePersistenceAccountId();
       if (!accountId || cancelled) return;
+
+      const bootstrap = await loadProjectStateBootstrap(accountId);
+      if (bootstrap.blockedByLogin || cancelled) return;
 
       unsubscribe = subscribeProjectStateSync(accountId, key, (update) => {
         if (
@@ -914,7 +964,7 @@ export function usePersistentState<T>(
         } catch (error) {
           console.warn(`[多端同步] 无法解析远端状态: ${key}`, error);
         }
-      });
+      }, bootstrap.revision);
     };
 
     void subscribe();

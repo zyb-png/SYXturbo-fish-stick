@@ -1,4 +1,4 @@
-import { NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 import {
   getCreationPointSnapshot,
   getPendingExternalCreationPointTasks,
@@ -48,13 +48,28 @@ function schedulePendingVideoReconciliation() {
     });
 }
 
-export async function GET() {
+export async function GET(request: NextRequest) {
   try {
     const snapshot = await getCreationPointSnapshot();
     schedulePendingVideoReconciliation();
+
+    if (request.nextUrl.searchParams.get('view') === 'summary') {
+      return NextResponse.json({
+        success: true,
+        account: snapshot.account,
+        summary: snapshot.summary,
+        updatedAt: snapshot.updatedAt,
+      });
+    }
+
     return NextResponse.json({
       success: true,
-      ...snapshot,
+      account: snapshot.account,
+      summary: snapshot.summary,
+      batches: snapshot.batches,
+      pricing: snapshot.pricing,
+      transactions: snapshot.transactions.slice(0, 24),
+      updatedAt: snapshot.updatedAt,
     });
   } catch (error) {
     console.error('[创作点] 读取钱包失败:', error);

@@ -4,6 +4,7 @@ import {
   startTransition,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -22,6 +23,7 @@ interface OnDemandCollectionProps<T> {
   collapsedClassName?: string;
   expandedClassName?: string;
   itemClassName?: string;
+  estimatedItemHeight?: number;
 }
 
 export function OnDemandCollection<T>({
@@ -48,6 +50,7 @@ function OnDemandCollectionSession<T>({
   collapsedClassName = '',
   expandedClassName = '',
   itemClassName = '',
+  estimatedItemHeight = 720,
 }: OnDemandCollectionProps<T>) {
   const collapsedLimit = Math.min(items.length, Math.max(0, collapsedCount));
   const expandedLimit = Math.min(items.length, Math.max(collapsedLimit, batchSize));
@@ -103,9 +106,13 @@ function OnDemandCollectionSession<T>({
       data-total-count={items.length}
     >
       {visibleItems.map((item, index) => (
-        <div key={getKey(item, index)} className={itemClassName}>
-          {renderItem(item, index)}
-        </div>
+        <VirtualizedCollectionItem
+          key={getKey(item, index)}
+          className={itemClassName}
+          enabled={expanded}
+          estimatedHeight={estimatedItemHeight}
+          render={() => renderItem(item, index)}
+        />
       ))}
       {expanded && visibleCount < items.length && (
         <div
@@ -114,6 +121,76 @@ function OnDemandCollectionSession<T>({
           aria-hidden="true"
         />
       )}
+    </div>
+  );
+}
+
+function VirtualizedCollectionItem({
+  className,
+  enabled,
+  estimatedHeight,
+  render,
+}: {
+  className: string;
+  enabled: boolean;
+  estimatedHeight: number;
+  render: () => ReactNode;
+}) {
+  const hostRef = useRef<HTMLDivElement>(null);
+  const [shouldRender, setShouldRender] = useState(!enabled);
+  const [measuredHeight, setMeasuredHeight] = useState(estimatedHeight);
+
+  useEffect(() => {
+    if (!enabled) return;
+
+    const target = hostRef.current;
+    if (!target || typeof IntersectionObserver === 'undefined') {
+      const fallbackTimer = window.setTimeout(() => setShouldRender(true), 0);
+      return () => window.clearTimeout(fallbackTimer);
+    }
+
+    const observer = new IntersectionObserver(
+      entries => {
+        setShouldRender(entries.some(entry => entry.isIntersecting));
+      },
+      {
+        root: null,
+        rootMargin: '1400px 0px',
+      },
+    );
+
+    observer.observe(target);
+    return () => observer.disconnect();
+  }, [enabled]);
+
+  useLayoutEffect(() => {
+    if (!shouldRender) return;
+    const target = hostRef.current;
+    if (!target) return;
+
+    const updateHeight = () => {
+      const nextHeight = Math.ceil(target.getBoundingClientRect().height);
+      if (nextHeight > 0) {
+        setMeasuredHeight(current => current === nextHeight ? current : nextHeight);
+      }
+    };
+
+    updateHeight();
+    if (typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(updateHeight);
+    observer.observe(target);
+    return () => observer.disconnect();
+  }, [shouldRender]);
+
+  return (
+    <div
+      ref={hostRef}
+      className={className}
+      style={shouldRender ? undefined : { height: `${measuredHeight}px` }}
+      data-virtualized-item={enabled ? 'true' : 'false'}
+      data-virtualized-rendered={shouldRender ? 'true' : 'false'}
+    >
+      {shouldRender ? render() : null}
     </div>
   );
 }

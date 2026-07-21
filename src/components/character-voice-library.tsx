@@ -662,6 +662,7 @@ export function CharacterVoiceLibrary({
               collapsedClassName="max-h-[460px]"
               expandedClassName="max-h-[76vh]"
               itemClassName="[content-visibility:auto] [contain-intrinsic-size:280px]"
+              estimatedItemHeight={280}
               getKey={profile => profile.id}
               renderItem={profile => (
                 <section className="border-t border-amber-400/15 pt-3 first:border-t-0 first:pt-0">

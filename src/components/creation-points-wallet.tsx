@@ -64,6 +64,26 @@ interface WalletSnapshot {
   }>;
 }
 
+type WalletLoadMode = 'summary' | 'full';
+
+function hasSameWalletSummary(
+  current: WalletSnapshot | null,
+  next: Partial<Pick<WalletSnapshot, 'account' | 'summary'>> | null
+): boolean {
+  if (!current || !next) return false;
+  const currentAccount = current.account;
+  const nextAccount = next.account || null;
+  return (
+    (currentAccount?.id || '') === (nextAccount?.id || '') &&
+    (currentAccount?.name || '') === (nextAccount?.name || '') &&
+    (currentAccount?.status || '') === (nextAccount?.status || '') &&
+    current.summary.availablePoints === Number(next.summary?.availablePoints || 0) &&
+    current.summary.frozenPoints === Number(next.summary?.frozenPoints || 0) &&
+    current.summary.consumedPoints === Number(next.summary?.consumedPoints || 0) &&
+    current.summary.totalGrantedPoints === Number(next.summary?.totalGrantedPoints || 0)
+  );
+}
+
 const TRANSACTION_LABELS = {
   grant: '发放',
   freeze: '冻结',
@@ -124,18 +144,42 @@ export function CreationPointsWallet() {
   const [snapshot, setSnapshot] = useState<WalletSnapshot | null>(null);
   const [loginForm, setLoginForm] = useState({ username: '', password: '' });
 
-  const loadWallet = useCallback(async (quiet = false) => {
+  const loadWallet = useCallback(async (quiet = false, mode: WalletLoadMode = 'full') => {
     if (!quiet) setLoading(true);
     try {
-      const response = await fetch('/api/creation-points', {
+      const response = await fetch(
+        mode === 'summary' ? '/api/creation-points?view=summary' : '/api/creation-points',
+        {
         cache: 'no-store',
         headers: { 'X-Skip-Login-Prompt': '1' },
-      });
+        }
+      );
       const result = await response.json();
       if (!response.ok || !result.success) {
         throw new Error(result.error || '读取创作点失败');
       }
-      setSnapshot(result);
+      setSnapshot(current => {
+        if (mode === 'summary' && hasSameWalletSummary(current, result)) return current;
+
+        const accountChanged = (current?.account?.id || '') !== (result.account?.id || '');
+        if (mode === 'summary') {
+          return {
+            account: result.account || null,
+            summary: result.summary,
+            batches: accountChanged ? [] : (current?.batches || []),
+            pricing: accountChanged ? [] : (current?.pricing || []),
+            transactions: accountChanged ? [] : (current?.transactions || []),
+          };
+        }
+
+        return {
+          account: result.account || null,
+          summary: result.summary,
+          batches: Array.isArray(result.batches) ? result.batches : [],
+          pricing: Array.isArray(result.pricing) ? result.pricing : [],
+          transactions: Array.isArray(result.transactions) ? result.transactions : [],
+        };
+      });
       setError('');
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : '读取创作点失败');
@@ -145,21 +189,23 @@ export function CreationPointsWallet() {
   }, []);
 
   useEffect(() => {
-    void loadWallet();
+    void loadWallet(false, 'summary');
     const refreshWallet = () => {
-      if (!document.hidden) void loadWallet(true);
+      if (!document.hidden) void loadWallet(true, 'summary');
     };
     const timer = window.setInterval(() => {
       refreshWallet();
-    }, 3000);
+    }, 10_000);
     window.addEventListener('focus', refreshWallet);
     window.addEventListener('online', refreshWallet);
     document.addEventListener('visibilitychange', refreshWallet);
+    window.addEventListener('manfei:wallet-updated', refreshWallet);
     return () => {
       window.clearInterval(timer);
       window.removeEventListener('focus', refreshWallet);
       window.removeEventListener('online', refreshWallet);
       document.removeEventListener('visibilitychange', refreshWallet);
+      window.removeEventListener('manfei:wallet-updated', refreshWallet);
     };
   }, [loadWallet]);
 
