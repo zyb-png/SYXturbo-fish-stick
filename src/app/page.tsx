@@ -520,7 +520,7 @@ function AssetImageStack({
           aria-label={completedImages.length > 1 ? `选择${name}主图` : `预览${name}图片`}
         >
           <img
-            src={getAssetThumbnailUrl(primaryImage.imageUrl, isPortrait ? 640 : 960)}
+            src={getAssetThumbnailUrl(primaryImage.imageUrl, isPortrait ? 520 : 720, 68)}
             alt={name}
             loading="lazy"
             decoding="async"
@@ -10653,7 +10653,7 @@ export default function StoryboardGenerator() {
                 >
                   <div className={`relative w-full bg-black ${isPortrait ? 'aspect-[4/5]' : 'aspect-video'}`}>
                     <img
-                      src={getAssetThumbnailUrl(image.imageUrl, isPortrait ? 640 : 900)}
+                      src={getAssetThumbnailUrl(image.imageUrl, isPortrait ? 520 : 720, 68)}
                       alt={`${assetImageChooserTarget?.name || '素材'}第 ${index + 1} 张`}
                       loading="lazy"
                       decoding="async"
@@ -13126,7 +13126,7 @@ export default function StoryboardGenerator() {
                                               ) : look.imageUrl ? (
                                                 <div className="group/look-image relative flex min-h-[340px] items-center justify-center overflow-hidden rounded-md border border-amber-400/20 bg-black/25">
                                                   <img
-                                                    src={getAssetThumbnailUrl(look.imageUrl, 720)}
+                                                    src={getAssetThumbnailUrl(look.imageUrl, 640, 68)}
                                                     alt={`${char.name} - ${look.scene || look.id}`}
                                                     loading="lazy"
                                                     decoding="async"
@@ -13214,7 +13214,7 @@ export default function StoryboardGenerator() {
                                                     )}
                                                   </div>
                                                   <img
-                                                    src={getAssetThumbnailUrl(look.fourViewImageUrl, 960)}
+                                                    src={getAssetThumbnailUrl(look.fourViewImageUrl, 820, 68)}
                                                     alt={`${char.name}的四视图`}
                                                     loading="lazy"
                                                     decoding="async"
@@ -15779,7 +15779,7 @@ export default function StoryboardGenerator() {
                                       <>
                                       <div className="relative group">
                                         <img
-                                          src={getAssetThumbnailUrl(pg.storyboardImageUrl, 1100, 74)}
+                                          src={getAssetThumbnailUrl(pg.storyboardImageUrl, 900, 70)}
                                           alt={`故事板第${pg.groupIndex}组`}
                                           loading="lazy"
                                           decoding="async"

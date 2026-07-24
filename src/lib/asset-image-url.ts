@@ -1,7 +1,7 @@
 const LOCAL_ASSET_VIEW_PATH = '/api/assets-view';
 const REMOTE_IMAGE_CACHE_PATH = '/api/image-cache';
-const ASSET_PREVIEW_WIDTH = 1600;
-const ASSET_PREVIEW_QUALITY = 82;
+const ASSET_PREVIEW_WIDTH = 1080;
+const ASSET_PREVIEW_QUALITY = 74;
 
 export function getAssetThumbnailUrl(
   imageUrl: string | undefined,

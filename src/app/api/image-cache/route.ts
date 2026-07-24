@@ -155,7 +155,7 @@ async function getCachedThumbnail(sourcePath: string, thumbnailPath: string, wid
       fit: 'inside',
       withoutEnlargement: true,
     })
-    .webp({ quality, effort: 4 })
+    .webp({ quality, effort: 1 })
     .toBuffer();
 
   const temporaryPath = `${thumbnailPath}.${process.pid}.${Date.now()}.tmp`;

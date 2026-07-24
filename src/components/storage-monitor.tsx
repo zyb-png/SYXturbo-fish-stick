@@ -38,7 +38,7 @@ export function StorageMonitor() {
   } | null>(null);
 
   useEffect(() => {
-    // 每30秒检查一次存储空间
+    // 低频、空闲时检查，避免大项目滚动和生成图片时被 localStorage 扫描打断。
     const checkStorage = () => {
       if (typeof window === 'undefined') return;
 
@@ -68,8 +68,17 @@ export function StorageMonitor() {
       }
     };
 
-    checkStorage();
-    const interval = setInterval(checkStorage, 30000);
+    const runWhenIdle = () => {
+      if (typeof window === 'undefined') return;
+      if (typeof window.requestIdleCallback === 'function') {
+        window.requestIdleCallback(checkStorage, { timeout: 5000 });
+      } else {
+        window.setTimeout(checkStorage, 1000);
+      }
+    };
+
+    runWhenIdle();
+    const interval = setInterval(runWhenIdle, 5 * 60 * 1000);
 
     return () => clearInterval(interval);
   }, []);

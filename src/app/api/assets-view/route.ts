@@ -41,7 +41,7 @@ async function getThumbnailBuffer(filePath: string, width: number, quality: numb
       fit: 'inside',
       withoutEnlargement: true,
     })
-    .webp({ quality, effort: 4 })
+    .webp({ quality, effort: 1 })
     .toBuffer();
 
   const temporaryPath = `${cachePath}.${process.pid}.${Date.now()}.tmp`;
