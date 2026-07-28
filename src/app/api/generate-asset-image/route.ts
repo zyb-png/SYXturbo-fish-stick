@@ -27,6 +27,7 @@ import {
   inferCharacterEntityKind,
   resolveCharacterGenderByPolicy,
 } from '@/lib/character-semantic-rules';
+import { buildLeadCharacterGenerationDirectives } from '@/lib/lead-character-design';
 
 // 图片数量限制
 const MAX_IMAGES_PER_ASSET = 3;
@@ -1090,17 +1091,11 @@ function getLeadCastingDirectives(
 
   const gender = String(resolvedGender || '').trim();
   const creationType = normalizeCreationType(creationBible);
-  const subjectRegion = normalizeSubjectRegion(creationBible);
   const styleLabel = creationType === '3D'
     ? '院线级风格化3D动画主角'
     : creationType === '动漫'
       ? '高品质二维动画电影主角'
       : '电影或精品剧集主角';
-  const regionLock = subjectRegion === '国外'
-    ? '符合剧本指定的海外族裔；剧本未指定时使用非东亚的欧美/国际化面孔与骨相'
-    : subjectRegion === '国内'
-      ? '符合中国本土人物语境与自然东亚骨相'
-      : '严格符合剧本中的地域与族裔设定';
 
   if (preserveConfirmedIdentity) {
     return [
@@ -1109,21 +1104,10 @@ function getLeadCastingDirectives(
     ];
   }
 
-  const shared = [
-    `【主角选角标准】按${styleLabel}设计：外形出众但自然可信，骨相清晰，五官比例协调，正脸与镜头侧转时都具有高辨识度和稳定的主角存在感`,
-    `【地域与时代】${regionLock}；同时严格符合人物年龄、身份、性格、剧情年代和创作背景，不得为了变美而改变性别、年龄、族裔或人物设定`,
-    '【审美方向】高级、耐看、有故事感和情绪表现力，不使用千篇一律的网红模板脸；保留1至2个明确而美观的身份记忆点，使后续造型仍可稳定识别',
-  ];
-
-  if (gender === '女') {
-    shared.push('【女主审美】漂亮、精致而有生命力，脸部轮廓流畅，眉眼有神，鼻唇关系自然，气质与角色性格匹配；避免蛇精脸、过尖下巴、夸张大眼、过度幼态、浓重网红妆、医美感和塑料感');
-  } else if (gender === '男') {
-    shared.push('【男主审美】英俊、利落而有力量感，眉眼深邃有神，面部骨相和下颌线自然清晰，气质与角色身份匹配；避免油腻、僵硬、过度健美、夸张欧美硬汉模板、网红妆和千篇一律精修脸');
-  } else {
-    shared.push('【主角审美】在不擅自改变性别表达的前提下，强化协调自然的五官、清晰骨相、镜头表现力和高辨识度；拒绝模板化网红脸');
-  }
-
-  return shared;
+  return buildLeadCharacterGenerationDirectives({
+    gender,
+    creationBible,
+  });
 }
 
 function getLeadWardrobeDirectives(

@@ -21,6 +21,7 @@ import {
   inferExplicitGenderFromName,
   resolveCharacterGenderByPolicy,
 } from '@/lib/character-semantic-rules';
+import { buildLeadCharacterExtractionInstruction } from '@/lib/lead-character-design';
 
 export const maxDuration = 600;
 
@@ -500,6 +501,7 @@ async function extractBatchCharacters(
   const systemPrompt = `你是专业的影视角色分析师。为指定的人物生成详细信息。
 ${buildCreationBibleInstruction(creationBible)}
 ${buildLeadWardrobeInstruction(creationBible)}
+${buildLeadCharacterExtractionInstruction(creationBible)}
 
 **绝对重要规则**：
 1. **必须为输入列表中的每个人物都生成信息，不能遗漏任何人！**
@@ -527,7 +529,7 @@ ${buildLeadWardrobeInstruction(creationBible)}
 23. 必须先逐条审计“全剧本生命周期重点段落”。闪回中出现的小名、乳名、“小+姓名”、幼年称呼、女孩/男孩或亲属称呼，要结合闪回前后的转场、关系和事件判断对应人物；例如主线人物在闪回中以幼年身份出现，必须在同一人物的 looks 中新增“年龄时期”造型，不能因闪回段未重复写全名而漏掉
 24. 每个明确的童年/幼年/少年/青年/中年/老年或多年以前/以后状态，都必须在 sourceEvidence 与 episodeNumbers 中保留证据；只有确实属于同一时期且视觉没有变化的段落才能合并
 25. 必须区分人类与非人角色。地狱犬、狼人、兽人、魔兽等应保留动物/兽类物种特征；不能套用普通人类脸型、皮肤、妆容和人类发型模板。动物毛发必须顺应动物头骨与身体结构，禁止生成女性长发、披发、马尾或假发。
-26. 对 role=主角 的人类角色，appearance 与 faceFeatures 要按影视主角选角标准设计：外形出众、骨相清晰、五官协调、镜头表现力强，并保留1至2个稳定且美观的身份记忆点。女主应漂亮高级而自然，避免蛇精脸、夸张大眼、过度幼态和网红模板；男主应英俊利落、有力量感，避免油腻、僵硬和模板化硬汉脸。该规则不能覆盖剧本明确的年龄、性别、族裔、伤病和身份设定。
+26. 对 role=主角 的人类角色，必须严格执行上方“主角形象设计规则”，并在 appearance 与 faceFeatures 中落成可重复生成的具体结构；该规则不能覆盖剧本明确设定。
 
 每个人物包含：
 - id: 序号
@@ -1078,6 +1080,7 @@ async function extractCharactersTraditional(
   const systemPrompt = `你是一个专业的影视角色分析师。你的任务是：
 ${buildCreationBibleInstruction(creationBible)}
 ${buildLeadWardrobeInstruction(creationBible)}
+${buildLeadCharacterExtractionInstruction(creationBible)}
 
 1. 分析给定的文本内容，提取所有人物角色
 2. 每个人物必须生成 role、age、gender、personality、appearance、bodyProfile、faceFeatures、looks、background、keyRelationships、arc、keyScenes、props
@@ -1093,7 +1096,7 @@ ${buildLeadWardrobeInstruction(creationBible)}
 12. 每个人物必须有一个主要时期正常状态的基础造型；其他造型填写 referenceLookId，按“正脸→基础造型→年龄时期→服装造型→身体状态→特殊形态”建立依赖
 13. 每个 looks 项必须继承人物 bodyProfile，并用 bodyChanges 单独说明当前时期、伤病、怀孕或变身造成的体态变化；没有变化则留空
 14. 地狱犬、狼人、兽人、魔兽等非人角色必须保留动物/兽类解剖与物种特征，禁止套用普通人类脸型、皮肤、妆容或人类长发模板
-15. 对 role=主角 的人类角色，appearance 和 faceFeatures 必须达到影视主角选角标准：外形出众但自然可信，骨相清晰、五官协调、镜头表现力强，并保留稳定的身份记忆点。女主漂亮高级而自然，避免网红模板、蛇精脸、夸张大眼和过度幼态；男主英俊利落、有力量感，避免油腻、僵硬和模板化硬汉脸。不得因此改变剧本明确的年龄、性别、族裔、伤病或身份。
+15. 对 role=主角 的人类角色，必须严格执行上方“主角形象设计规则”，并在 appearance 与 faceFeatures 中落成可重复生成的具体结构；不得因此改变剧本明确设定。
 
 请以 JSON 格式返回结果，格式如下：
 {
