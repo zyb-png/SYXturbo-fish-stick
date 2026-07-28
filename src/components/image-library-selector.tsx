@@ -87,7 +87,7 @@ export function ImageLibrarySelector({ open, onClose, onSelect, currentType }: I
       } catch (s3Error) {
         console.log('S3 图片库加载失败，尝试本地文件系统:', s3Error);
       }
-      
+
       // 如果 S3 没有数据，尝试从本地文件系统获取
       if (!data || !Object.values(data.folders as Record<string, { count: number }>).some((f: { count: number }) => f.count > 0)) {
         const localResponse = await fetch('/api/assets-list');
@@ -97,7 +97,7 @@ export function ImageLibrarySelector({ open, onClose, onSelect, currentType }: I
           console.log('从本地文件系统加载图片库成功');
         }
       }
-      
+
       if (data && data.success) {
         setFolders(data.folders);
       }
@@ -169,38 +169,51 @@ export function ImageLibrarySelector({ open, onClose, onSelect, currentType }: I
                     <p>该分类暂无图片</p>
                   </div>
                 ) : (
-                  <div className="grid grid-cols-4 sm:grid-cols-5 md:grid-cols-6 gap-2 max-h-[400px] overflow-y-auto p-1">
+                  <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3 max-h-[min(62vh,620px)] overflow-y-auto p-1 pr-2">
                     {folders[key]?.files.map((file, index) => {
                       // S3 数据有 url 字段，本地数据需要构建 URL
                       const imageUrl = file.url || getImageUrl(name, file.name);
                       const displayName = file.fileName || file.name;
                       const isSelected = selectedImage?.url === imageUrl;
-                      
+
                       return (
                         <div
                           key={file.key || file.name || index}
-                          className={`relative aspect-square rounded-lg overflow-hidden cursor-pointer border-2 transition-all ${
-                            isSelected 
-                              ? 'border-blue-500 ring-2 ring-blue-500/50' 
-                              : 'border-transparent hover:border-gray-300'
+                          className={`group relative rounded-lg overflow-hidden cursor-pointer border transition-all bg-black/30 ${
+                            isSelected
+                              ? 'border-amber-400 ring-2 ring-amber-400/40'
+                              : 'border-amber-400/15 hover:border-amber-300/60'
                           }`}
                           onClick={() => setSelectedImage({ url: imageUrl, name: displayName })}
+                          title={displayName}
                         >
-                          {imageUrl ? (
-                            <img
-                              src={getAssetThumbnailUrl(imageUrl, 420, 68)}
-                              alt={displayName}
-                              loading="lazy"
-                              decoding="async"
-                              fetchPriority="low"
-                              className="w-full h-full object-cover"
-                            />
-                          ) : null}
-                          {isSelected && (
-                            <div className="absolute inset-0 bg-blue-500/20 flex items-center justify-center">
-                              <div className="w-6 h-6 bg-blue-500 rounded-full flex items-center justify-center">
-                                <Check className="w-4 h-4 text-white" />
+                          <div className="flex aspect-[4/3] items-center justify-center bg-neutral-950/70">
+                            {imageUrl ? (
+                              <img
+                                src={getAssetThumbnailUrl(imageUrl, 520, 72)}
+                                alt={displayName}
+                                loading="lazy"
+                                decoding="async"
+                                fetchPriority="low"
+                                className="h-full w-full object-contain p-1 transition-transform duration-200 group-hover:scale-[1.02]"
+                              />
+                            ) : (
+                              <ImageIcon className="h-10 w-10 text-muted-foreground" />
+                            )}
+                          </div>
+                          <div className="border-t border-amber-400/10 bg-black/55 px-2 py-1.5">
+                            <div className="truncate text-xs text-amber-50/85">
+                              {displayName}
+                            </div>
+                            {file.sizeFormatted && (
+                              <div className="mt-0.5 truncate text-[11px] text-amber-100/45">
+                                {file.sizeFormatted}
                               </div>
+                            )}
+                          </div>
+                          {isSelected && (
+                            <div className="absolute right-2 top-2 flex h-6 w-6 items-center justify-center rounded-full bg-amber-400 text-black shadow">
+                              <Check className="w-4 h-4" />
                             </div>
                           )}
                         </div>

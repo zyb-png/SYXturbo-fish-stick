@@ -35,6 +35,8 @@ const IMAGE_COST_RMB: Record<ImageGenerationMode, Record<ImageQuality, Record<Im
   },
 };
 
+const SEEDREAM_V5_PRO_OUTPUT_UNDER_236MP_COST_RMB = 0.27;
+
 function normalizeTokenCount(value: unknown): number {
   const number = Number(value);
   return Number.isFinite(number) ? Math.max(0, Math.round(number)) : 0;
@@ -69,6 +71,10 @@ export function calculateImageCreationPoints(input: {
 }): number {
   const costRmb = IMAGE_COST_RMB[input.mode][input.quality][input.resolution];
   return Math.ceil(costRmb * (IMAGE_PRICE_MULTIPLIER * POINTS_PER_RMB));
+}
+
+export function calculateSeedreamV5ProUnder236MpImagePoints(): number {
+  return Math.ceil(SEEDREAM_V5_PRO_OUTPUT_UNDER_236MP_COST_RMB * IMAGE_PRICE_MULTIPLIER * POINTS_PER_RMB);
 }
 
 export function calculateManfeiVideoCreationPoints(actualCostRmb: number): number {

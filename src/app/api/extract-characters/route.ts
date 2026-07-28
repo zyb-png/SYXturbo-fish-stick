@@ -66,6 +66,28 @@ function buildCreationBibleInstruction(creationBible?: CreationBible): string {
   return lines.join('\n');
 }
 
+function buildLeadWardrobeInstruction(creationBible?: CreationBible): string {
+  const background = typeof creationBible?.creationBackground === 'string'
+    ? creationBible.creationBackground.trim()
+    : '';
+  const region = typeof creationBible?.subjectRegion === 'string'
+    ? creationBible.subjectRegion.trim()
+    : '';
+  const context = [background || '剧本对应时代', region || '剧本对应地域'].join('、');
+
+  return `【主角服装设计圣经】
+1. 仅对 role=主角 的人类角色提升服装设计等级；服装必须先服从剧本身份、场合、季节、动作需求和${context}，再增加设计感，不能改变原剧情。
+2. 每位主角先建立稳定的个人衣橱基因：固定1组主色与1组辅助色、1种常用轮廓、1至2个签名细节。不同造型可以变化，但应让观众看出属于同一个人物。
+3. 日常造型用于生活、通勤、工作、出行和连续接戏。日常不等于普通：使用清楚的剪裁、比例、层次、材质和一个克制记忆点，避免只写“白衬衫+黑裤子”“普通西装”“休闲装”等泛化搭配。
+4. 女主日常方向：合体但不紧绷的剪裁、高腰比例、长裤或长裙、马甲/西装/风衣/皮衣等层次；象牙白、黑、棕、酒红、灰、橄榄等克制配色；蝴蝶结、蕾丝、腰封、帽饰或珠宝最多选择1至2项作为女性化记忆点。
+5. 男主日常方向：松弛但利落的现代剪裁，针织/Polo/衬衫/夹克与高腰直筒或宽松长裤形成比例；黑白灰、奶油、棕、藏蓝等安静配色；通过外套结构、领型、面料、腕表或鞋履形成高级感，禁止油腻紧身和模板化商务套装。
+6. 高光造型仅用于宴会、婚礼、典礼、正式发布、身份揭晓、重要登场、逆袭、决战、加冕、庆功等确有叙事意义的节点。高光造型强化轮廓、材质、配饰与色彩对比，但仍保持人物衣橱基因。
+7. 女主高光方向：礼服、披肩/披风、结构化腰线、黑金/酒红/银白等电影化配色，珠宝、冠饰或帽饰作为焦点；最多保留2至3个视觉记忆点，避免堆满装饰。
+8. 男主高光方向必须按世界观二选一：现代题材使用三件套、礼服、长大衣等克制正式造型；古代/奇幻题材才使用刺绣、披风、冠冕、皮草或铠甲。禁止把现代西装与奇幻王冠披风无依据混搭。
+9. looks.costume 必须写清轮廓、内外层、上下装、主辅色、材质和鞋履；looks.accessories 只保留真实会出现在画面中的配饰。高光造型还要在 description 或 costume 中说明其叙事记忆点。
+10. 同一服装在连续场次中不得无故改变；只有时间、场合、身份、剧情节点或身体状态发生足够明显变化时才新增造型。参考设计原则，不直接复制任何品牌、秀场或参考图中的完整成衣。`;
+}
+
 function getCreationStyleLabel(creationBible?: CreationBible): string {
   if (creationBible?.creationType === '3D') return '3D角色动画风格';
   if (creationBible?.creationType === '动漫') return '动漫角色设计风格';
@@ -477,6 +499,7 @@ async function extractBatchCharacters(
 ): Promise<{ characters: any[]; tokenUsage: any }> {
   const systemPrompt = `你是专业的影视角色分析师。为指定的人物生成详细信息。
 ${buildCreationBibleInstruction(creationBible)}
+${buildLeadWardrobeInstruction(creationBible)}
 
 **绝对重要规则**：
 1. **必须为输入列表中的每个人物都生成信息，不能遗漏任何人！**
@@ -504,6 +527,7 @@ ${buildCreationBibleInstruction(creationBible)}
 23. 必须先逐条审计“全剧本生命周期重点段落”。闪回中出现的小名、乳名、“小+姓名”、幼年称呼、女孩/男孩或亲属称呼，要结合闪回前后的转场、关系和事件判断对应人物；例如主线人物在闪回中以幼年身份出现，必须在同一人物的 looks 中新增“年龄时期”造型，不能因闪回段未重复写全名而漏掉
 24. 每个明确的童年/幼年/少年/青年/中年/老年或多年以前/以后状态，都必须在 sourceEvidence 与 episodeNumbers 中保留证据；只有确实属于同一时期且视觉没有变化的段落才能合并
 25. 必须区分人类与非人角色。地狱犬、狼人、兽人、魔兽等应保留动物/兽类物种特征；不能套用普通人类脸型、皮肤、妆容和人类发型模板。动物毛发必须顺应动物头骨与身体结构，禁止生成女性长发、披发、马尾或假发。
+26. 对 role=主角 的人类角色，appearance 与 faceFeatures 要按影视主角选角标准设计：外形出众、骨相清晰、五官协调、镜头表现力强，并保留1至2个稳定且美观的身份记忆点。女主应漂亮高级而自然，避免蛇精脸、夸张大眼、过度幼态和网红模板；男主应英俊利落、有力量感，避免油腻、僵硬和模板化硬汉脸。该规则不能覆盖剧本明确的年龄、性别、族裔、伤病和身份设定。
 
 每个人物包含：
 - id: 序号
@@ -1053,6 +1077,7 @@ async function extractCharactersTraditional(
 ): Promise<any> {
   const systemPrompt = `你是一个专业的影视角色分析师。你的任务是：
 ${buildCreationBibleInstruction(creationBible)}
+${buildLeadWardrobeInstruction(creationBible)}
 
 1. 分析给定的文本内容，提取所有人物角色
 2. 每个人物必须生成 role、age、gender、personality、appearance、bodyProfile、faceFeatures、looks、background、keyRelationships、arc、keyScenes、props
@@ -1068,6 +1093,7 @@ ${buildCreationBibleInstruction(creationBible)}
 12. 每个人物必须有一个主要时期正常状态的基础造型；其他造型填写 referenceLookId，按“正脸→基础造型→年龄时期→服装造型→身体状态→特殊形态”建立依赖
 13. 每个 looks 项必须继承人物 bodyProfile，并用 bodyChanges 单独说明当前时期、伤病、怀孕或变身造成的体态变化；没有变化则留空
 14. 地狱犬、狼人、兽人、魔兽等非人角色必须保留动物/兽类解剖与物种特征，禁止套用普通人类脸型、皮肤、妆容或人类长发模板
+15. 对 role=主角 的人类角色，appearance 和 faceFeatures 必须达到影视主角选角标准：外形出众但自然可信，骨相清晰、五官协调、镜头表现力强，并保留稳定的身份记忆点。女主漂亮高级而自然，避免网红模板、蛇精脸、夸张大眼和过度幼态；男主英俊利落、有力量感，避免油腻、僵硬和模板化硬汉脸。不得因此改变剧本明确的年龄、性别、族裔、伤病或身份。
 
 请以 JSON 格式返回结果，格式如下：
 {

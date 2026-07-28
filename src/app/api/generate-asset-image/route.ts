@@ -10,7 +10,10 @@ import {
   freezeCreationPoints,
   InsufficientCreationPointsError,
 } from '@/lib/creation-points';
-import { calculateImageCreationPoints } from '@/lib/provider-pricing';
+import {
+  calculateImageCreationPoints,
+  calculateSeedreamV5ProUnder236MpImagePoints,
+} from '@/lib/provider-pricing';
 import { getAccountAssetsPath, getAccountRemoteKey } from '@/lib/account-assets';
 import type { PublicAccount } from '@/lib/account-store';
 import {
@@ -31,6 +34,10 @@ const MAX_IMAGES_PER_ASSET = 3;
 // RunningHub API 配置
 const TEXT_TO_IMAGE_MODEL = 'runninghub/rhart-image-g-2/text-to-image';
 const IMAGE_TO_IMAGE_MODEL = 'runninghub/rhart-image-g-2/image-to-image';
+const FOUR_VIEW_IMAGE_TO_IMAGE_MODEL = 'runninghub/seedream-v5-pro/image-to-image';
+const FOUR_VIEW_IMAGE_TO_IMAGE_API_KEY = process.env.RUNNINGHUB_SEEDREAM_V5_PRO_API_KEY || 'dd93912580ce47beb105741274730a02';
+const FOUR_VIEW_WIDTH = 1536;
+const FOUR_VIEW_HEIGHT = 864;
 
 const STYLIZED_3D_CHARACTER_PROMPT = [
   '高端院线级风格化3D动画电影美术，圆润简洁的造型语言，略微夸张但协调自然的角色比例，精致干净的面部建模，柔和且富有表现力的五官设计。',
@@ -73,6 +80,7 @@ function buildRunningHubEndpoints(baseUrl: string) {
   return {
     textToImage: `${base}/rhart-image-g-2/text-to-image`,
     imageToImage: `${base}/rhart-image-g-2/image-to-image`,
+    seedreamV5ProImageToImage: `${base}/seedream-v5-pro/image-to-image`,
     query: `${base}/query`,
     mediaUpload: `${base}/media/upload/binary`,
   };
@@ -476,16 +484,30 @@ async function runRunningHubImageToImage(
   imageUrls: string[],
   aspectRatio: string,
   resolution: '1k' | '2k' | '4k' = '2k',
-  quality: 'low' | 'medium' | 'high' = 'medium'
+  quality: 'low' | 'medium' | 'high' = 'medium',
+  options?: {
+    endpointUrl?: string;
+    label?: string;
+    width?: number;
+    height?: number;
+    outputFormat?: 'jpeg' | 'png';
+    omitResolution?: boolean;
+  }
 ): Promise<string> {
-  const requestBody = JSON.stringify({
+  const requestPayload: Record<string, unknown> = {
     prompt,
     imageUrls,
     aspectRatio,
-    resolution,
     quality,
-  });
-  const createResponse = await fetch(endpoints.imageToImage, {
+  };
+  if (options?.width) requestPayload.width = options.width;
+  if (options?.height) requestPayload.height = options.height;
+  if (options?.outputFormat) requestPayload.outputFormat = options.outputFormat;
+  if (!options?.omitResolution) requestPayload.resolution = resolution;
+
+  const requestBody = JSON.stringify(requestPayload);
+  const label = options?.label || '图生图';
+  const createResponse = await fetch(options?.endpointUrl || endpoints.imageToImage, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -496,21 +518,21 @@ async function runRunningHubImageToImage(
 
   if (!createResponse.ok) {
     const errorText = await createResponse.text();
-    throw new Error(`RunningHub 图生图任务创建失败 (${createResponse.status}): ${errorText}`);
+    throw new Error(`RunningHub ${label}任务创建失败 (${createResponse.status}): ${errorText}`);
   }
 
   const createResult = await createResponse.json();
   const taskId = createResult.taskId;
 
   if (!taskId) {
-    throw new Error('RunningHub 图生图未返回任务 ID');
+    throw new Error(`RunningHub ${label}未返回任务 ID`);
   }
 
   // 轮询查询任务状态
   for (let i = 0; i < MAX_POLL_RETRIES; i++) {
     await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL_MS));
 
-    const queryResult = await queryRunningHubTask(apiKey, endpoints, taskId, '图生图');
+    const queryResult = await queryRunningHubTask(apiKey, endpoints, taskId, label);
     const status = queryResult.status;
 
     if (status === 'SUCCESS') {
@@ -518,17 +540,17 @@ async function runRunningHubImageToImage(
       if (results && results.length > 0) {
         return results[0].url;
       }
-      throw new Error('RunningHub 图生图返回成功但无图片结果');
+      throw new Error(`RunningHub ${label}返回成功但无图片结果`);
     }
 
     if (status === 'FAILED') {
-      throw new Error(`RunningHub 图生图失败: ${queryResult.errorMessage || '未知错误'}`);
+      throw new Error(`RunningHub ${label}失败: ${queryResult.errorMessage || '未知错误'}`);
     }
 
     // QUEUED / RUNNING - 继续轮询
   }
 
-  throw new Error(`RunningHub 图生图超时（已等待 ${(MAX_POLL_RETRIES * POLL_INTERVAL_MS) / 1000} 秒）`);
+  throw new Error(`RunningHub ${label}超时（已等待 ${(MAX_POLL_RETRIES * POLL_INTERVAL_MS) / 1000} 秒）`);
 }
 
 export async function POST(request: NextRequest) {
@@ -537,7 +559,20 @@ export async function POST(request: NextRequest) {
   if (auth.response) return auth.response;
 
   try {
-    const { type, data, currentCount, lookId, referenceImageUrl, customPrompt, imageVariant, assetImageName, creationBible } = await request.json();
+    const {
+      type,
+      data,
+      currentCount,
+      lookId,
+      referenceImageUrl,
+      referenceImageUrls,
+      identityReferenceImageUrl,
+      lookReferenceImageUrl,
+      customPrompt,
+      imageVariant,
+      assetImageName,
+      creationBible,
+    } = await request.json();
 
     if (!type || !data) {
       return NextResponse.json(
@@ -566,7 +601,30 @@ export async function POST(request: NextRequest) {
     const endpoints = buildRunningHubEndpoints(runningHubConfig.baseUrl);
 
     const resolvedImageVariant = imageVariant || (type === 'character' ? (lookId ? 'character-look' : 'character-face') : undefined);
+    const useFourViewSeedreamModel = resolvedImageVariant === 'character-four-view';
+    const generationApiKey = useFourViewSeedreamModel ? FOUR_VIEW_IMAGE_TO_IMAGE_API_KEY.trim() : apiKey;
+    if (useFourViewSeedreamModel && !generationApiKey) {
+      return NextResponse.json({
+        success: false,
+        error: '未配置四视图 seedream-v5-pro API Key，请联系管理员配置',
+      }, { status: 503 });
+    }
     const requestedReferenceImageUrl = typeof referenceImageUrl === 'string' ? referenceImageUrl.trim() : '';
+    const requestedIdentityReferenceImageUrl = typeof identityReferenceImageUrl === 'string'
+      ? identityReferenceImageUrl.trim()
+      : (resolvedImageVariant === 'character-four-view' ? String(data?.confirmedFaceImageUrl || '').trim() : '');
+    const requestedLookReferenceImageUrl = typeof lookReferenceImageUrl === 'string'
+      ? lookReferenceImageUrl.trim()
+      : requestedReferenceImageUrl;
+    const requestedReferenceImageUrlForValidation = resolvedImageVariant === 'character-four-view'
+      ? requestedLookReferenceImageUrl
+      : requestedReferenceImageUrl;
+    const requestedReferenceImageUrls = Array.isArray(referenceImageUrls)
+      ? referenceImageUrls
+        .filter((url: unknown): url is string => typeof url === 'string')
+        .map(url => url.trim())
+        .filter(Boolean)
+      : [];
 
     const characterNeedsReference = type === 'character' && (
       resolvedImageVariant === 'character-look' || resolvedImageVariant === 'character-four-view'
@@ -577,12 +635,18 @@ export async function POST(request: NextRequest) {
         error: '请先由用户选择并确认人物正脸身份基准图，再生成任何人物变体',
       }, { status: 400 });
     }
-    if (characterNeedsReference && !requestedReferenceImageUrl) {
+    if (characterNeedsReference && !requestedReferenceImageUrlForValidation) {
       return NextResponse.json({
         success: false,
         error: resolvedImageVariant === 'character-four-view'
           ? '人物四视图必须参考已生成的对应造型图'
           : '人物造型必须先确认正脸身份基准，并参考正脸或父级造型进行图生图',
+      }, { status: 400 });
+    }
+    if (resolvedImageVariant === 'character-four-view' && !requestedIdentityReferenceImageUrl) {
+      return NextResponse.json({
+        success: false,
+        error: '人物四视图必须同时参考已确认正脸身份图和当前造型图',
       }, { status: 400 });
     }
 
@@ -604,10 +668,16 @@ export async function POST(request: NextRequest) {
 
       if (resolvedImageVariant === 'character-four-view') {
         const targetLookImageUrl = typeof targetLook.imageUrl === 'string' ? targetLook.imageUrl.trim() : '';
-        if (!targetLookImageUrl || requestedReferenceImageUrl !== targetLookImageUrl) {
+        if (!targetLookImageUrl || requestedLookReferenceImageUrl !== targetLookImageUrl) {
           return NextResponse.json({
             success: false,
             error: '人物四视图必须严格参考当前造型图，不能使用其他人物图或旧造型图',
+          }, { status: 400 });
+        }
+        if (requestedIdentityReferenceImageUrl !== String(data.confirmedFaceImageUrl || '').trim()) {
+          return NextResponse.json({
+            success: false,
+            error: '人物四视图必须严格参考当前已确认正脸身份图，不能使用旧正脸或其他人物图',
           }, { status: 400 });
         }
       } else {
@@ -615,7 +685,7 @@ export async function POST(request: NextRequest) {
         const isCurrentLookReroll = Boolean(
           !targetLook.identityNeedsReview &&
           currentLookImageUrl &&
-          requestedReferenceImageUrl === currentLookImageUrl
+          requestedReferenceImageUrlForValidation === currentLookImageUrl
         );
         if (!isCurrentLookReroll) {
           let expectedReferenceImageUrl = '';
@@ -641,7 +711,7 @@ export async function POST(request: NextRequest) {
             expectedReferenceImageUrl = typeof parentLook.imageUrl === 'string' ? parentLook.imageUrl.trim() : '';
           }
 
-          if (!expectedReferenceImageUrl || requestedReferenceImageUrl !== expectedReferenceImageUrl) {
+          if (!expectedReferenceImageUrl || requestedReferenceImageUrlForValidation !== expectedReferenceImageUrl) {
             return NextResponse.json({
               success: false,
               error: '人物造型参考图与当前依赖链不一致，请按界面提示先生成父级造型',
@@ -673,9 +743,15 @@ export async function POST(request: NextRequest) {
       }, { status: 400 });
     }
 
-    const normalizedReferenceImageUrl = requestedReferenceImageUrl
-      ? await normalizeReferenceImageUrl(apiKey, endpoints, auth.account, request, requestedReferenceImageUrl)
-      : '';
+    const referenceUrlsForGeneration = resolvedImageVariant === 'character-four-view'
+      ? [requestedIdentityReferenceImageUrl, requestedLookReferenceImageUrl]
+      : (requestedReferenceImageUrls.length > 0 ? requestedReferenceImageUrls : [requestedReferenceImageUrl]);
+    const normalizedReferenceImageUrls = (await Promise.all(
+      Array.from(new Set(referenceUrlsForGeneration.filter(Boolean))).map(url =>
+        normalizeReferenceImageUrl(generationApiKey, endpoints, auth.account, request, url)
+      )
+    )).filter(Boolean);
+    const normalizedReferenceImageUrl = normalizedReferenceImageUrls[0] || '';
 
     // 根据类型构建提示词
     const prompt = customPrompt
@@ -686,15 +762,24 @@ export async function POST(request: NextRequest) {
       ? (resolvedImageVariant === 'character-face' ? '1:1' : resolvedImageVariant === 'character-four-view' ? '16:9' : '9:16')
       : (ASPECT_RATIO_MAP[sizeConfig.ratio] || '16:9');
 
-    console.log(`[RunningHub] 生成${type}图片，提示词:`, prompt.substring(0, 100));
-    console.log(`[RunningHub] 宽高比: ${aspectRatio}, 分辨率: 2k, 质量: medium`);
+    const imagePricingLabel = useFourViewSeedreamModel
+      ? 'seedream-v5-pro image-to-image ≤236万像素'
+      : 'provider_cost_x1.5';
+    const imageResolutionLabel = useFourViewSeedreamModel
+      ? `${FOUR_VIEW_WIDTH}x${FOUR_VIEW_HEIGHT}`
+      : '2k';
 
-    const imageMode = normalizedReferenceImageUrl ? 'image-to-image' : 'text-to-image';
-    const imagePoints = calculateImageCreationPoints({
-      mode: imageMode,
-      resolution: '2k',
-      quality: 'medium',
-    });
+    console.log(`[RunningHub] 生成${type}图片，提示词:`, prompt.substring(0, 100));
+    console.log(`[RunningHub] 宽高比: ${aspectRatio}, 分辨率: ${imageResolutionLabel}, 质量: medium`);
+
+    const imageMode = normalizedReferenceImageUrls.length > 0 ? 'image-to-image' : 'text-to-image';
+    const imagePoints = useFourViewSeedreamModel
+      ? calculateSeedreamV5ProUnder236MpImagePoints()
+      : calculateImageCreationPoints({
+          mode: imageMode,
+          resolution: '2k',
+          quality: 'medium',
+        });
     const pointTask = await freezeCreationPoints({
       featureCode: 'generate_asset_image',
       points: imagePoints,
@@ -703,9 +788,13 @@ export async function POST(request: NextRequest) {
         assetId: data.id,
         assetName: data.name,
         imageMode,
-        resolution: '2k',
+        referenceCount: normalizedReferenceImageUrls.length,
+        model: useFourViewSeedreamModel ? FOUR_VIEW_IMAGE_TO_IMAGE_MODEL : undefined,
+        resolution: imageResolutionLabel,
         quality: 'medium',
-        pricing: 'provider_cost_x1.5',
+        pricing: imagePricingLabel,
+        costRmb: useFourViewSeedreamModel ? 0.27 : undefined,
+        priceMultiplier: useFourViewSeedreamModel ? 1.5 : undefined,
       },
     });
     creationPointTaskId = pointTask.taskId;
@@ -714,22 +803,32 @@ export async function POST(request: NextRequest) {
     let imageModel = TEXT_TO_IMAGE_MODEL;
 
     // 如果有参考图片，使用 image-to-image
-    if (normalizedReferenceImageUrl) {
-      console.log(`[RunningHub] 使用图生图模式，参考图片:`, normalizedReferenceImageUrl.substring(0, 80));
-      imageModel = IMAGE_TO_IMAGE_MODEL;
+    if (normalizedReferenceImageUrls.length > 0) {
+      console.log(`[RunningHub] 使用图生图模式，参考图片数量: ${normalizedReferenceImageUrls.length}`);
+      imageModel = useFourViewSeedreamModel ? FOUR_VIEW_IMAGE_TO_IMAGE_MODEL : IMAGE_TO_IMAGE_MODEL;
       imageUrl = await runRunningHubImageToImage(
-        apiKey,
+        generationApiKey,
         endpoints,
         prompt,
-        [normalizedReferenceImageUrl],
+        normalizedReferenceImageUrls,
         aspectRatio,
         '2k',
-        'medium'
+        'medium',
+        useFourViewSeedreamModel
+          ? {
+              endpointUrl: endpoints.seedreamV5ProImageToImage,
+              label: 'seedream-v5-pro 四视图图生图',
+              width: FOUR_VIEW_WIDTH,
+              height: FOUR_VIEW_HEIGHT,
+              outputFormat: 'jpeg',
+              omitResolution: true,
+            }
+          : undefined
       );
     } else {
       // 普通文生图
       imageUrl = await runRunningHubTextToImage(
-        apiKey,
+        generationApiKey,
         endpoints,
         prompt,
         aspectRatio,
@@ -774,7 +873,9 @@ export async function POST(request: NextRequest) {
     }
 
     await completeCreationPointTask(creationPointTaskId, imagePoints, {
-      description: `${normalizedReferenceImageUrl ? '图生图' : '文生图'}素材图片完成扣除（2K / medium）`,
+      description: useFourViewSeedreamModel
+        ? 'seedream-v5-pro 四视图图生图完成扣除（≤236万像素，成本0.27元 x 1.5）'
+        : `${normalizedReferenceImageUrls.length > 0 ? '图生图' : '文生图'}素材图片完成扣除（2K / medium）`,
     });
 
     return NextResponse.json({
@@ -950,13 +1051,155 @@ function getCharacterFaceComposition(creationBible?: CreationBible): string {
 function getCharacterNegativeRequirement(creationBible?: CreationBible, fullBody = false): string {
   const framing = fullBody ? '不要裁切身体或脚部' : '不要全身照，不要半身环境照';
   const creationType = normalizeCreationType(creationBible);
+  const singleSubject = '不要第二个人、陪同者、搀扶者、路人、旁观者、多人合照、多余脸、多余身体、多余手臂';
   if (creationType === '3D') {
-    return `【禁止】无文字、无字幕、无水印；不要真人照片、真人摄影皮肤、真人轻磨皮效果、2D插画、蜡像或廉价塑料玩具感；${framing}`;
+    return `【禁止】无文字、无字幕、无水印；不要真人照片、真人摄影皮肤、真人轻磨皮效果、2D插画、蜡像或廉价塑料玩具感；${singleSubject}；${framing}`;
   }
   if (creationType === '动漫') {
-    return `【禁止】无文字、无字幕、无水印；不要真人照片、真人摄影皮肤、照片滤镜、3D/CGI/PBR、塑料模型、厚涂写实或水彩效果；${framing}`;
+    return `【禁止】无文字、无字幕、无水印；不要真人照片、真人摄影皮肤、照片滤镜、3D/CGI/PBR、塑料模型、厚涂写实或水彩效果；${singleSubject}；${framing}`;
   }
-  return `【禁止】无文字、无字幕、无水印，不要换脸，不要夸张卡通；${framing}`;
+  return `【禁止】无文字、无字幕、无水印，不要换脸，不要夸张卡通；${singleSubject}；${framing}`;
+}
+
+function isLeadCharacter(data: any): boolean {
+  const role = String(data?.role || '').trim().toLowerCase();
+  return role === '主角' ||
+    role.includes('男主') ||
+    role.includes('女主') ||
+    role.includes('protagonist') ||
+    role === 'lead' ||
+    role === 'main character';
+}
+
+type WardrobeLookContext = {
+  scene?: unknown;
+  stage?: unknown;
+  description?: unknown;
+  costume?: unknown;
+  mood?: unknown;
+  sceneNames?: unknown;
+};
+
+function getLeadCastingDirectives(
+  data: any,
+  resolvedGender: string,
+  creationBible?: CreationBible,
+  preserveConfirmedIdentity = false
+): string[] {
+  if (!isLeadCharacter(data) || inferCharacterEntityKind(data) === 'animal-creature') return [];
+
+  const gender = String(resolvedGender || '').trim();
+  const creationType = normalizeCreationType(creationBible);
+  const subjectRegion = normalizeSubjectRegion(creationBible);
+  const styleLabel = creationType === '3D'
+    ? '院线级风格化3D动画主角'
+    : creationType === '动漫'
+      ? '高品质二维动画电影主角'
+      : '电影或精品剧集主角';
+  const regionLock = subjectRegion === '国外'
+    ? '符合剧本指定的海外族裔；剧本未指定时使用非东亚的欧美/国际化面孔与骨相'
+    : subjectRegion === '国内'
+      ? '符合中国本土人物语境与自然东亚骨相'
+      : '严格符合剧本中的地域与族裔设定';
+
+  if (preserveConfirmedIdentity) {
+    return [
+      `【主角身份锁定】这是${styleLabel}的后续造型。必须完整继承已确认正脸参考图的脸型骨骼、五官比例、眼距、鼻型、嘴型、肤色、年龄感与辨识度，不得重新选角、换脸或擅自美化成另一个人`,
+      '只允许按当前造型资料改变服装、发型、妆容、年龄阶段或剧情状态；即使调整年龄和状态，也必须一眼认出是同一位主角',
+    ];
+  }
+
+  const shared = [
+    `【主角选角标准】按${styleLabel}设计：外形出众但自然可信，骨相清晰，五官比例协调，正脸与镜头侧转时都具有高辨识度和稳定的主角存在感`,
+    `【地域与时代】${regionLock}；同时严格符合人物年龄、身份、性格、剧情年代和创作背景，不得为了变美而改变性别、年龄、族裔或人物设定`,
+    '【审美方向】高级、耐看、有故事感和情绪表现力，不使用千篇一律的网红模板脸；保留1至2个明确而美观的身份记忆点，使后续造型仍可稳定识别',
+  ];
+
+  if (gender === '女') {
+    shared.push('【女主审美】漂亮、精致而有生命力，脸部轮廓流畅，眉眼有神，鼻唇关系自然，气质与角色性格匹配；避免蛇精脸、过尖下巴、夸张大眼、过度幼态、浓重网红妆、医美感和塑料感');
+  } else if (gender === '男') {
+    shared.push('【男主审美】英俊、利落而有力量感，眉眼深邃有神，面部骨相和下颌线自然清晰，气质与角色身份匹配；避免油腻、僵硬、过度健美、夸张欧美硬汉模板、网红妆和千篇一律精修脸');
+  } else {
+    shared.push('【主角审美】在不擅自改变性别表达的前提下，强化协调自然的五官、清晰骨相、镜头表现力和高辨识度；拒绝模板化网红脸');
+  }
+
+  return shared;
+}
+
+function getLeadWardrobeDirectives(
+  data: Record<string, unknown>,
+  currentLook: WardrobeLookContext | null | undefined,
+  resolvedGender: string,
+  creationBible?: CreationBible,
+  preserveCurrentLook = false
+): string[] {
+  if (!isLeadCharacter(data) || inferCharacterEntityKind(data) === 'animal-creature') return [];
+
+  if (preserveCurrentLook) {
+    return [
+      '【主角服装锁定】四视图不得重新设计服装。严格继承当前造型参考图的服装轮廓、层次、主辅色、材质、鞋履和配饰；只补全被遮挡的侧面与背面结构，不增加或删除设计元素',
+    ];
+  }
+
+  const gender = String(resolvedGender || '').trim();
+  const background = normalizeCreationBackground(creationBible) || '剧本对应时代';
+  const region = normalizeSubjectRegion(creationBible) || '剧本对应地域';
+  const lookContext = [
+    currentLook?.scene,
+    currentLook?.stage,
+    currentLook?.description,
+    currentLook?.costume,
+    currentLook?.mood,
+    ...(Array.isArray(currentLook?.sceneNames) ? currentLook.sceneNames : []),
+  ].map(value => String(value || '').trim()).filter(Boolean).join(' ');
+  const isHighlight = /(宴会|舞会|婚礼|订婚|典礼|盛典|红毯|发布会|正式晚宴|加冕|登基|庆功|授勋|重要登场|身份揭晓|逆袭|复仇|决战|终局|告白|重逢|高光)/.test(lookContext);
+
+  const directives = [
+    `【主角服装设计】当前按“${isHighlight ? '高光造型' : '日常造型'}”执行。服装首先符合${background}、${region}、人物身份、场合、季节和动作需求，再强化设计感；不得照搬品牌成衣，不得无剧情依据跨时代混搭`,
+    '【个人衣橱连续性】延续该主角稳定的主辅色、常用轮廓和1至2个签名细节。换装后仍应看出属于同一人物，不要每套衣服像不同项目的随机造型',
+  ];
+
+  if (isHighlight) {
+    directives.push('【高光强度】通过更明确的整体轮廓、材质对比、色彩焦点和配饰完成重要节点造型，保留2至3个视觉记忆点；高级、可拍摄、有戏剧张力，但不要堆满装饰');
+  } else {
+    directives.push('【日常强度】日常不等于普通。用准确剪裁、身材比例、内外层次、材质差异和一个克制记忆点提升完成度；禁止仅生成泛化白衬衫黑裤子、普通西装或毫无结构的休闲装');
+  }
+
+  if (gender === '女') {
+    directives.push(isHighlight
+      ? '【女主高光】优先结构化腰线、礼服或有力量感的长线条外搭；可用黑金、酒红、银白等克制电影色，珠宝、冠饰、帽饰、披肩或披风只选少量焦点，漂亮高级而不俗艳'
+      : '【女主日常】优先利落而有女性气质的剪裁、高腰比例、长裤或长裙及有层次的马甲/西装/风衣/皮衣；使用象牙白、黑、棕、酒红、灰、橄榄等克制配色，蝴蝶结、蕾丝、腰封、帽饰或珠宝最多选1至2项');
+  } else if (gender === '男') {
+    if (isHighlight && (background === '古代' || /(奇幻|王|皇|贵族|骑士|仙|魔|神)/.test(lookContext))) {
+      directives.push('【男主高光·古代/奇幻】使用清楚的长线条、刺绣或纹章、披风、冠冕、皮草、铠甲等世界观内元素，强调身份与力量；控制材质和装饰数量，避免影楼廉价感');
+    } else if (isHighlight) {
+      directives.push('【男主高光·现代】使用三件套、礼服、长大衣或结构鲜明的正式造型，黑/白/灰/奶油等克制配色，以领型、肩线、面料和少量腕表/胸针/领结形成记忆点；不要混入奇幻冠冕披风');
+    } else {
+      directives.push('【男主日常】使用松弛但利落的剪裁，针织/Polo/衬衫/夹克与高腰直筒或宽松长裤形成比例；黑白灰、奶油、棕、藏蓝等安静配色，通过外套结构、领型、面料、腕表或鞋履提升质感，禁止油腻紧身和模板商务装');
+    }
+  } else {
+    directives.push('【服装审美】在不擅自改变性别表达的前提下，用清楚轮廓、比例、层次、材质和少量配饰建立主角记忆点，避免模板化基础款');
+  }
+
+  return directives;
+}
+
+function sanitizeCharacterLookDetail(value: unknown): string {
+  const text = String(value || '').trim();
+  if (!text) return '';
+  let cleaned = text
+    .replace(/[^，。；;,.]*搀扶[^，。；;,.]*/g, '目标人物呈现受伤、虚弱或踉跄状态')
+    .replace(/[^，。；;,.]*护送[^，。；;,.]*/g, '目标人物呈现正在撤离或转移后的状态')
+    .replace(/[^，。；;,.]*(跟班|同伴|旁人|路人|其他人|另一人|第二人)[^，。；;,.]*/g, '只保留目标人物本人的剧情状态')
+    .replace(/，{2,}/g, '，')
+    .replace(/。{2,}/g, '。')
+    .replace(/^[，。；;,.、\s]+|[，。；;,.、\s]+$/g, '')
+    .trim();
+  if (!cleaned) cleaned = '只表现目标人物本人的当前剧情状态';
+  if (cleaned !== text) {
+    cleaned += '；注意：相关互动人物只作为剧情背景理解，画面中绝对不要出现第二个人';
+  }
+  return cleaned;
 }
 
 function buildCustomAssetPrompt(
@@ -998,6 +1241,27 @@ function getPropQualityPrompt(creationBible?: CreationBible): string[] {
     ];
   }
   return ['超写实4K高清实物摄影，画面细腻有质感，电影级画质', '专业产品摄影，主体清晰，细节丰富'];
+}
+
+const VISIBLE_EFFECT_PROP_PATTERN = /(法术|法阵|阵法|符文|灵力|魔法|能量|光效|特效|烟雾|雾气|火焰|闪电|雷电|冰霜|结界|护盾|血雾|黑雾|光环|气刃|剑气)/;
+
+function sanitizePropVisualDetail(value: unknown): string {
+  const text = String(value || '').trim();
+  if (!text) return '';
+  let cleaned = text
+    .replace(/[^，。；;,.]*(眼尾|眼角|眼眶|眼睛|眼球|肩膀|肩头|脖颈|脖子|颈侧|胸口|后背|手臂|手腕|手掌|手指|旧伤|伤口|伤疤|血痕|淤青|身体|皮肤|人物|人脸|脸部|面部|持刀者|被威胁者|受伤者)[^，。；;,.]*/g, '只理解为剧情作用对象，不在画面中表现人体或人物')
+    .replace(/[^，。；;,.]*(血腥味|铁锈味|气味|味道|异味|氛围|气氛|压迫感|寒意|恐惧感|悲伤感|紧张感)[^，。；;,.]*/g, '')
+    .replace(/，{2,}/g, '，')
+    .replace(/。{2,}/g, '。')
+    .replace(/^[，。；;,.、\s]+|[，。；;,.、\s]+$/g, '')
+    .trim();
+  if (!cleaned && text) cleaned = '只表现道具本体或可见特效本身';
+  return cleaned;
+}
+
+function isVisibleEffectProp(data: any): boolean {
+  return [data?.name, data?.mainPropName, data?.type, data?.description, data?.visualDescription, data?.stateLabel]
+    .some(value => VISIBLE_EFFECT_PROP_PATTERN.test(String(value || '')));
 }
 
 // 根据类型构建图片提示词
@@ -1070,19 +1334,11 @@ function buildPrompt(type: string, data: any, lookId?: string, imageVariant?: st
       if (isAnimalCreature) {
         parts.push(...getAnimalCreaturePromptDirectives(data));
       }
-      const isMainCharacter = data.role && (
-        data.role.includes('主角') ||
-        data.role.includes('男主') ||
-        data.role.includes('女主') ||
-        data.role.includes('男主角') ||
-        data.role.includes('女主角') ||
-        data.role.toLowerCase().includes('protagonist') ||
-        data.role.toLowerCase().includes('main')
-      );
+      const isMainCharacter = isLeadCharacter(data);
 
       // 查找当前造型的提示词
       const currentLook = lookId && data.looks?.find((l: any) => l.id === lookId);
-      const lookPrompt = currentLook?.description?.trim();
+      const lookPrompt = sanitizeCharacterLookDetail(currentLook?.description);
       const faceOnlyAppearance = isAnimalCreature ? '' : stripBodyDetailsFromAppearance(data.appearance);
       const characterBodyProfile = normalizeCharacterBodyProfile(data.bodyProfile, data.appearance);
       const currentBodyProfile = mergeCharacterBodyProfiles(currentLook?.bodyProfile, characterBodyProfile);
@@ -1116,10 +1372,10 @@ function buildPrompt(type: string, data: any, lookId?: string, imageVariant?: st
         if (currentLook) {
           if (currentLook.changeType) parts.push(`造型变化类型：${currentLook.changeType}`);
           if (currentLook.ageStage) parts.push(`人物时期：${currentLook.ageStage}`);
-          if (currentLook.physicalState) parts.push(`身体状态：${currentLook.physicalState}`);
+          if (currentLook.physicalState) parts.push(`身体状态：${sanitizeCharacterLookDetail(currentLook.physicalState)}`);
           if (currentLook.transformationState) parts.push(`特殊形态：${currentLook.transformationState}`);
           if (currentLook.scene) parts.push(`适用场景：${currentLook.scene}`);
-          if (currentLook.stage) parts.push(`剧情阶段：${currentLook.stage}`);
+          if (currentLook.stage) parts.push(`剧情阶段：${sanitizeCharacterLookDetail(currentLook.stage)}`);
           if (currentLook.episodeNumbers?.length) parts.push(`关联集数：${currentLook.episodeNumbers.join('、')}`);
           if (currentLook.sceneNames?.length) parts.push(`关联场景：${currentLook.sceneNames.join('、')}`);
           if (currentLook.costume) parts.push(`服装：${currentLook.costume}`);
@@ -1127,26 +1383,33 @@ function buildPrompt(type: string, data: any, lookId?: string, imageVariant?: st
           if (currentLook.accessories?.length) parts.push(`配饰：${currentLook.accessories.join('、')}`);
           if (currentLook.makeup) parts.push(`化妆：${currentLook.makeup}`);
           if (currentLook.mood) parts.push(`情绪：${currentLook.mood}`);
-          if (currentLook.bodyChanges) parts.push(`本造型身体变化：${currentLook.bodyChanges}`);
+          if (currentLook.bodyChanges) parts.push(`本造型身体变化：${sanitizeCharacterLookDetail(currentLook.bodyChanges)}`);
         }
       };
 
       if (imageVariant === 'character-four-view') {
-        parts.push(`严格按照参考图像，制作一张专业的角色概念设计图。使用干净、纯白背景，以技术模型转场的形式呈现，同时确保与参考图像的视觉风格完全匹配（相同的${characterCreationType === '仿真人' || !characterCreationType ? '写实程度' : '风格化程度'}、渲染方法、纹理、色彩处理和整体美感）。`);
+        parts.push(`严格按照输入参考图像，制作一张专业的角色概念设计图。使用干净、纯白背景，以技术模型转场的形式呈现，同时确保与参考图像的视觉风格完全匹配（相同的${characterCreationType === '仿真人' || !characterCreationType ? '写实程度' : '风格化程度'}、渲染方法、纹理、色彩处理和整体美感）。`);
+        parts.push('【双参考规则】参考图1是已确认的正脸身份基准图，只用于锁定脸型、五官、肤色、年龄感和核心身份；参考图2是当前造型/状态图，只用于锁定服装、发型、体态、身体状态、受伤/变身/年龄阶段等剧情状态。');
+        parts.push('【冲突处理】如果两张参考图有冲突：人脸身份永远以参考图1为准；服装、身体状态、年龄阶段和姿态细节永远以参考图2为准。不要把参考图2里可能出现的其他人脸当作目标身份。');
         parts.push(isAnimalCreature
           ? '将构图安排为4列：左1为动物头部正面特写；左2为完整身体正面视图；左3为完整身体左侧视图；左4为完整身体背面视图。四足角色必须始终保持自然、放松的四足站姿。'
           : '将构图安排为4列排列：左1为一张高度精细的特写肖像：正面脸部肖像；左2为全身站立的正面视图；左3为全身站立的侧面视图（面向左侧）；左4为全身站立的背面视图。');
         parts.push(isAnimalCreature
           ? '确保四个面板是同一只动物角色，物种、头骨、吻部、耳形、眼睛、牙齿、皮毛花纹、爪、尾巴和身体比例完全一致；各视图尺寸与地面线对齐，动物解剖准确，轮廓清楚。'
           : '确保每个面板上的身份保持一致。让角色保持放松的A型站姿，各视图之间保持一致的尺寸和对齐，确保解剖准确，轮廓清晰；确保间距均匀，面板分离清晰，全身肖像系列采用统一的构图和一致的头高，各肖像之间的面部尺寸保持一致。');
+        parts.push(isAnimalCreature
+          ? '【单主体强约束】四个面板只能展示同一只目标动物角色，不要出现其他角色、陪同者、牵引者或第二个主体。'
+          : '【单人强约束】四个面板只能展示同一个目标人物，不要出现陪同者、搀扶者、路人、第二个人、多余脸或多余身体。');
         parts.push('所有面板的照明应保持一致（方向、强度和柔和度相同），阴影自然且受控，在不产生剧烈情绪变化的情况下保留细节。输出一张清晰、可打印的参考图，细节锐利。避免裁剪、重叠、杂乱背景和动态姿势。比例：16:9。');
-        parts.push('【一致性要求】必须严格参考输入图片的人脸，保持脸型、眼睛、鼻子、嘴巴、肤色、年龄感一致。');
+        parts.push('【一致性要求】必须严格参考图1的人脸身份，并严格参考图2的当前造型状态，保持同一人物/动物在该剧情状态下的四视图连续性。');
         parts.push(isAnimalCreature
           ? '【动物表面材质】皮毛、鳞片或兽类皮肤必须符合物种和创作类型，干净清晰并保留自然层次；不得出现人类皮肤或人类头发'
           : getCharacterSkinRequirement(creationBible));
         parts.push('【禁止】不要文字、字幕、水印、标签、编号，不要多人不同脸，不要裁切脚部。');
         appendCharacterIdentity(true);
         appendLookDetails();
+        parts.push(...getLeadCastingDirectives(data, resolvedCharacterGender, creationBible, true));
+        parts.push(...getLeadWardrobeDirectives(data, currentLook, resolvedCharacterGender, creationBible, true));
       } else {
         if (imageVariant === 'character-look') {
           const allowsAgeChange = ['年龄时期', '复合变化'].includes(currentLook?.changeType);
@@ -1156,6 +1419,9 @@ function buildPrompt(type: string, data: any, lookId?: string, imageVariant?: st
           parts.push(isAnimalCreature
             ? `【构图要求】完整动物全身与四肢、爪、尾巴全部可见，自然物种站姿，${getCharacterRenderPhrase(creationBible)}，纯白色背景，干净无杂物`
             : `【构图要求】全身站姿，从头到脚完整可见，${getCharacterRenderPhrase(creationBible)}，纯白色背景，干净无杂物`);
+          parts.push(isAnimalCreature
+            ? '【单主体强约束】画面里只允许出现当前目标动物角色一只；不要出现其他角色、陪同者、牵引者、路人或第二个主体'
+            : '【单人强约束】画面里只允许出现当前目标人物本人一人；即使剧情中有被搀扶、护送、陪同、对抗或围观，也只表现目标人物本人的受伤、撤离、紧张或疲惫状态，绝对不要画出第二个人');
           parts.push(isAnimalCreature
             ? '【身份一致性】头骨、吻部、耳形、眼睛、鼻头、牙齿、皮毛花纹、爪、尾巴和身体比例必须继承参考图，不能变成另一物种或人类'
             : '【身份一致性】脸型骨骼、眼睛形状与间距、鼻型、嘴型、基础肤色和核心辨识特征必须继承参考图，不能换成另一个人');
@@ -1176,6 +1442,8 @@ function buildPrompt(type: string, data: any, lookId?: string, imageVariant?: st
           parts.push(getCharacterNegativeRequirement(creationBible, true));
           appendCharacterIdentity(true);
           appendLookDetails();
+          parts.push(...getLeadCastingDirectives(data, resolvedCharacterGender, creationBible, true));
+          parts.push(...getLeadWardrobeDirectives(data, currentLook, resolvedCharacterGender, creationBible));
         } else {
           parts.push(isAnimalCreature
             ? '【核心要求】奇幻动物角色身份基准图。四足角色采用完整四足全身的侧前方三分之四视图，清楚呈现动物头部、吻部、耳朵、眼睛、皮毛、爪、尾巴与整体物种轮廓；不得生成人类头像'
@@ -1191,7 +1459,7 @@ function buildPrompt(type: string, data: any, lookId?: string, imageVariant?: st
           parts.push(getCharacterNegativeRequirement(creationBible));
           appendCharacterIdentity(false);
           if (isMainCharacter) {
-            parts.push('【主角光环】人物外貌出众，气质独特，具有主角气质');
+            parts.push(...getLeadCastingDirectives(data, resolvedCharacterGender, creationBible));
           }
         }
       }
@@ -1214,7 +1482,11 @@ function buildPrompt(type: string, data: any, lookId?: string, imageVariant?: st
       const currentPropState = Array.isArray(data.stateVariants) && data.stateVariants.length > 0
         ? data.stateVariants[0]
         : null;
-      parts.push('【核心要求】道具图片展示，纯白色背景，画面中无人物出现');
+      const visibleEffectProp = isVisibleEffectProp(data);
+      parts.push(visibleEffectProp
+        ? '【核心要求】可见特效/法术参考图，纯白色或透明感干净背景，只展示能量、烟雾、符文、法阵、火焰、闪电等可见效果本身'
+        : '【核心要求】道具图片展示，纯白色背景，只展示道具本体，画面中无人物出现');
+      parts.push('【绝对禁止人物】不要出现人物、人脸、眼睛、手、肩膀、脖颈、躯干、皮肤、身体部位、持有者、使用者、被威胁者、受伤者、陪同者或第二个主体');
       parts.push('【核心要求】画面中不能出现任何字幕、文字、水印、标题、说明文字');
       parts.push('【单状态制作】本次只生成一个道具实体的一种当前状态；禁止左右对照、前后对比、分栏、多宫格、设计稿排版，禁止同时展示完整与损坏两种状态');
       parts.push(...getPropQualityPrompt(creationBible));
@@ -1223,23 +1495,34 @@ function buildPrompt(type: string, data: any, lookId?: string, imageVariant?: st
       if (data.stateLabel || currentPropState?.stateName) {
         parts.push(`本次唯一状态：${data.stateLabel || currentPropState.stateName}`);
       }
-      if (data.description) parts.push(data.description);
+      const propDescription = sanitizePropVisualDetail(data.description);
+      const propVisualDescription = sanitizePropVisualDetail(data.visualDescription);
+      const propVisualChange = sanitizePropVisualDetail(data.stateVisualChange || currentPropState?.visualChange);
+      const propTransitionEvent = sanitizePropVisualDetail(data.stateTransitionEvent || currentPropState?.transitionEvent);
+      const propNarrativeFunction = sanitizePropVisualDetail(data.stateNarrativeFunction || currentPropState?.narrativeFunction);
+      if (propDescription) parts.push(propDescription);
       if (data.visualDescription && data.visualDescription !== data.description) {
-        parts.push(`当前状态视觉：${data.visualDescription}`);
+        parts.push(`当前状态视觉：${propVisualDescription}`);
       }
-      if (data.stateVisualChange || currentPropState?.visualChange) {
-        parts.push(`相对前一状态的唯一变化：${data.stateVisualChange || currentPropState.visualChange}`);
+      if (propVisualChange) {
+        parts.push(`相对前一状态的唯一变化：${propVisualChange}`);
       }
-      if (data.stateTransitionEvent || currentPropState?.transitionEvent) {
-        parts.push(`状态形成背景：${data.stateTransitionEvent || currentPropState.transitionEvent}；只呈现变化完成后的稳定结果，不表现同一场戏里的变化过程`);
+      if (propTransitionEvent) {
+        parts.push(`状态形成背景：${propTransitionEvent}；只呈现变化完成后的稳定结果，不表现同一场戏里的变化过程`);
       }
-      if (data.stateNarrativeFunction || currentPropState?.narrativeFunction) {
-        parts.push(`该状态的剧情识别重点：${data.stateNarrativeFunction || currentPropState.narrativeFunction}`);
+      if (propNarrativeFunction) {
+        parts.push(`该状态的剧情识别重点：${propNarrativeFunction}`);
       }
       if (data.referencePropName) {
         parts.push(`【图生图身份锁定】输入参考图是前一状态“${data.referencePropName}”。必须保留同一件道具的尺寸比例、主体结构、材质、颜色、稳定纹样与识别特征，只表现本次状态要求的变化`);
       } else {
         parts.push('【基准状态】这是该道具的首张身份基准图，完整建立稳定的形制、材质、颜色和识别特征，供后续状态图生图使用');
+      }
+      if (!visibleEffectProp && /刀|剑|枪|匕首|短刀|长刀|武器/.test(String(data.name || data.mainPropName || ''))) {
+        parts.push('【武器道具特别要求】武器必须单独平放、竖立或悬浮展示，不要画持武器的人，不要画被攻击的人，不要画脖子、肩膀、伤口或身体接触画面');
+      }
+      if (visibleEffectProp) {
+        parts.push('【特效道具特别要求】这是视觉效果素材参考，不是人物表演画面；不要画施法者或受术者，只画特效形态、颜色、透明度、边缘光、粒子和运动方向');
       }
       parts.push('【构图要求】单个道具居中完整展示，不裁切；若当前状态为破碎或散落，可展示属于同一件道具的必要碎片，但不得再放一件完整道具作比较');
       if (data.material) parts.push(`材质：${data.material}`);
@@ -1252,7 +1535,7 @@ function buildPrompt(type: string, data: any, lookId?: string, imageVariant?: st
         : '4K超高清，产品细节清晰可见，质感真实');
       if (propCreationType === '动漫') parts.push(TWO_D_ANIME_FINAL_LOCK);
       if (propCreationType === '3D') parts.push(STYLIZED_3D_ASSET_FINAL_LOCK);
-      parts.push('【再次强调】纯白色背景，无人无文字无字幕无水印');
+      parts.push('【再次强调】纯白色背景，无人、无人脸、无眼睛、无手、无肩膀、无脖颈、无躯干、无皮肤、无文字、无字幕、无水印');
       break;
 
     default:

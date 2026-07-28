@@ -111,17 +111,17 @@ export async function POST(request: NextRequest) {
     // 初始化 LLM 客户端
 
     // 第一批或没有道具标记时：识别所有道具名称
-    let allPropMarkers: string[] = Array.isArray(propMarkers) ? propMarkers : [];
-    let allPropInventory: PropInventoryItem[] = normalizePropInventory(propInventory);
+    let allPropMarkers: string[] = filterValidPropNames(Array.isArray(propMarkers) ? propMarkers : []);
+    let allPropInventory: PropInventoryItem[] = filterValidPropInventory(normalizePropInventory(propInventory));
     
     if (batch <= 1 || !propMarkers || propMarkers.length === 0) {
       // 先让大模型通读全文，建立完整物品实体表，再按实体表分批补详情。
-      allPropInventory = await identifyPropInventory(content, fileName, creationBible);
-      allPropMarkers = allPropInventory.map(item => item.name);
+      allPropInventory = filterValidPropInventory(await identifyPropInventory(content, fileName, creationBible));
+      allPropMarkers = filterValidPropNames(allPropInventory.map(item => item.name));
       console.log(`识别到 ${allPropMarkers.length} 个主道具:`, allPropMarkers);
     } else if (allPropInventory.length === 0) {
       // 兼容旧的批次缓存：只有名称时仍可继续提取。
-      allPropInventory = allPropMarkers.map((name, index) => createMinimalPropInventoryItem(name, index));
+      allPropInventory = filterValidPropInventory(allPropMarkers.map((name, index) => createMinimalPropInventoryItem(name, index)));
     }
 
     if (allPropMarkers.length === 0) {
@@ -211,6 +211,38 @@ function normalizeEpisodeNumbers(value: unknown): number[] {
   )).sort((a, b) => a - b);
 }
 
+const NON_PROP_BODY_PART_PATTERN = /(眼尾|眼角|眼眶|眼睛|眼球|眼泪|泪水|泪痕|嘴角|嘴唇|脸颊|面颊|脸部|面部|额头|头发|发丝|肩膀|肩头|肩胛|脖颈|脖子|颈侧|喉结|胸口|后背|腰背|手臂|手腕|手掌|手指|膝盖|脚踝|皮肤|旧伤|伤口|伤疤|血痕|淤青|伤势)/;
+const NON_PROP_ATMOSPHERE_PATTERN = /(血腥味|铁锈味|气味|味道|异味|香味|臭味|腥味|氛围|气氛|压迫感|寒意|恐惧感|悲伤感|紧张感|杀气|怒意|眼神|表情|情绪|状态)$/;
+const PROP_OBJECT_HINT_PATTERN = /(刀|剑|枪|棍|棒|针|锤|斧|衣|衫|裙|裤|鞋|帽|袜|手套|披风|外套|制服|礼服|盔甲|甲|面具|眼镜|戒指|项链|耳环|玉佩|饰品|包|箱|盒|瓶|杯|碗|盘|锅|纸|单|票|证|书|本|信|照片|相框|手机|电脑|钥匙|车|门|窗|灯|桌|椅|床|柜|镜|绳|链|药|符|印|旗|牌|令|珠|石|晶|卷轴|法杖|阵盘|法器|护符|血袋|绷带)/;
+const VISIBLE_EFFECT_PATTERN = /(法术|法阵|阵法|符文|灵力|魔法|能量|光效|特效|烟雾|雾气|火焰|闪电|雷电|冰霜|结界|护盾|血雾|黑雾|光环|气刃|剑气)/;
+
+function isInvalidPropCandidateName(rawName: unknown): boolean {
+  if (typeof rawName !== 'string') return true;
+  const name = getMainPropName(rawName).replace(/\s+/g, '').trim();
+  if (!name) return true;
+  if (VISIBLE_EFFECT_PATTERN.test(name)) return false;
+  if (NON_PROP_ATMOSPHERE_PATTERN.test(name)) return true;
+  if (NON_PROP_BODY_PART_PATTERN.test(name) && !PROP_OBJECT_HINT_PATTERN.test(name)) return true;
+  return false;
+}
+
+function filterValidPropInventory(items: PropInventoryItem[]): PropInventoryItem[] {
+  return items.filter(item => !isInvalidPropCandidateName(item.name));
+}
+
+function filterValidPropNames(names: string[]): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const name of names) {
+    if (isInvalidPropCandidateName(name)) continue;
+    const key = normalizePropNameForIdentity(name);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    result.push(name);
+  }
+  return result;
+}
+
 function createMinimalPropInventoryItem(name: string, index: number): PropInventoryItem {
   return {
     name: getMainPropName(name),
@@ -241,6 +273,7 @@ function normalizePropInventory(value: unknown): PropInventoryItem[] {
     if (typeof rawName !== 'string') return;
     const name = getMainPropName(rawName);
     if (!name || name.length > 60) return;
+    if (isInvalidPropCandidateName(name)) return;
     const statesSource = Array.isArray(raw.states)
       ? raw.states
       : Array.isArray(raw.stateVariants)
@@ -324,7 +357,7 @@ function normalizePropInventory(value: unknown): PropInventoryItem[] {
       evidence: normalizeStringList(raw.evidence, 12).map(item => item.slice(0, 240)),
     });
   });
-  return mergePropInventoryItems(normalized);
+  return filterValidPropInventory(mergePropInventoryItems(normalized));
 }
 
 function mergePropOccurrences(occurrences: PropOccurrence[]): PropOccurrence[] {
@@ -483,18 +516,21 @@ function buildPropInventoryPrompt(creationBible?: CreationBible): string {
 ${buildCreationBibleInstruction(creationBible)}
 
 【道具判定标准】
-1. 除人物、动物和场景地点本身之外，剧情中提到的一切具体物品都属于道具，不能只提关键道具，也不能以“是否值得单独生图”作为筛选条件。
+1. 除人物、动物和场景地点本身之外，剧情中提到的一切“可独立制作成素材图的具体物品”都属于道具，不能只提关键道具，也不能以“是否重要”作为筛选条件。
 2. 必须覆盖人物手持、携带、穿戴、使用、交换、赠送、丢弃、损坏的物品；家具、家电、灯具、门窗部件、交通工具、电子设备、文件票据、书籍、证件、药品、食物饮料、容器包装、工具武器、首饰配件、服装鞋帽、玩具、清洁用品、办公用品、陈设摆件、临时消耗品和背景中被明确提到的物件。
-3. 只排除人物/动物、纯地点或房间名称、抽象概念、情绪、动作、关系、光线、天气和纯声音。被剧情明确提到的固定物件仍要提取，例如门、窗、灯、桌椅、床、镜子、招牌。
-4. 同一个物理物品的别名、简称、代称必须合并。比如“母亲留下的玉佩 / 玉佩 / 碎玉佩”是同一个实体。
-5. 同类但属于不同人物或承担不同剧情身份的物品不能误合并。例如“沈念的手机”和“顾延之的手机”应分别记录；名称中加入归属人或稳定识别特征。
-6. 同一个物品的完整、破碎、损坏、染血、烧毁、修复、打开、关闭、空、装满、十年前、十年后等视觉变化必须归入同一条记录的 states，按剧情首次出现顺序排列，不能误当成两个物理道具。
-7. states 中的每个状态都是后续独立制作的一张图，必须分别填写自己的 episodeNumbers 和 occurrences。只有变化后的状态持续到另一个独立场次，并在该场次承担新的线索、冲突、证据、结果或人物行动作用，才可新增状态。
-8. 同一场戏内部发生的拿起、放下、打开、关闭、使用、摔碎、燃烧、装满、倒空等连续动作，不单列静态状态图，这些交给视频模型表现。除非变化后的结果在后续另一个场次再次出现并推动剧情。
-9. 每个后续状态必须填写 transitionEvent、narrativeFunction 和 evidence，明确“怎样变成该状态”“该状态在哪个后续场次发挥什么不同作用”“原文依据是什么”；缺少跨场次剧情作用时不得新增。
-10. “泛黄的退货单”“磨损的旧皮箱”等从首次到最后都不变的固有外观，只是一个基准状态，不得再凭形容词虚构“完整状态 + 旧化状态”。同一状态在多集出现时合并到该状态的 episodeNumbers/occurrences。
-11. 必须从开头读到结尾后再输出；不限制数量，长剧本出现 100 至 300 个物品是正常情况。宁可多提取，不可漏掉普通小物件。
-12. 创作圣经用于规范 type、visualSummary 和状态视觉表达，但不得改写或凭空增加剧情物品、状态或集数。
+3. 必须排除人物/动物、人体部位、人物状态、伤势、表情、眼神、情绪、动作、关系、纯地点或房间名称、抽象概念、光线、天气、纯声音、气味和氛围。比如“眼尾、肩膀、脖颈、旧伤、伤口、血腥味、铁锈味、压迫感、悲伤感”都不是道具。
+4. “某人的身体部位/伤势/表情/眼神/气味”不得当道具提取；只有真实可独立存在的物件才可提取，例如“沈屹的旧外套、苏念的手机、带血短刀、退货单、相框”。
+5. 剧本中明确出现的可见法术、能量、法阵、符文、烟雾、火焰、闪电、血雾等视觉特效，可以作为“特效道具”提取；但只是“味道、气氛、压迫感、杀气”等不可见感受不得提取。
+6. 被剧情明确提到的固定物件仍要提取，例如门、窗、灯、桌椅、床、镜子、招牌。
+7. 同一个物理物品的别名、简称、代称必须合并。比如“母亲留下的玉佩 / 玉佩 / 碎玉佩”是同一个实体。
+8. 同类但属于不同人物或承担不同剧情身份的物品不能误合并。例如“沈念的手机”和“顾延之的手机”应分别记录；名称中加入归属人或稳定识别特征。
+9. 同一个物品的完整、破碎、损坏、染血、烧毁、修复、打开、关闭、空、装满、十年前、十年后等视觉变化必须归入同一条记录的 states，按剧情首次出现顺序排列，不能误当成两个物理道具。
+10. states 中的每个状态都是后续独立制作的一张图，必须分别填写自己的 episodeNumbers 和 occurrences。只有变化后的状态持续到另一个独立场次，并在该场次承担新的线索、冲突、证据、结果或人物行动作用，才可新增状态。
+11. 同一场戏内部发生的拿起、放下、打开、关闭、使用、摔碎、燃烧、装满、倒空等连续动作，不单列静态状态图，这些交给视频模型表现。除非变化后的结果在后续另一个场次再次出现并推动剧情。
+12. 每个后续状态必须填写 transitionEvent、narrativeFunction 和 evidence，明确“怎样变成该状态”“该状态在哪个后续场次发挥什么不同作用”“原文依据是什么”；缺少跨场次剧情作用时不得新增。
+13. “泛黄的退货单”“磨损的旧皮箱”等从首次到最后都不变的固有外观，只是一个基准状态，不得再凭形容词虚构“完整状态 + 旧化状态”。同一状态在多集出现时合并到该状态的 episodeNumbers/occurrences。
+14. 必须从开头读到结尾后再输出；不限制数量，长剧本出现 100 至 300 个物品是正常情况。宁可多提取，不可漏掉普通小物件。
+15. 创作圣经用于规范 type、visualSummary 和状态视觉表达，但不得改写或凭空增加剧情物品、状态或集数。
 
 输出严格 JSON：
 {
@@ -612,7 +648,7 @@ async function identifyPropInventory(
   const taggedInventory = taggedProps.map((name, index) => (
     createMinimalPropInventoryItem(name, modelInventory.length + index)
   ));
-  const merged = mergePropInventoryItems([...modelInventory, ...taggedInventory]);
+  const merged = filterValidPropInventory(mergePropInventoryItems([...modelInventory, ...taggedInventory]));
   console.log(`道具全文盘点: 模型 ${modelInventory.length} 个，本地标记 ${taggedProps.length} 个，合并后 ${merged.length} 个`);
   return merged;
 }
@@ -667,7 +703,7 @@ function extractTaggedNames(content: string, tagName: string): string[] {
     }
   }
 
-  return names;
+  return filterValidPropNames(names);
 }
 
 function normalizePropNameForIdentity(rawName: unknown): string {
@@ -1116,6 +1152,8 @@ ${buildCreationBibleInstruction(creationBible)}
 13. 同一主道具不要拆成多个物理实体；不同状态只写入 stateVariants。比如“完整玉佩”和“破碎玉佩”都属于 mainPropName: "玉佩"
 14. “全文盘点记录”来自大模型通读完整剧本后的实体表，必须保留其中的别名、普通物品、出现集数和有证据的状态，不得因为当前原文片段较短而删减
 15. 即使物品只是被提及、摆放、穿戴、食用或作为背景陈设，也必须生成详情；importance 可标记为普通道具或背景道具，但不能删除
+16. 如果输入中误含人物身体部位、伤势、表情、眼神、情绪、气味或氛围词，例如“眼尾、肩膀、脖颈、旧伤、伤口、血腥味、铁锈味、压迫感”，必须从输出中剔除，不能包装成道具。
+17. 可见法术/特效可以作为“特效道具”，但 visualDescription 必须描述可见效果本身，例如能量形态、符文、法阵、烟雾、火焰、闪电、光色和运动轨迹；不得把施法者、受伤者或人体部位画进道具素材。
 
 每个道具包含：
 - id: 序号
@@ -1347,17 +1385,19 @@ async function extractPropsTraditional(
   const systemPrompt = `你是一个专业的影视道具设计师。你的任务是：
 ${buildCreationBibleInstruction(creationBible)}
 
-1. 完整通读给定文本，提取人物和场景地点之外被提到的一切具体物品，不以重要性或是否需要单独生图作为筛选条件
+1. 完整通读给定文本，提取人物和场景地点之外被提到的一切可独立制作成素材图的具体物品，不以重要性作为筛选条件
 2. 每个道具需要包含：名称、类型、描述、重要程度、出现场景
 3. 识别道具的属性（人物道具/场景道具/特效道具）
 4. 分析道具对剧情的作用
 5. 同一道具的完整、破碎、损坏、沾血、烧毁、修复等变化归入同一个 mainPropName，但只有变化结果持续到另一个场次并产生新的剧情推动作用时，才在 stateVariants 中独立记录
 6. 同一场戏内的拿起、放下、打开、关闭、使用、摔碎等连续动作交给视频模型，不单列静态状态图；变化后的状态若在后续场次作为新线索、冲突、证据或结果出现，才单列
-7. stateVariants 第一个状态用于文生图建立基准图，后续状态应基于前一状态图生图延展；禁止把两个状态画在一张对照图里
-8. 固有外观不是状态变化：“泛黄的退货单”若首次出现时已泛黄，且后续未发生变化，就只保留一个“泛黄状态”，不得额外虚构损坏状态
-9. 每个状态必须输出 episodeNumbers、occurrences、transitionEvent、narrativeFunction、evidence；无独立场次、不同剧情作用和原文证据，不得增加该状态
-10. 家具家电、服装鞋帽、食物饮料、文件票据、电子设备、工具、容器、交通工具、背景陈设和普通生活小物件都必须提取
-11. 同类但归属不同人物的物品分别记录；同一物品的别名和状态必须合并
+7. 排除人体部位、人物状态、伤势、表情、眼神、情绪、气味和氛围，例如“眼尾、肩膀、脖颈、旧伤、伤口、血腥味、铁锈味、压迫感”不是道具
+8. 剧本里可见的法术、法阵、符文、能量、烟雾、火焰、闪电等可作为“特效道具”；只是不可见的味道或气氛不得作为道具
+9. stateVariants 第一个状态用于文生图建立基准图，后续状态应基于前一状态图生图延展；禁止把两个状态画在一张对照图里
+10. 固有外观不是状态变化：“泛黄的退货单”若首次出现时已泛黄，且后续未发生变化，就只保留一个“泛黄状态”，不得额外虚构损坏状态
+11. 每个状态必须输出 episodeNumbers、occurrences、transitionEvent、narrativeFunction、evidence；无独立场次、不同剧情作用和原文证据，不得增加该状态
+12. 家具家电、服装鞋帽、食物饮料、文件票据、电子设备、工具、容器、交通工具、背景陈设和普通生活小物件都必须提取
+13. 同类但归属不同人物的物品分别记录；同一物品的别名和状态必须合并
 
 请以 JSON 格式返回结果，格式如下：
 {
@@ -1453,7 +1493,9 @@ ${buildCreationBibleInstruction(creationBible)}
   
   if (result) {
     if (result.props && Array.isArray(result.props)) {
-      const normalizedProps = result.props.map((prop: any, index: number) => {
+      const normalizedProps = result.props
+        .filter((prop: any) => !isInvalidPropCandidateName(prop?.name || prop?.propName || prop?.mainPropName))
+        .map((prop: any, index: number) => {
         const propName = prop?.name || prop?.propName || `道具${index + 1}`;
         const defaultDescription = prop?.description || `该道具"${propName}"的外观特点待补充。`;
         const occurrenceInfo = inferPropOccurrences(content, propName);

@@ -43,6 +43,9 @@ export type ManfeiTaskBilling = {
 
 const ASSET_STATUS_TIMEOUT_MS = 180_000;
 const ASSET_STATUS_POLL_MS = 2_000;
+const TOS_SIGNED_URL_EXPIRES = 7 * 24 * 60 * 60;
+const REMOTE_IMAGE_TIMEOUT_MS = 30_000;
+const MAX_REFERENCE_IMAGE_BYTES = 80 * 1024 * 1024;
 const inFlightAssets = new Map<string, Promise<string>>();
 let cacheWriteQueue = Promise.resolve();
 
@@ -128,13 +131,151 @@ function isPublicHttpUrl(url: string): boolean {
   }
 }
 
+function getTosClientAndBucket() {
+  const config = getAssetStorageConfigSync();
+  const bucket = config.accessPointAlias || config.bucketName;
+  if (
+    !config.endpointUrl ||
+    !bucket ||
+    !config.accessKeyId ||
+    !config.secretAccessKey
+  ) {
+    return null;
+  }
+
+  return {
+    config,
+    bucket,
+    client: new TosClient({
+      accessKeyId: config.accessKeyId,
+      accessKeySecret: config.secretAccessKey,
+      region: config.region || 'cn-beijing',
+      endpoint: normalizeTosEndpoint(config.endpointUrl),
+      bucket,
+    }),
+  };
+}
+
+function createSignedTosUrl(client: TosClient, key: string): string {
+  return client.getPreSignedUrl({
+    key,
+    method: 'GET',
+    expires: TOS_SIGNED_URL_EXPIRES,
+  });
+}
+
+function extractTosObjectKeyFromUrl(url: string): string | null {
+  const storage = getTosClientAndBucket();
+  if (!storage) return null;
+
+  try {
+    const parsed = new URL(url);
+    const hostname = parsed.hostname.toLowerCase();
+    const endpoint = normalizeTosEndpoint(storage.config.endpointUrl).toLowerCase();
+    const bucketHost = `${storage.bucket}.${endpoint}`.toLowerCase();
+    const bucketNameHost = storage.config.bucketName
+      ? `${storage.config.bucketName}.${endpoint}`.toLowerCase()
+      : '';
+    const aliasHost = storage.config.accessPointAlias
+      ? `${storage.config.accessPointAlias}.${endpoint}`.toLowerCase()
+      : '';
+
+    const isKnownTosHost = hostname === bucketHost ||
+      hostname === bucketNameHost ||
+      hostname === aliasHost ||
+      hostname.endsWith('.tos-cn-beijing.volces.com') ||
+      hostname.endsWith('.tos-cn-beijing.ivolces.com') ||
+      hostname.endsWith('.volces.com');
+
+    if (!isKnownTosHost) return null;
+    const key = parsed.pathname
+      .split('/')
+      .filter(Boolean)
+      .map(part => decodeURIComponent(part))
+      .join('/');
+    return key || null;
+  } catch {
+    return null;
+  }
+}
+
+function signTosUrlIfPossible(url: string): string | null {
+  const storage = getTosClientAndBucket();
+  const key = extractTosObjectKeyFromUrl(url);
+  if (!storage || !key) return null;
+  return createSignedTosUrl(storage.client, key);
+}
+
+async function fetchRemoteImage(url: string): Promise<{ buffer: Buffer; contentType: string }> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), REMOTE_IMAGE_TIMEOUT_MS);
+  try {
+    const response = await fetch(url, {
+      signal: controller.signal,
+      headers: {
+        'User-Agent': 'SYX-Workflow/1.0 image-asset-fetcher',
+        Accept: 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
+      },
+    });
+
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+
+    const contentType = response.headers.get('content-type')?.split(';')[0]?.trim() || 'image/png';
+    if (!contentType.startsWith('image/')) {
+      throw new Error(`返回内容不是图片：${contentType}`);
+    }
+
+    const contentLength = Number(response.headers.get('content-length') || 0);
+    if (contentLength > MAX_REFERENCE_IMAGE_BYTES) {
+      throw new Error(`图片过大：${Math.round(contentLength / 1024 / 1024)}MB`);
+    }
+
+    const buffer = Buffer.from(await response.arrayBuffer());
+    if (buffer.length === 0) {
+      throw new Error('图片内容为空');
+    }
+    if (buffer.length > MAX_REFERENCE_IMAGE_BYTES) {
+      throw new Error(`图片过大：${Math.round(buffer.length / 1024 / 1024)}MB`);
+    }
+
+    return { buffer, contentType };
+  } catch (error) {
+    const message = error instanceof Error && error.name === 'AbortError'
+      ? '下载超时'
+      : error instanceof Error
+        ? error.message
+        : String(error);
+    throw new Error(`服务器无法读取参考图：${message}`);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 async function loadImageSource(account: Pick<PublicAccount, 'id'>, url: string): Promise<{
   buffer?: Buffer;
   contentType?: string;
   publicUrl?: string;
 }> {
+  const localAsset = resolveLocalAssetPath(account, url);
+  if (localAsset) {
+    if (!fs.existsSync(localAsset.filePath)) {
+      throw new Error(`无法读取本地素材：${url}`);
+    }
+    return {
+      buffer: await fsp.readFile(localAsset.filePath),
+      contentType: localAsset.contentType,
+    };
+  }
+
+  const signedTosUrl = signTosUrlIfPossible(url);
+  if (signedTosUrl) {
+    return fetchRemoteImage(signedTosUrl);
+  }
+
   if (isPublicHttpUrl(url)) {
-    return { publicUrl: url };
+    return fetchRemoteImage(url);
   }
 
   if (url.startsWith('data:')) {
@@ -147,15 +288,7 @@ async function loadImageSource(account: Pick<PublicAccount, 'id'>, url: string):
     };
   }
 
-  const localAsset = resolveLocalAssetPath(account, url);
-  if (!localAsset || !fs.existsSync(localAsset.filePath)) {
-    throw new Error(`无法读取本地素材：${url}`);
-  }
-
-  return {
-    buffer: await fsp.readFile(localAsset.filePath),
-    contentType: localAsset.contentType,
-  };
+  throw new Error(`无法读取素材：${url}`);
 }
 
 function normalizeTosEndpoint(endpointUrl: string): string {
@@ -172,27 +305,14 @@ async function uploadToPublicStorage(
   contentType: string,
   hash: string,
 ): Promise<{ publicUrl: string; objectKey: string }> {
-  const config = getAssetStorageConfigSync();
-  const bucket = config.accessPointAlias || config.bucketName;
-  if (
-    !config.endpointUrl ||
-    !bucket ||
-    !config.accessKeyId ||
-    !config.secretAccessKey
-  ) {
+  const storage = getTosClientAndBucket();
+  if (!storage) {
     throw new Error('本地图片需要先上传到火山 TOS。素材存储未配置，请联系管理员');
   }
 
   const key = getAccountRemoteKey(account, `manfei-assets/${hash}${getFileExtension(contentType)}`);
-  const client = new TosClient({
-    accessKeyId: config.accessKeyId,
-    accessKeySecret: config.secretAccessKey,
-    region: config.region || 'cn-beijing',
-    endpoint: normalizeTosEndpoint(config.endpointUrl),
-    bucket,
-  });
 
-  await client.putObject({
+  await storage.client.putObject({
     key,
     body: buffer,
     contentType,
@@ -201,11 +321,7 @@ async function uploadToPublicStorage(
 
   return {
     objectKey: key,
-    publicUrl: client.getPreSignedUrl({
-      key,
-      method: 'GET',
-      expires: 6 * 60 * 60,
-    }),
+    publicUrl: createSignedTosUrl(storage.client, key),
   };
 }
 
@@ -225,6 +341,54 @@ async function manfeiFetch(pathname: string, init?: RequestInit): Promise<Respon
   });
 }
 
+function parseMaybeJsonObject(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) return null;
+  try {
+    const parsed = JSON.parse(trimmed);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function stringifyErrorPayload(value: unknown, maxLength = 800): string {
+  try {
+    if (!value || typeof value !== 'object') return String(value || '').slice(0, maxLength);
+    const record = value as Record<string, unknown>;
+    const detailRecord = parseMaybeJsonObject(record.detail);
+    const responseMetadata = (record.ResponseMetadata || detailRecord?.ResponseMetadata) as Record<string, unknown> | undefined;
+    const metadataError = responseMetadata?.Error as Record<string, unknown> | undefined;
+    const baseResp = (record.base_resp || detailRecord?.base_resp) as Record<string, unknown> | undefined;
+    const failedReason = (record.failedReason || detailRecord?.failedReason) as Record<string, unknown> | undefined;
+
+    const candidates = [
+      record.error,
+      record.message,
+      detailRecord ? undefined : record.detail,
+      record.errorMessage,
+      record.status_msg,
+      detailRecord?.error,
+      detailRecord?.message,
+      detailRecord?.errorMessage,
+      detailRecord?.status_msg,
+      baseResp?.status_msg,
+      failedReason?.message,
+      metadataError?.Message,
+      metadataError?.Code,
+    ].filter(Boolean).map(item => String(item));
+
+    const requestId = responseMetadata?.RequestId ? `RequestId=${responseMetadata.RequestId}` : '';
+    const compact = [...candidates, requestId].filter(Boolean).join('；');
+    return (compact || JSON.stringify(value)).slice(0, maxLength);
+  } catch {
+    return '无法解析上游错误详情';
+  }
+}
+
 async function waitForAssetActive(assetId: string): Promise<void> {
   const startedAt = Date.now();
 
@@ -232,7 +396,7 @@ async function waitForAssetActive(assetId: string): Promise<void> {
     const response = await manfeiFetch(`/v1/assets/${encodeURIComponent(assetId)}`);
     const body = await response.json().catch(() => ({}));
     if (!response.ok) {
-      throw new Error(`查询素材资产失败：HTTP ${response.status} ${JSON.stringify(body).slice(0, 300)}`);
+      throw new Error(`查询素材资产失败：HTTP ${response.status}，${stringifyErrorPayload(body, 300)}`);
     }
 
     const status = String(body.status || '').toLowerCase();
@@ -251,16 +415,23 @@ async function createAsset(publicUrl: string): Promise<string> {
   const response = await manfeiFetch('/v1/assets', {
     method: 'POST',
     body: JSON.stringify({
+      URL: publicUrl,
+      AssetType: 'Image',
       url: publicUrl,
       asset_type: 'Image',
     }),
   });
   const body = await response.json().catch(() => ({}));
   if (!response.ok) {
-    throw new Error(`创建素材资产失败：HTTP ${response.status} ${JSON.stringify(body).slice(0, 500)}`);
+    const details = stringifyErrorPayload(body);
+    const downloadFailed = /DownloadFailed|401|download media|fetch object/i.test(details);
+    const hint = downloadFailed
+      ? '火山方舟无法下载参考图，请重新生成或重新上传该图后重试'
+      : details;
+    throw new Error(`创建素材资产失败：HTTP ${response.status}，${hint}${hint === details ? '' : `（${details}）`}`);
   }
 
-  const assetId = body.asset_id || body.id || body.Result?.Id;
+  const assetId = body.asset_id || body.id || body.Id || body.Result?.Id;
   if (!assetId) throw new Error('创建素材资产成功，但接口未返回 asset_id');
   await waitForAssetActive(assetId);
   return assetId;
@@ -322,7 +493,12 @@ export async function prepareManfeiImageAssets(urls: string[], account: Pick<Pub
   const workers = Array.from({ length: Math.min(concurrency, uniqueUrls.length) }, async () => {
     while (cursor < uniqueUrls.length) {
       const index = cursor++;
-      results[index] = await prepareManfeiImageAsset(uniqueUrls[index], account);
+      try {
+        results[index] = await prepareManfeiImageAsset(uniqueUrls[index], account);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        throw new Error(`第 ${index + 1} 张参考图创建素材失败：${message}`);
+      }
     }
   });
 

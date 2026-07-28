@@ -89,6 +89,7 @@ import {
   type VoiceLibraryItem,
 } from '@/lib/character-voice';
 import { normalizeExecutionScriptText } from '@/lib/execution-script-format';
+import { splitExecutionScriptEpisodes } from '@/lib/execution-script-episodes';
 import { normalizeCharacterLooks, type CharacterLookChangeType } from '@/lib/character-look-utils';
 import {
   formatCharacterBodyProfile,
@@ -2378,6 +2379,10 @@ export default function StoryboardGenerator() {
   );
 
   const [selectedChapter, setSelectedChapter] = usePersistentState<Chapter | null>(STORAGE_KEYS.SELECTED_CHAPTER, null);
+  const [selectedProductionEpisodes, setSelectedProductionEpisodes] = usePersistentState<number[]>(
+    'storyboard_selected_production_episodes',
+    []
+  );
   const [storyboard, setStoryboard] = usePersistentState<Storyboard | null>(STORAGE_KEYS.STORYBOARD, null);
   const [imageStoryboards, setImageStoryboards] = usePersistentState<ImageStoryboard[]>(STORAGE_KEYS.IMAGE_STORYBOARDS, []);
   const [connectingPrompts, setConnectingPrompts] = usePersistentState<any>(STORAGE_KEYS.CONNECTING_PROMPTS, null);
@@ -2529,6 +2534,70 @@ export default function StoryboardGenerator() {
   const getExtractionSourceContent = useCallback(() => (
     hasCurrentExecutionScript() ? normalizedExecutionScript : ''
   ), [normalizedExecutionScript, hasCurrentExecutionScript]);
+
+  const outlineEpisodeNumbers = useMemo(() => (
+    (outline?.chapters || [])
+      .map(chapter => Number(chapter.chapterNumber))
+      .filter(number => Number.isFinite(number) && number > 0)
+  ), [outline?.chapters]);
+
+  useEffect(() => {
+    if (outlineEpisodeNumbers.length === 0) return;
+    setSelectedProductionEpisodes(previous => {
+      const valid = previous.filter(number => outlineEpisodeNumbers.includes(number));
+      if (valid.length > 0) return valid;
+      return outlineEpisodeNumbers;
+    });
+  }, [outlineEpisodeNumbers, setSelectedProductionEpisodes]);
+
+  const productionChapters = useMemo(() => {
+    const selected = new Set(selectedProductionEpisodes);
+    const chapters = outline?.chapters || [];
+    if (selected.size === 0) return chapters;
+    return chapters.filter(chapter => selected.has(chapter.chapterNumber));
+  }, [outline?.chapters, selectedProductionEpisodes]);
+
+  const getSelectedProductionContent = useCallback(() => {
+    const fullContent = getExtractionSourceContent();
+    if (!fullContent.trim()) return '';
+    const selected = Array.from(new Set(selectedProductionEpisodes))
+      .filter(number => Number.isFinite(number) && number > 0)
+      .sort((a, b) => a - b);
+    if (selected.length === 0) return '';
+
+    const selectedSet = new Set(selected);
+    const blocks = splitExecutionScriptEpisodes(fullContent);
+    const matchedBlocks = blocks.filter(block => (
+      block.number !== null && selectedSet.has(block.number)
+    ));
+    if (matchedBlocks.length === 0) {
+      const selectedChapterContents = (outline?.chapters || [])
+        .filter(chapter => selectedSet.has(chapter.chapterNumber))
+        .map(chapter => String(chapter.content || '').trim())
+        .filter(Boolean);
+      if (selectedChapterContents.length > 0) {
+        return selectedChapterContents.join('\n\n');
+      }
+
+      const selectedAllOutlineEpisodes = outlineEpisodeNumbers.length > 0
+        && selected.length === outlineEpisodeNumbers.length
+        && selected.every(number => outlineEpisodeNumbers.includes(number));
+      const isSingleEpisodeProject = (outline?.totalChapters || outlineEpisodeNumbers.length) === 1 && selected.includes(1);
+      if (selectedAllOutlineEpisodes || isSingleEpisodeProject || (blocks.length === 1 && blocks[0].number === null && selected.length === 1)) {
+        return fullContent;
+      }
+
+      return '';
+    }
+    return matchedBlocks.map(block => block.source).join('\n\n');
+  }, [getExtractionSourceContent, outline?.chapters, outline?.totalChapters, outlineEpisodeNumbers, selectedProductionEpisodes]);
+
+  const getProductionScopedContent = useCallback(() => {
+    if (selectedProductionEpisodes.length === 0) {
+      return getExtractionSourceContent();
+    }
+    return getSelectedProductionContent();
+  }, [getExtractionSourceContent, getSelectedProductionContent, selectedProductionEpisodes.length]);
 
   const hasConfirmedCreationBible = useCallback(() => (
     creationBible.confirmed &&
@@ -3578,6 +3647,7 @@ export default function StoryboardGenerator() {
     setVoiceLibrary([]);
     setPropsData(null);
     setOutline(null);
+    setSelectedProductionEpisodes([]);
     setSelectedChapter(null);
     setStoryboard(null);
     setImageStoryboards([]);
@@ -4299,7 +4369,10 @@ export default function StoryboardGenerator() {
     }
 
     setExtractionStatus(prev => ({ ...prev, [type]: 'loading' }));
-    const extractionContent = getExtractionSourceContent();
+    const fullExtractionContent = getExtractionSourceContent();
+    const extractionContent = type === 'outline'
+      ? fullExtractionContent
+      : getProductionScopedContent();
     if (!extractionContent) {
       setExtractionStatus(prev => ({ ...prev, [type]: 'pending' }));
       toast.error('执行剧本未就绪，请先重新拉取执行剧本再提取');
@@ -4309,6 +4382,8 @@ export default function StoryboardGenerator() {
     if (type === 'outline') {
       setOutlineBatchInfo(null);
       setOutline(null);
+      setSelectedProductionEpisodes([]);
+      resetProductionOutputsForEpisodeSelection();
       await extractOutlineBatch(extractionContent, getCurrentFileName(), 1, null, [], undefined, true);
       return;
     }
@@ -4463,7 +4538,7 @@ export default function StoryboardGenerator() {
       status: 'pending',
     });
 
-    const extractionContent = getExtractionSourceContent();
+    const extractionContent = getProductionScopedContent();
     if (!extractionContent) {
       toast.error('执行剧本未就绪，请先重新拉取执行剧本再提取');
       return;
@@ -4477,11 +4552,10 @@ export default function StoryboardGenerator() {
       characters: 'loading',
       voices: 'loading',
       props: 'loading',
-      outline: 'loading',
+      outline: effectiveExtractionStatus.outline,
     });
 
-    // 清空大纲批次信息和场景批次信息
-    setOutlineBatchInfo(null);
+    // 清空本次制作集数下的素材批次信息；大纲保留为用户选集依据
     setSceneBatchInfo(null);
     setCharacterBatchInfo(null);
     setPropBatchInfo(null);
@@ -4686,9 +4760,7 @@ export default function StoryboardGenerator() {
     } else {
       setExtractionStatus(prev => ({ ...prev, props: 'error' }));
     }
-
-    // 提取第一批大纲
-    await extractOutlineBatch(extractionContent, fileName, 1, null, []);
+    toast.success('已按所选集数重新提取素材信息');
   };
 
   // 提取大纲的一批章节
@@ -4861,7 +4933,7 @@ export default function StoryboardGenerator() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          content: getExtractionSourceContent(),
+          content: getProductionScopedContent(),
           fileName: getCurrentFileName(),
           batch: nextBatch,
           sceneMarkers: batchState.sceneMarkers,
@@ -4938,7 +5010,7 @@ export default function StoryboardGenerator() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          content: getExtractionSourceContent(),
+          content: getProductionScopedContent(),
           fileName: getCurrentFileName(),
           batch: nextBatch,
           characterMarkers: batchState.characterMarkers,
@@ -5015,7 +5087,7 @@ export default function StoryboardGenerator() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          content: getExtractionSourceContent(),
+          content: getProductionScopedContent(),
           fileName: getCurrentFileName(),
           batch: nextBatch,
           propMarkers: batchState.propMarkers,
@@ -5141,7 +5213,7 @@ export default function StoryboardGenerator() {
       if (manual) toast.error('请先完成人物、场景和道具提取');
       return;
     }
-    const reviewContent = getExtractionSourceContent();
+    const reviewContent = getProductionScopedContent();
     if (!reviewContent) {
       toast.error('执行剧本未就绪，已停止质量核验；请先重新拉取执行剧本');
       return;
@@ -5296,7 +5368,7 @@ export default function StoryboardGenerator() {
     charactersData,
     propsData,
     getCreationBiblePayload,
-    getExtractionSourceContent,
+    getProductionScopedContent,
     requireLoginBeforePaidAction,
     migrateReviewedAssetAliases,
     setScenesData,
@@ -5398,7 +5470,8 @@ export default function StoryboardGenerator() {
   const extractAllParallel = async (
     content: string,
     fileName: string,
-    bible: CreationBiblePayload = getCreationBiblePayload()
+    bible: CreationBiblePayload = getCreationBiblePayload(),
+    options: { includeOutline?: boolean } = {}
   ) => {
     if (!(await requireLoginBeforePaidAction())) return;
     extractionReviewRequestedRef.current = true;
@@ -5407,10 +5480,13 @@ export default function StoryboardGenerator() {
       status: 'pending',
     });
     const creationBiblePayload = bible;
+    const includeOutline = options.includeOutline ?? true;
 
     setCurrentStep(1);
     setProgress(20);
-    toast.info('正在并行提取场景、人物、人物音色、道具和大纲，较长剧本可能需要几分钟...');
+    toast.info(includeOutline
+      ? '正在并行提取场景、人物、人物音色、道具和大纲，较长剧本可能需要几分钟...'
+      : '正在按选定集数提取场景、人物、人物音色和道具...');
 
     // 初始化状态
     setExtractionStatus({
@@ -5418,11 +5494,11 @@ export default function StoryboardGenerator() {
       characters: 'loading',
       voices: 'loading',
       props: 'loading',
-      outline: 'loading',
+      outline: includeOutline ? 'loading' : effectiveExtractionStatus.outline,
     });
 
     // 清空大纲批次信息
-    setOutlineBatchInfo(null);
+    if (includeOutline) setOutlineBatchInfo(null);
     setSceneBatchInfo(null);
     setCharacterBatchInfo(null);
     setPropBatchInfo(null);
@@ -5630,7 +5706,7 @@ export default function StoryboardGenerator() {
       runCharactersExtraction(),
       runVoicesExtraction(),
       runPropsExtraction(),
-      extractOutlineBatch(content, fileName, 1, null, []),
+      ...(includeOutline ? [extractOutlineBatch(content, fileName, 1, null, [])] : []),
     ]);
   };
 
@@ -6503,9 +6579,9 @@ export default function StoryboardGenerator() {
 
   const getPromptGroupReferenceSelection = (cs: ChapterStoryboard, pg: PromptGroup) => {
     const groupShots = getPromptGroupShots(cs, pg);
-    const storyboardPrompt = pg.storyboardPromptText || pg.combinedPrompt || '';
+    const promptModuleText = pg.combinedPrompt || '';
     const entitySearchText = [
-      storyboardPrompt,
+      promptModuleText,
       ...groupShots.flatMap(shot => [
         shot.description || '',
         shot.actionAndDialogue || '',
@@ -6547,6 +6623,32 @@ export default function StoryboardGenerator() {
     ].filter(Boolean).join('\n\n');
   };
 
+  const buildVideoFilmToneInstruction = () => {
+    const styles = globalImageSettings.styles?.length
+      ? globalImageSettings.styles.join('、')
+      : '';
+    const lighting = globalImageSettings.lighting?.length
+      ? globalImageSettings.lighting.join('、')
+      : '';
+    const effectiveRatio = getEffectiveVideoRatio();
+    const ratioOptions = globalImageSettings.ratios?.length
+      ? Array.from(new Set([effectiveRatio, ...globalImageSettings.ratios])).join('、')
+      : effectiveRatio;
+    const toneLines = [
+      `当前视频画面比例：${effectiveRatio}`,
+      `提示词模块画面比例设置：${ratioOptions}`,
+      styles ? `画面风格：${styles}` : '',
+      lighting ? `光影效果：${lighting}` : '',
+    ].filter(Boolean);
+
+    if (toneLines.length === 0) return '';
+    return [
+      '【全片统一影片基调】',
+      ...toneLines,
+      '以上基调必须贯穿本组视频：角色、场景、道具、色彩、材质、镜头质感和光影氛围保持一致；不得因为参考图或单镜头描述而偏离用户在提示词模块选择的风格与光影。',
+    ].join('\n');
+  };
+
   const buildPromptGroupVideoPrompt = (
     cs: ChapterStoryboard,
     pg: PromptGroup,
@@ -6560,7 +6662,7 @@ export default function StoryboardGenerator() {
       voiceLibrary,
     );
     const groupDuration = getPromptGroupDurationSeconds(cs, pg);
-    const storyboardPrompt = pg.storyboardPromptText || pg.combinedPrompt || '';
+    const promptModulePrompt = pg.combinedPrompt || '';
     const shotLines = groupShots.map(shot => {
       const characterText = (shot.characters || []).map(char => {
         return [char.name, char.position, char.action, char.expression].filter(Boolean).join('/');
@@ -6575,9 +6677,10 @@ export default function StoryboardGenerator() {
     return [
       `请生成第${cs.chapterNumber}集第${pg.groupIndex}组连续视频，本组${pg.shotNumbers.length}个连续镜头的实际总时长为${formatStoryboardDurationSeconds(groupDuration)}秒，成片时长按本组实际总时长执行。`,
       buildVideoReferenceManifest(referenceSelection),
-      `核心参考：优先严格参考本组故事版总控图的角色形象、场景空间、人物站位、镜头顺序和画面构图。`,
+      `核心参考：本组故事版总控图只作为画面构图、人物站位和空间关系参考；视频的文字描述必须以提示词模块中的本组提示词为准。`,
       `本次会提供${referenceSelection.images.length}张参考图。提示词中出现的全部人物、场景、道具都必须参与对应镜头，不能因为没有独立参考图而遗漏。`,
-      `【本组故事版提示词】\n${storyboardPrompt}`,
+      buildVideoFilmToneInstruction(),
+      `【提示词模块-本组视频提示词】\n${promptModulePrompt}`,
       `【本组镜头内容】\n${shotLines}`,
       voiceResolution.instruction,
       `要求：画面连续、动作自然、人物表情和肢体动作要有变化；保持原剧情，台词必须与文字分镜/原剧本逐字一致，不出现字幕、水印、乱码文字，不新增无关人物。`,
@@ -6610,6 +6713,7 @@ export default function StoryboardGenerator() {
     return {
       prompt: [
         buildVideoReferenceManifest(referenceSelection),
+        buildVideoFilmToneInstruction(),
         `【镜头生成提示词】\n${promptText}`,
         voiceResolution.instruction,
         '提示词中出现的全部人物、场景、道具都必须参与画面，严格对应参考图，不得遗漏或自行替换。',
@@ -6749,31 +6853,44 @@ export default function StoryboardGenerator() {
         outlineBatchInfo?.allChapters?.length || 0
       );
       const isOutlineComplete = expectedChapters === 0 || extractedChapters >= expectedChapters;
-      const isExtractionComplete =
+
+      if (!isOutlineComplete && fileContent) {
+        if (!(await requireLoginBeforePaidAction())) return;
+        setExtractionStatus(prev => ({ ...prev, outline: 'loading' }));
+        toast.info(`大纲还没提取完：${extractedChapters}/${expectedChapters} 章，正在继续补齐...`);
+        void extractOutlineBatch(
+          getExtractionSourceContent(),
+          getCurrentFileName(),
+          outlineBatchInfo?.hasMore ? outlineBatchInfo.currentBatch + 1 : 1,
+          outlineBatchInfo?.basicInfo || null,
+          outlineBatchInfo?.hasMore ? (outlineBatchInfo.allChapters || outline?.chapters || []) : [],
+          outlineBatchInfo?.episodeMarkers,
+          true
+        );
+        return;
+      }
+
+      if (selectedProductionEpisodes.length === 0) {
+        toast.error('请先在大纲里选择要制作的集数');
+        return;
+      }
+
+      const isAssetExtractionComplete =
         effectiveExtractionStatus.scenes === 'success' &&
         effectiveExtractionStatus.characters === 'success' &&
         effectiveExtractionStatus.voices === 'success' &&
-        effectiveExtractionStatus.props === 'success' &&
-        effectiveExtractionStatus.outline === 'success' &&
-        isOutlineComplete;
+        effectiveExtractionStatus.props === 'success';
 
-      if (!isExtractionComplete) {
-        if (!isOutlineComplete && fileContent) {
-          if (!(await requireLoginBeforePaidAction())) return;
-          setExtractionStatus(prev => ({ ...prev, outline: 'loading' }));
-          toast.info(`大纲还没提取完：${extractedChapters}/${expectedChapters} 章，正在继续补齐...`);
-          void extractOutlineBatch(
-            getExtractionSourceContent(),
-            getCurrentFileName(),
-            outlineBatchInfo?.hasMore ? outlineBatchInfo.currentBatch + 1 : 1,
-            outlineBatchInfo?.basicInfo || null,
-            outlineBatchInfo?.hasMore ? (outlineBatchInfo.allChapters || outline?.chapters || []) : [],
-            outlineBatchInfo?.episodeMarkers,
-            true
-          );
-        } else {
-          toast.info('提取结果还没全部完成，请稍等');
+      if (!isAssetExtractionComplete) {
+        const selectedContent = getSelectedProductionContent();
+        if (!selectedContent.trim()) {
+          toast.error('无法从执行剧本中匹配到选中的集数，请检查执行剧本分集标题');
+          return;
         }
+        if (!(await requireLoginBeforePaidAction())) return;
+        resetProductionOutputsForEpisodeSelection();
+        toast.info(`已选择 ${selectedProductionEpisodes.length} 集，开始只拆解这些集数的人物、场景、道具和音色`);
+        await extractAllParallel(selectedContent, getCurrentFileName(), getCreationBiblePayload(), { includeOutline: false });
         return;
       }
     }
@@ -6874,6 +6991,11 @@ export default function StoryboardGenerator() {
         setExtractionReview(INITIAL_EXTRACTION_REVIEW);
         extractionReviewRequestedRef.current = false;
         setOutline(null);
+        setSelectedProductionEpisodes([]);
+        setOutlineBatchInfo(null);
+        setSceneBatchInfo(null);
+        setCharacterBatchInfo(null);
+        setPropBatchInfo(null);
         setSelectedChapter(null);
         setStoryboard(null);
         setImageStoryboards([]);
@@ -6911,7 +7033,14 @@ export default function StoryboardGenerator() {
         toast.info('已撤回，将重新提取内容');
         if (fileContent) {
           if (hasConfirmedCreationBible()) {
-            extractAllParallel(getExtractionSourceContent(), getCurrentFileName(), getCreationBiblePayload());
+            setExtractionStatus({
+              scenes: 'pending',
+              characters: 'pending',
+              voices: 'pending',
+              props: 'pending',
+              outline: 'loading',
+            });
+            void extractOutlineBatch(getExtractionSourceContent(), getCurrentFileName(), 1, null, []);
           } else {
             toast.info('请先确认创作圣经后再重新提取内容');
           }
@@ -7031,6 +7160,7 @@ export default function StoryboardGenerator() {
         setCharactersData(null);
         setPropsData(null);
         setOutline(null);
+        setSelectedProductionEpisodes([]);
         setOutlineBatchInfo(null);
         setSceneBatchInfo(null);
         setCharacterBatchInfo(null);
@@ -7487,7 +7617,8 @@ export default function StoryboardGenerator() {
 
   // 一键生成所有章节的文字分镜（每4集一批，分批生成）
   const generateAllStoryboards = async () => {
-    if (!outline?.chapters || outline.chapters.length === 0) {
+    const chapters = productionChapters;
+    if (chapters.length === 0) {
       toast.error('没有分集可生成分镜');
       return;
     }
@@ -7495,7 +7626,6 @@ export default function StoryboardGenerator() {
 
     storyboardBatchCancelledRef.current = false;
 
-    const chapters = outline.chapters;
     const BATCH_SIZE = batchInfo.batchSize || 4;
     const totalBatches = Math.ceil(chapters.length / BATCH_SIZE);
     const isSuccessfulStoryboard = (cs?: ChapterStoryboard) => {
@@ -8144,6 +8274,7 @@ export default function StoryboardGenerator() {
         }
         const video = await createAndWaitForManfeiVideo({
           prompt: [
+            buildVideoFilmToneInstruction(),
             promptItem.videoPrompt || promptItem.panelDescription || promptItem.prompt || '',
             voiceResolution.instruction,
           ].filter(Boolean).join('\n\n'),
@@ -8237,7 +8368,11 @@ export default function StoryboardGenerator() {
       }
       const video = await createAndWaitForManfeiVideo({
         shotNumber,
-        prompt: [customPrompt || getShotDescription(shotNumber) || '', voiceResolution.instruction].filter(Boolean).join('\n\n'),
+        prompt: [
+          buildVideoFilmToneInstruction(),
+          customPrompt || getShotDescription(shotNumber) || '',
+          voiceResolution.instruction,
+        ].filter(Boolean).join('\n\n'),
         imageUrl: imageStoryboard?.imageUrl || '',
         imageUrls: imageStoryboard?.imageUrl ? [imageStoryboard.imageUrl] : [],
         duration: normalizeManfeiDuration(promptItem?.duration),
@@ -8290,7 +8425,11 @@ export default function StoryboardGenerator() {
         }
         const video = await createAndWaitForManfeiVideo({
           shotNumber: promptItem.shotNumber,
-          prompt: [getShotDescription(promptItem.shotNumber) || '', voiceResolution.instruction].filter(Boolean).join('\n\n'),
+          prompt: [
+            buildVideoFilmToneInstruction(),
+            promptItem.videoPrompt || promptItem.panelDescription || promptItem.prompt || getShotDescription(promptItem.shotNumber) || '',
+            voiceResolution.instruction,
+          ].filter(Boolean).join('\n\n'),
           imageUrl: imageStoryboard.imageUrl,
           imageUrls: [imageStoryboard.imageUrl],
           duration: normalizeManfeiDuration(promptItem.duration),
@@ -9262,7 +9401,8 @@ export default function StoryboardGenerator() {
       toast.error('造型不存在');
       return;
     }
-    if (!getCharacterFaceReferenceImage(character)) {
+    const identityReferenceImageUrl = getCharacterFaceReferenceImage(character);
+    if (!identityReferenceImageUrl) {
       toast.warning(`请先选择并确认 ${character.name} 的正脸身份基准图`);
       return;
     }
@@ -9282,17 +9422,17 @@ export default function StoryboardGenerator() {
     let fetchTimeout: ReturnType<typeof setTimeout> | undefined;
 
     try {
-      const referenceImageUrl = look.imageUrl;
+      const lookReferenceImageUrl = look.imageUrl;
 
       updateLookById(lookId, {
         isGeneratingFourView: true,
-        fourViewStatus: '正在提交四视图生成任务...',
+        fourViewStatus: '正在参考正脸身份图与当前造型图提交四视图任务...',
         fourViewError: undefined,
       }, character);
       toast.info(`开始生成 ${character.name}的四视图`);
 
-      statusTimer1 = setTimeout(() => updateLookById(lookId, { fourViewStatus: 'AI 正在生成四视图（约30~90秒）...' }, character), 5000);
-      statusTimer2 = setTimeout(() => updateLookById(lookId, { fourViewStatus: '四视图生成中，请耐心等待...' }, character), 30000);
+      statusTimer1 = setTimeout(() => updateLookById(lookId, { fourViewStatus: 'AI 正在锁定正脸身份，并延续当前服装状态...' }, character), 5000);
+      statusTimer2 = setTimeout(() => updateLookById(lookId, { fourViewStatus: '四视图生成中：正脸参考身份，造型图参考服装与状态...' }, character), 30000);
 
       const controller = new AbortController();
       fetchTimeout = setTimeout(() => controller.abort(), CHARACTER_IMAGE_REQUEST_TIMEOUT_MS);
@@ -9304,7 +9444,10 @@ export default function StoryboardGenerator() {
           type: 'character',
           data: character,
           lookId,
-          referenceImageUrl,
+          referenceImageUrl: lookReferenceImageUrl,
+          identityReferenceImageUrl,
+          lookReferenceImageUrl,
+          referenceImageUrls: [identityReferenceImageUrl, lookReferenceImageUrl],
           imageVariant: 'character-four-view',
           assetImageName: `${character.name}的四视图`,
           creationBible: getCreationBiblePayload(),
@@ -9329,7 +9472,7 @@ export default function StoryboardGenerator() {
           fourViewStatus: undefined,
           fourViewError: undefined,
           fourViewIdentitySourceUrl: character.confirmedFaceImageUrl,
-          fourViewLookSourceUrl: referenceImageUrl,
+          fourViewLookSourceUrl: lookReferenceImageUrl,
           fourViewIdentityNeedsReview: false,
         }, character);
         requestAssetLibrarySync();
@@ -9695,6 +9838,54 @@ export default function StoryboardGenerator() {
     return `第${chapterNumber}章_第${groupIndex}组_故事版总控图`;
   };
 
+  const getStoryboardTotalImageSettings = () => ({
+    ratios: ['16:9'],
+    styles: globalImageSettings.styles,
+    lighting: globalImageSettings.lighting,
+  });
+
+  const handleDeletePromptGroupStoryboardImage = async (
+    chapterNumber: number,
+    groupIndex: number,
+    groupArrayIndex: number,
+    pg: PromptGroup,
+  ) => {
+    const confirmed = window.confirm('确定删除这张故事版图片吗？删除后会保留提示词，你可以重新生成新的故事版图片。');
+    if (!confirmed) return;
+
+    const imageKeys = [pg.storyboardImageKey, pg.storyboardRemoteImageKey].filter(Boolean) as string[];
+    const imageUrls = pg.storyboardImageUrl && !pg.storyboardImageKey ? [pg.storyboardImageUrl] : [];
+
+    setChapterStoryboards(prev => ({
+      ...prev,
+      [chapterNumber]: {
+        ...prev[chapterNumber],
+        promptGroups: prev[chapterNumber].promptGroups?.map((g, idx) =>
+          idx === groupArrayIndex
+            ? {
+                ...g,
+                storyboardImageUrl: undefined,
+                storyboardImageKey: undefined,
+                storyboardRemoteImageKey: undefined,
+                storyboardStatus: '',
+                isGeneratingStoryboard: false,
+                isGeneratingPrompt: false,
+                storyboardPromptConfirmed: false,
+              }
+            : g
+        ),
+      },
+    }));
+    toast.success(`第${groupIndex}组故事版图片已删除，可以重新生成`);
+
+    try {
+      await deleteStoredImages(imageKeys, imageUrls, '分镜图片');
+    } catch (error) {
+      console.error('删除故事版图片文件失败:', error);
+      toast.warning('页面图片已移除，资产文件删除可能稍后完成');
+    }
+  };
+
   // 移除选中的图片（图片仍在图片库中）
   const removeSelectedImage = async (assetId: string, imageId: string) => {
     console.log('[removeSelectedImage] 参数 assetId:', assetId, 'imageId:', imageId);
@@ -9762,6 +9953,28 @@ export default function StoryboardGenerator() {
     toast.success('已取消选中该图片');
   };
 
+  const openLocalImagePicker = (onSelect: (file: File) => void | Promise<void>) => {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = 'image/jpeg,image/png,image/webp,image/gif,image/heic,image/heif';
+    input.style.position = 'fixed';
+    input.style.left = '-9999px';
+    input.setAttribute('aria-hidden', 'true');
+    document.body.appendChild(input);
+
+    const cleanup = () => {
+      window.setTimeout(() => input.remove(), 0);
+    };
+
+    input.addEventListener('change', () => {
+      const file = input.files?.[0];
+      if (file) void onSelect(file);
+      cleanup();
+    }, { once: true });
+    input.addEventListener('cancel', cleanup, { once: true });
+    input.click();
+  };
+
   // 上传自定义图片
   const uploadCustomImage = async (type: 'scene' | 'character' | 'prop', data: any, file: File) => {
     // 使用素材的名称作为 key，确保唯一性（名称是唯一的，id 可能在分批时重复）
@@ -9774,8 +9987,6 @@ export default function StoryboardGenerator() {
       setAssetImageLimitNotice({ type, name: data.name });
       return;
     }
-    if (!(await requireLoginBeforePaidAction())) return;
-
     // 检查文件大小（支持 4K 高清图，最大 50MB）
     const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50MB
     if (file.size > MAX_FILE_SIZE) {
@@ -9832,9 +10043,15 @@ export default function StoryboardGenerator() {
         body: formData,
       });
 
-      const result = await response.json();
+      const result = await response.json().catch(() => ({ error: `上传服务返回异常（HTTP ${response.status}）` }));
 
-      if (result.success) {
+      if (response.status === 401) {
+        paidActionAuthCacheRef.current = null;
+        showLoginRequired('登录状态已失效，请重新登录后上传图片。');
+        throw new Error('登录状态已失效');
+      }
+
+      if (response.ok && result.success) {
         setAssetImages(prev => {
           const newMap = new Map(prev);
           const existing = newMap.get(assetId);
@@ -9885,7 +10102,8 @@ export default function StoryboardGenerator() {
         }
         return newMap;
       });
-      toast.error('图片上传失败');
+      const message = error instanceof Error ? error.message : '图片上传失败';
+      if (message !== '登录状态已失效') toast.error(message || '图片上传失败');
     }
   };
 
@@ -9902,6 +10120,7 @@ export default function StoryboardGenerator() {
     setCharacterVoiceData(null);
     setPropsData(null);
     setOutline(null);
+    setSelectedProductionEpisodes([]);
     setOutlineBatchInfo(null);
     setSceneBatchInfo(null);
     setCharacterBatchInfo(null);
@@ -9933,6 +10152,64 @@ export default function StoryboardGenerator() {
       outline: 'pending',
     });
   };
+
+  const resetProductionOutputsForEpisodeSelection = useCallback(() => {
+    setScenesData(null);
+    setCharactersData(null);
+    setCharacterVoiceData(null);
+    setPropsData(null);
+    setSceneBatchInfo(null);
+    setCharacterBatchInfo(null);
+    setPropBatchInfo(null);
+    setExtractionReview(INITIAL_EXTRACTION_REVIEW);
+    extractionReviewRequestedRef.current = false;
+    setSelectedChapter(null);
+    setStoryboard(null);
+    setImageStoryboards([]);
+    setConnectingPrompts(null);
+    setVideoResults([]);
+    setVideoTotalDuration(0);
+    setAssetImages(() => new Map());
+    setBatchAssetGenerationHistory({ ...INITIAL_BATCH_ASSET_GENERATION_HISTORY });
+    setChapterStoryboards({});
+    setBatchInfo({ active: false, batchSize: 4, totalBatches: 0, completedBatches: 0 });
+    setStepConfirmed(prev => ({
+      ...prev,
+      extraction: false,
+      storyboard: false,
+      assets: false,
+      prompts: false,
+      videos: false,
+    }));
+    setExtractionStatus(prev => ({
+      ...prev,
+      scenes: 'pending',
+      characters: 'pending',
+      voices: 'pending',
+      props: 'pending',
+    }));
+  }, [
+    setScenesData,
+    setCharactersData,
+    setCharacterVoiceData,
+    setPropsData,
+    setSceneBatchInfo,
+    setCharacterBatchInfo,
+    setPropBatchInfo,
+    setExtractionReview,
+    setSelectedChapter,
+    setStoryboard,
+    setImageStoryboards,
+    setConnectingPrompts,
+    setVideoResults,
+    setVideoTotalDuration,
+    setAssetImages,
+    setBatchAssetGenerationHistory,
+    setChapterStoryboards,
+    setBatchInfo,
+    setStepConfirmed,
+    setExtractionStatus,
+  ]);
 
   type AssetListExportType = 'scene' | 'character' | 'prop';
   type AssetListExportImage = {
@@ -10417,7 +10694,17 @@ export default function StoryboardGenerator() {
     setCreationBible(prev => ({ ...prev, ...bible, confirmed: true }));
     setStepConfirmed(prev => ({ ...prev, upload: true }));
     resetExtractionOutputsForFreshRun();
-    void extractAllParallel(extractionContent, getCurrentFileName(), bible);
+    setExtractionStatus({
+      scenes: 'pending',
+      characters: 'pending',
+      voices: 'pending',
+      props: 'pending',
+      outline: 'loading',
+    });
+    setCurrentStep(1);
+    setProgress(20);
+    toast.info('正在先提取故事大纲；完成后请选择要制作的集数');
+    void extractOutlineBatch(extractionContent, getCurrentFileName(), 1, null, []);
   };
 
   const reopenCreationBibleSelection = async () => {
@@ -11654,7 +11941,152 @@ export default function StoryboardGenerator() {
 	              </Card>
 	            )}
 
-	            {/* Parallel Extraction Status */}
+	            {/* Outline Card */}
+	            {canShowExtractionResults && outline && (
+              <Card>
+                <CardHeader>
+                  <CardTitle className="flex items-center gap-2">
+                    <BookOpen className="w-5 h-5" />
+                    故事大纲
+                  </CardTitle>
+                  <CardDescription>
+                    共 {outline.totalChapters} 集
+                  </CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <div className="space-y-4">
+                    <div>
+                      <h3 className="font-bold text-lg mb-2">{outline.title}</h3>
+                      <p
+                        className="text-sm text-gray-600 dark:text-gray-400 line-clamp-2"
+                        title={outline.summary || ''}
+                      >
+                        {outline.summary}
+                      </p>
+                    </div>
+
+                    {/* 分步确认流程 - 步骤1：确认大纲和制作集数 */}
+                    {stepConfirmed.extraction ? (
+                      <div className="p-3 bg-green-50 dark:bg-green-900/20 rounded-lg">
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-2 text-green-600 dark:text-green-400">
+                            <CheckCircle2 className="w-4 h-4" />
+                            <span className="text-sm font-medium">
+                              已确认制作 {productionChapters.length || selectedProductionEpisodes.length} 集
+                            </span>
+                          </div>
+                          <span className="text-xs text-gray-500">请前往"文字分镜"标签页继续下一步</span>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="p-3 bg-blue-50 dark:bg-blue-900/20 rounded-lg space-y-3">
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-2">
+                            <div className="w-6 h-6 rounded-full bg-blue-500 flex items-center justify-center text-white text-xs">
+                              1
+                            </div>
+                            <span className="text-sm font-medium">
+                              选择本次要制作的集数（已选 {selectedProductionEpisodes.length} 集）
+                            </span>
+                          </div>
+                          <Button
+                            size="sm"
+                            onClick={() => confirmStep('extraction')}
+                            disabled={isProcessing}
+                          >
+                            <CheckCircle2 className="w-4 h-4 mr-1" />
+                            {isEffectiveExtractionSuccess ? '确认进入分镜' : '按所选集数开始拆解'}
+                          </Button>
+                        </div>
+                        <p className="text-xs text-gray-500 mt-2 pl-8">
+                          后续人物、场景、道具、音色、文字分镜、素材、提示词、故事版和视频只制作这些集数。
+                        </p>
+                        <div className="flex flex-wrap gap-2 pl-8">
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            onClick={() => {
+                              setSelectedProductionEpisodes(outlineEpisodeNumbers);
+                              resetProductionOutputsForEpisodeSelection();
+                            }}
+                            disabled={outlineEpisodeNumbers.length === 0}
+                          >
+                            全选
+                          </Button>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            onClick={() => {
+                              setSelectedProductionEpisodes([]);
+                              resetProductionOutputsForEpisodeSelection();
+                            }}
+                            disabled={selectedProductionEpisodes.length === 0}
+                          >
+                            清空
+                          </Button>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* 分集列表 */}
+                    <div className="space-y-2 mt-4">
+                      <p className="text-sm font-medium text-gray-700 dark:text-gray-300">分集列表：</p>
+                      {outline.chapters.map((chapter, index) => (
+                        <div
+                          key={`chapter-list-${chapter.chapterNumber}-${index}`}
+                          className={`p-3 rounded-lg border transition ${
+                            selectedProductionEpisodes.includes(chapter.chapterNumber)
+                              ? 'border-amber-400/60 bg-amber-500/10'
+                              : 'border-gray-200 dark:border-gray-700'
+                          }`}
+                        >
+                          <div className="flex items-start gap-3">
+                            <Badge variant="outline" className="shrink-0 mt-0.5">
+                              第 {chapter.chapterNumber} 集
+                            </Badge>
+                            <div className="flex-1 min-w-0">
+                              <div className="mb-1 flex items-center justify-between gap-2">
+                                <div className="truncate text-sm font-medium text-amber-50/90">
+                                  {chapter.title || `第${chapter.chapterNumber}集`}
+                                </div>
+                                <Button
+                                  type="button"
+                                  size="sm"
+                                  variant={selectedProductionEpisodes.includes(chapter.chapterNumber) ? 'default' : 'outline'}
+                                  className="h-7 shrink-0 px-2 text-xs"
+                                  onClick={() => {
+                                    setSelectedProductionEpisodes(previous => {
+                                      const exists = previous.includes(chapter.chapterNumber);
+                                      const next = exists
+                                        ? previous.filter(number => number !== chapter.chapterNumber)
+                                        : [...previous, chapter.chapterNumber];
+                                      return Array.from(new Set(next)).sort((a, b) => a - b);
+                                    });
+                                    resetProductionOutputsForEpisodeSelection();
+                                  }}
+                                >
+                                  {selectedProductionEpisodes.includes(chapter.chapterNumber) ? '已选' : '选择'}
+                                </Button>
+                              </div>
+                              <p
+                                className="text-xs text-gray-500 line-clamp-2"
+                                title={chapter.summary || ''}
+                              >
+                                {chapter.summary}
+                              </p>
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+            )}
+
+            {/* Parallel Extraction Status */}
 	            {canShowExtractionResults && hasExtractionStatusToShow && (
 	              <Card>
                 <CardHeader>
@@ -11915,93 +12347,6 @@ export default function StoryboardGenerator() {
               </Card>
             )}
 
-            {/* Outline Card */}
-	            {canShowExtractionResults && outline && (
-              <Card>
-                <CardHeader>
-                  <CardTitle className="flex items-center gap-2">
-                    <BookOpen className="w-5 h-5" />
-                    故事大纲
-                  </CardTitle>
-                  <CardDescription>
-                    共 {outline.totalChapters} 集
-                  </CardDescription>
-                </CardHeader>
-                <CardContent>
-                  <div className="space-y-4">
-                    <div>
-                      <h3 className="font-bold text-lg mb-2">{outline.title}</h3>
-                      <p
-                        className="text-sm text-gray-600 dark:text-gray-400 line-clamp-2"
-                        title={outline.summary || ''}
-                      >
-                        {outline.summary}
-                      </p>
-                    </div>
-
-                    {/* 分步确认流程 - 步骤1：确认大纲和分集选择 */}
-                    {stepConfirmed.extraction ? (
-                      <div className="p-3 bg-green-50 dark:bg-green-900/20 rounded-lg">
-                        <div className="flex items-center justify-between">
-                          <div className="flex items-center gap-2 text-green-600 dark:text-green-400">
-                            <CheckCircle2 className="w-4 h-4" />
-                            <span className="text-sm font-medium">大纲和分集选择已确认</span>
-                          </div>
-                          <span className="text-xs text-gray-500">请前往"文字分镜"标签页继续下一步</span>
-                        </div>
-                      </div>
-                    ) : (
-                      <div className="p-3 bg-blue-50 dark:bg-blue-900/20 rounded-lg space-y-3">
-                        <div className="flex items-center justify-between">
-                          <div className="flex items-center gap-2">
-                            <div className="w-6 h-6 rounded-full bg-blue-500 flex items-center justify-center text-white text-xs">
-                              1
-                            </div>
-                            <span className="text-sm font-medium">确认大纲和分集选择</span>
-                          </div>
-                          <Button
-                            size="sm"
-                            onClick={() => confirmStep('extraction')}
-                            disabled={isProcessing}
-                          >
-                            <CheckCircle2 className="w-4 h-4 mr-1" />
-                            确认大纲
-                          </Button>
-                        </div>
-                        <p className="text-xs text-gray-500 mt-2 pl-8">
-                          确认后，系统将基于选定分集生成文字分镜
-                        </p>
-                      </div>
-                    )}
-
-                    {/* 分集列表 */}
-                    <div className="space-y-2 mt-4">
-                      <p className="text-sm font-medium text-gray-700 dark:text-gray-300">分集列表：</p>
-                      {outline.chapters.map((chapter, index) => (
-                        <div
-                          key={`chapter-list-${chapter.chapterNumber}-${index}`}
-                          className="p-3 rounded-lg border border-gray-200 dark:border-gray-700"
-                        >
-                          <div className="flex items-start gap-3">
-                            <Badge variant="outline" className="shrink-0 mt-0.5">
-                              第 {chapter.chapterNumber} 集
-                            </Badge>
-                            <div className="flex-1 min-w-0">
-                              <p
-                                className="text-xs text-gray-500 line-clamp-2"
-                                title={chapter.summary || ''}
-                              >
-                                {chapter.summary}
-                              </p>
-                            </div>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                </CardContent>
-              </Card>
-            )}
           </div>
 
           {/* Right Panel - Extraction Results & Storyboard */}
@@ -12216,47 +12561,42 @@ export default function StoryboardGenerator() {
                                   <span className="text-xs text-amber-100/55">
                                     {isGenerating ? `处理中 · 候选图 ${completedImageCount}/${MAX_IMAGES_PER_ASSET}` : `候选图 ${completedImageCount}/${MAX_IMAGES_PER_ASSET}`}
                                   </span>
-                                  {!isGenerating && !isAssetsConfirmed && (
+                                  {!isGenerating && (
                                     <div className="flex items-center gap-1 rounded-md border border-amber-400/15 bg-black/20 p-1">
+                                      {!isAssetsConfirmed && (
+                                        <Button
+                                          size="icon"
+                                          variant="ghost"
+                                          className="h-7 w-7 min-w-0 p-0 text-amber-100/80 hover:bg-amber-400/15 hover:text-amber-50"
+                                          onClick={() => generateAssetImage('scene', scene)}
+                                          title="AI生成图片"
+                                          aria-label="生成场景图片"
+                                        >
+                                          <Sparkles className="size-3.5" />
+                                        </Button>
+                                      )}
                                       <Button
                                         size="icon"
                                         variant="ghost"
                                         className="h-7 w-7 min-w-0 p-0 text-amber-100/80 hover:bg-amber-400/15 hover:text-amber-50"
-                                        onClick={() => generateAssetImage('scene', scene)}
-                                        title="AI生成图片"
-                                        aria-label="生成场景图片"
-                                      >
-                                        <Sparkles className="size-3.5" />
-                                      </Button>
-                                      <Button
-                                        size="icon"
-                                        variant="ghost"
-                                        className="h-7 w-7 min-w-0 p-0 text-amber-100/80 hover:bg-amber-400/15 hover:text-amber-50"
-                                        onClick={() => {
-                                          const input = document.createElement('input');
-                                          input.type = 'file';
-                                          input.accept = 'image/*';
-                                          input.onchange = (e) => {
-                                            const file = (e.target as HTMLInputElement).files?.[0];
-                                            if (file) uploadCustomImage('scene', scene, file);
-                                          };
-                                          input.click();
-                                        }}
+                                        onClick={() => openLocalImagePicker(file => uploadCustomImage('scene', scene, file))}
                                         title="上传本地图片"
                                         aria-label="上传场景图片"
                                       >
                                         <ImagePlus className="size-3.5" />
                                       </Button>
-                                      <Button
-                                        size="icon"
-                                        variant="ghost"
-                                        className="h-7 w-7 min-w-0 p-0 text-amber-100/80 hover:bg-amber-400/15 hover:text-amber-50"
-                                        onClick={() => openImageLibrary('scene', scene.id, scene.name)}
-                                        title="从图片库选择"
-                                        aria-label="从图片库选择场景图片"
-                                      >
-                                        <FolderOpen className="size-3.5" />
-                                      </Button>
+                                      {!isAssetsConfirmed && (
+                                        <Button
+                                          size="icon"
+                                          variant="ghost"
+                                          className="h-7 w-7 min-w-0 p-0 text-amber-100/80 hover:bg-amber-400/15 hover:text-amber-50"
+                                          onClick={() => openImageLibrary('scene', scene.id, scene.name)}
+                                          title="从图片库选择"
+                                          aria-label="从图片库选择场景图片"
+                                        >
+                                          <FolderOpen className="size-3.5" />
+                                        </Button>
+                                      )}
                                     </div>
                                   )}
                                 </div>
@@ -12595,47 +12935,42 @@ export default function StoryboardGenerator() {
                                       <span className="text-xs text-amber-100/55">
                                         {isGenerating ? `处理中 · ${completedImageCount}/${MAX_IMAGES_PER_ASSET} 张` : `${completedImageCount}/${MAX_IMAGES_PER_ASSET} 张`}
                                       </span>
-                                      {!isGenerating && !isAssetsConfirmed && (
+                                      {!isGenerating && (
                                         <div className="flex items-center gap-1 rounded-md border border-amber-400/15 bg-black/20 p-1">
+                                          {!isAssetsConfirmed && (
+                                            <Button
+                                              size="icon"
+                                              variant="ghost"
+                                              className="h-7 w-7 min-w-0 p-0 text-amber-100/80 hover:bg-amber-400/15 hover:text-amber-50"
+                                              onClick={() => generateAssetImage('character', char)}
+                                              title="文生图：生成人物正脸候选图"
+                                              aria-label="生成人物正脸候选图"
+                                            >
+                                              <Sparkles className="size-3.5" />
+                                            </Button>
+                                          )}
                                           <Button
                                             size="icon"
                                             variant="ghost"
                                             className="h-7 w-7 min-w-0 p-0 text-amber-100/80 hover:bg-amber-400/15 hover:text-amber-50"
-                                            onClick={() => generateAssetImage('character', char)}
-                                            title="文生图：生成人物正脸候选图"
-                                            aria-label="生成人物正脸候选图"
-                                          >
-                                            <Sparkles className="size-3.5" />
-                                          </Button>
-                                          <Button
-                                            size="icon"
-                                            variant="ghost"
-                                            className="h-7 w-7 min-w-0 p-0 text-amber-100/80 hover:bg-amber-400/15 hover:text-amber-50"
-                                            onClick={() => {
-                                              const input = document.createElement('input');
-                                              input.type = 'file';
-                                              input.accept = 'image/*';
-                                              input.onchange = (e) => {
-                                                const file = (e.target as HTMLInputElement).files?.[0];
-                                                if (file) uploadCustomImage('character', char, file);
-                                              };
-                                              input.click();
-                                            }}
-                                            title="上传本地图片"
+                                            onClick={() => openLocalImagePicker(file => uploadCustomImage('character', char, file))}
+                                            title={isAssetsConfirmed ? '补充上传人物正脸候选图（不会自动替换已确认正脸）' : '上传本地图片'}
                                             aria-label="上传人物图片"
                                           >
                                             <ImagePlus className="size-3.5" />
                                           </Button>
-                                          <Button
-                                            size="icon"
-                                            variant="ghost"
-                                            className="h-7 w-7 min-w-0 p-0 text-amber-100/80 hover:bg-amber-400/15 hover:text-amber-50"
-                                            onClick={() => openImageLibrary('character', char.id, char.name)}
-                                            title="从图片库选择"
-                                            aria-label="从图片库选择人物图片"
-                                          >
-                                            <FolderOpen className="size-3.5" />
-                                          </Button>
+                                          {!isAssetsConfirmed && (
+                                            <Button
+                                              size="icon"
+                                              variant="ghost"
+                                              className="h-7 w-7 min-w-0 p-0 text-amber-100/80 hover:bg-amber-400/15 hover:text-amber-50"
+                                              onClick={() => openImageLibrary('character', char.id, char.name)}
+                                              title="从图片库选择"
+                                              aria-label="从图片库选择人物图片"
+                                            >
+                                              <FolderOpen className="size-3.5" />
+                                            </Button>
+                                          )}
                                         </div>
                                       )}
                                     </div>
@@ -13287,16 +13622,7 @@ export default function StoryboardGenerator() {
                                                     size="sm"
                                                     variant="ghost"
                                                     className="flex-1 h-8 text-xs"
-                                                    onClick={() => {
-                                                      const input = document.createElement('input');
-                                                      input.type = 'file';
-                                                      input.accept = 'image/*';
-                                                      input.onchange = (e) => {
-                                                        const file = (e.target as HTMLInputElement).files?.[0];
-                                                        if (file) handleUploadCharacterLookImage(char, look.id, file);
-                                                      };
-                                                      input.click();
-                                                    }}
+                                                    onClick={() => openLocalImagePicker(file => handleUploadCharacterLookImage(char, look.id, file))}
                                                     disabled={!isFaceIdentityConfirmed}
                                                     title={isFaceIdentityConfirmed ? '上传本地造型图片' : '需先确认人物正脸身份基准'}
                                                   >
@@ -13617,47 +13943,42 @@ export default function StoryboardGenerator() {
                                   <span className="text-xs text-amber-100/55">
                                     {isGenerating ? `处理中 · ${completedImageCount}/${MAX_IMAGES_PER_ASSET} 张` : `${completedImageCount}/${MAX_IMAGES_PER_ASSET} 张`}
                                   </span>
-                                  {!isGenerating && !isAssetsConfirmed && (
+                                  {!isGenerating && (
                                     <div className="flex items-center gap-1 rounded-md border border-amber-400/15 bg-black/20 p-1">
+                                      {!isAssetsConfirmed && (
+                                        <Button
+                                          size="icon"
+                                          variant="ghost"
+                                          className="h-7 w-7 min-w-0 p-0 text-amber-100/80 hover:bg-amber-400/15 hover:text-amber-50"
+                                          onClick={() => generateAssetImage('prop', prop)}
+                                          title="AI生成图片"
+                                          aria-label="生成道具图片"
+                                        >
+                                          <Sparkles className="size-3.5" />
+                                        </Button>
+                                      )}
                                       <Button
                                         size="icon"
                                         variant="ghost"
                                         className="h-7 w-7 min-w-0 p-0 text-amber-100/80 hover:bg-amber-400/15 hover:text-amber-50"
-                                        onClick={() => generateAssetImage('prop', prop)}
-                                        title="AI生成图片"
-                                        aria-label="生成道具图片"
-                                      >
-                                        <Sparkles className="size-3.5" />
-                                      </Button>
-                                      <Button
-                                        size="icon"
-                                        variant="ghost"
-                                        className="h-7 w-7 min-w-0 p-0 text-amber-100/80 hover:bg-amber-400/15 hover:text-amber-50"
-                                        onClick={() => {
-                                          const input = document.createElement('input');
-                                          input.type = 'file';
-                                          input.accept = 'image/*';
-                                          input.onchange = (e) => {
-                                            const file = (e.target as HTMLInputElement).files?.[0];
-                                            if (file) uploadCustomImage('prop', prop, file);
-                                          };
-                                          input.click();
-                                        }}
+                                        onClick={() => openLocalImagePicker(file => uploadCustomImage('prop', prop, file))}
                                         title="上传本地图片"
                                         aria-label="上传道具图片"
                                       >
                                         <ImagePlus className="size-3.5" />
                                       </Button>
-                                      <Button
-                                        size="icon"
-                                        variant="ghost"
-                                        className="h-7 w-7 min-w-0 p-0 text-amber-100/80 hover:bg-amber-400/15 hover:text-amber-50"
-                                        onClick={() => openImageLibrary('prop', prop.id, prop.name)}
-                                        title="从图片库选择"
-                                        aria-label="从图片库选择道具图片"
-                                      >
-                                        <FolderOpen className="size-3.5" />
-                                      </Button>
+                                      {!isAssetsConfirmed && (
+                                        <Button
+                                          size="icon"
+                                          variant="ghost"
+                                          className="h-7 w-7 min-w-0 p-0 text-amber-100/80 hover:bg-amber-400/15 hover:text-amber-50"
+                                          onClick={() => openImageLibrary('prop', prop.id, prop.name)}
+                                          title="从图片库选择"
+                                          aria-label="从图片库选择道具图片"
+                                        >
+                                          <FolderOpen className="size-3.5" />
+                                        </Button>
+                                      )}
                                     </div>
                                   )}
                                 </div>
@@ -14947,7 +15268,7 @@ export default function StoryboardGenerator() {
                                                       [cs.chapterNumber]: {
                                                         ...prev[cs.chapterNumber],
                                                         promptGroups: prev[cs.chapterNumber].promptGroups?.map((g, idx) =>
-                                                          idx === gi ? { ...g, storyboardPromptText: data.storyboardPrompt, isGeneratingPrompt: false } : g
+                                                          idx === gi ? { ...g, storyboardPromptText: data.storyboardPrompt, isGeneratingPrompt: false, storyboardPromptConfirmed: false } : g
                                                         ),
                                                       }
                                                     }));
@@ -15043,7 +15364,7 @@ export default function StoryboardGenerator() {
                                                           cs.storyboard?.shots.find(s => s.shotNumber === sn)
                                                         ).filter(Boolean),
                                                         referenceImages: refImages,
-                                                        imageSettings: globalImageSettings,
+                                                        imageSettings: getStoryboardTotalImageSettings(),
                                                         customPrompt: pg.storyboardPromptText,
                                                         creationBible: getCreationBiblePayload(),
                                                       }),
@@ -15187,7 +15508,7 @@ export default function StoryboardGenerator() {
                                                             cs.storyboard?.shots.find(s => s.shotNumber === sn)
                                                           ).filter(Boolean),
                                                           referenceImages: refImages,
-                                                          imageSettings: globalImageSettings,
+                                                          imageSettings: getStoryboardTotalImageSettings(),
                                                           customPrompt: pg.storyboardPromptText,
                                                           creationBible: getCreationBiblePayload(),
                                                         }),
@@ -15272,7 +15593,7 @@ export default function StoryboardGenerator() {
                                                           [cs.chapterNumber]: {
                                                             ...prev[cs.chapterNumber],
                                                             promptGroups: prev[cs.chapterNumber].promptGroups?.map((g, idx) =>
-                                                              idx === gi ? { ...g, storyboardPromptText: data.storyboardPrompt, isGeneratingPrompt: false } : g
+                                                              idx === gi ? { ...g, storyboardPromptText: data.storyboardPrompt, isGeneratingPrompt: false, storyboardPromptConfirmed: false } : g
                                                             ),
                                                           }
                                                         }));
@@ -15347,7 +15668,7 @@ export default function StoryboardGenerator() {
                                                         [cs.chapterNumber]: {
                                                           ...prev[cs.chapterNumber],
                                                           promptGroups: prev[cs.chapterNumber].promptGroups?.map((g, idx) =>
-                                                            idx === gi ? { ...g, storyboardPromptText: data.storyboardPrompt, isGeneratingPrompt: false } : g
+                                                            idx === gi ? { ...g, storyboardPromptText: data.storyboardPrompt, isGeneratingPrompt: false, storyboardPromptConfirmed: false } : g
                                                           ),
                                                         }
                                                       }));
@@ -15747,7 +16068,7 @@ export default function StoryboardGenerator() {
                                               [cs.chapterNumber]: {
                                                 ...prev[cs.chapterNumber],
                                                 promptGroups: prev[cs.chapterNumber].promptGroups?.map((g, idx) =>
-                                                  idx === gi ? { ...g, storyboardPromptText: data.storyboardPrompt, isGeneratingPrompt: false } : g
+                                                  idx === gi ? { ...g, storyboardPromptText: data.storyboardPrompt, isGeneratingPrompt: false, storyboardPromptConfirmed: false } : g
                                                 ),
                                               }
                                             }));
@@ -15777,30 +16098,34 @@ export default function StoryboardGenerator() {
                                   <div className="mb-2">
                                     {pg.storyboardImageUrl ? (
                                       <>
-                                      <div className="relative group">
-                                        <img
-                                          src={getAssetThumbnailUrl(pg.storyboardImageUrl, 900, 70)}
-                                          alt={`故事板第${pg.groupIndex}组`}
-                                          loading="lazy"
-                                          decoding="async"
-                                          fetchPriority="low"
-                                          className="w-full cursor-zoom-in rounded-lg border shadow-sm max-h-[400px] object-cover"
-                                          onClick={() => openImagePreview(
-                                            getDisplayImageUrl(pg.storyboardImageUrl),
-                                            getStoryboardImageFileName(cs.chapterNumber, pg.groupIndex),
-                                            'storyboard'
-                                          )}
-                                          onError={(e) => {
-                                            (e.currentTarget as HTMLImageElement).style.display = 'none';
-                                            toast.error('故事版图片加载失败，请点击下方“打开图片”或重新生成');
-                                          }}
-                                        />
-                                        <Button
-                                          size="sm"
-                                          variant="secondary"
-                                          className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity"
-                                          disabled={pg.isGeneratingStoryboard}
-                                          onClick={async () => {
+                                      <div className="relative group overflow-hidden rounded-lg border border-amber-400/25 bg-black/35 shadow-sm">
+                                        <div className="flex aspect-video w-full items-center justify-center">
+                                          <img
+                                            src={getAssetThumbnailUrl(pg.storyboardImageUrl, 1600, 88)}
+                                            alt={`故事板第${pg.groupIndex}组`}
+                                            loading="lazy"
+                                            decoding="async"
+                                            fetchPriority="low"
+                                            className="h-full w-full cursor-zoom-in object-contain"
+                                            onClick={() => openImagePreview(
+                                              getDisplayImageUrl(pg.storyboardImageUrl),
+                                              getStoryboardImageFileName(cs.chapterNumber, pg.groupIndex),
+                                              'storyboard'
+                                            )}
+                                            onError={(e) => {
+                                              (e.currentTarget as HTMLImageElement).style.display = 'none';
+                                              toast.error('故事版图片加载失败，请点击下方“查看大图”或重新生成');
+                                            }}
+                                          />
+                                        </div>
+                                        <div className="absolute right-2 top-2 z-20 flex gap-1 opacity-0 transition-opacity group-hover:opacity-100">
+                                          <Button
+                                            size="sm"
+                                            variant="secondary"
+                                            disabled={pg.isGeneratingStoryboard}
+                                            onClick={async (event) => {
+                                            event.preventDefault();
+                                            event.stopPropagation();
                                             setChapterStoryboards(prev => ({
                                               ...prev,
                                               [cs.chapterNumber]: {
@@ -15832,11 +16157,7 @@ export default function StoryboardGenerator() {
                                                     cs.storyboard?.shots.find(s => s.shotNumber === sn)
                                                   ).filter(Boolean),
                                                   referenceImages: refImages,
-                                                  imageSettings: {
-                                                    ratios: globalImageSettings.ratios,
-                                                    styles: globalImageSettings.styles,
-                                                    lighting: globalImageSettings.lighting,
-                                                  },
+                                                  imageSettings: getStoryboardTotalImageSettings(),
                                                   customPrompt: pg.storyboardPromptText,
                                                   creationBible: getCreationBiblePayload(),
                                                 }),
@@ -15876,10 +16197,25 @@ export default function StoryboardGenerator() {
                                               }));
                                             }
                                           }}
-                                        >
-                                          <RotateCcw className="w-3 h-3 mr-1" />
-                                          重新生成
-                                        </Button>
+                                          >
+                                            <RotateCcw className="w-3 h-3 mr-1" />
+                                            重新生成
+                                          </Button>
+                                          <Button
+                                            type="button"
+                                            size="sm"
+                                            variant="destructive"
+                                            className="pointer-events-auto"
+                                            onClick={(event) => {
+                                              event.preventDefault();
+                                              event.stopPropagation();
+                                              handleDeletePromptGroupStoryboardImage(cs.chapterNumber, pg.groupIndex, gi, pg);
+                                            }}
+                                          >
+                                            <Trash2 className="w-3 h-3 mr-1" />
+                                            删除
+                                          </Button>
+                                        </div>
                                       </div>
                                       <div className="mt-2 rounded-lg border bg-gray-50 p-2 dark:bg-gray-900">
                                         <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
@@ -15925,6 +16261,20 @@ export default function StoryboardGenerator() {
                                             >
                                               <Copy className="w-3 h-3 mr-1" />
                                               复制地址
+                                            </Button>
+                                            <Button
+                                              type="button"
+                                              size="sm"
+                                              variant="destructive"
+                                              className="pointer-events-auto"
+                                              onClick={(event) => {
+                                                event.preventDefault();
+                                                event.stopPropagation();
+                                                handleDeletePromptGroupStoryboardImage(cs.chapterNumber, pg.groupIndex, gi, pg);
+                                              }}
+                                            >
+                                              <Trash2 className="w-3 h-3 mr-1" />
+                                              删除
                                             </Button>
                                           </div>
                                         </div>
@@ -15997,11 +16347,7 @@ export default function StoryboardGenerator() {
                                                           cs.storyboard?.shots.find(s => s.shotNumber === sn)
                                                         ).filter(Boolean),
                                                         referenceImages: refImages,
-                                                        imageSettings: {
-                                                          ratios: globalImageSettings.ratios,
-                                                          styles: globalImageSettings.styles,
-                                                          lighting: globalImageSettings.lighting,
-                                                        },
+                                                        imageSettings: getStoryboardTotalImageSettings(),
                                                         customPrompt: pg.storyboardPromptText,
                                                         creationBible: getCreationBiblePayload(),
                                                       }),
@@ -16085,7 +16431,7 @@ export default function StoryboardGenerator() {
                                                         [cs.chapterNumber]: {
                                                           ...prev[cs.chapterNumber],
                                                           promptGroups: prev[cs.chapterNumber].promptGroups?.map((g, idx) =>
-                                                            idx === gi ? { ...g, storyboardPromptText: data.storyboardPrompt, isGeneratingPrompt: false } : g
+                                                            idx === gi ? { ...g, storyboardPromptText: data.storyboardPrompt, isGeneratingPrompt: false, storyboardPromptConfirmed: false } : g
                                                           ),
                                                         }
                                                       }));
@@ -16162,7 +16508,7 @@ export default function StoryboardGenerator() {
                                                       [cs.chapterNumber]: {
                                                         ...prev[cs.chapterNumber],
                                                         promptGroups: prev[cs.chapterNumber].promptGroups?.map((g, idx) =>
-                                                          idx === gi ? { ...g, storyboardPromptText: data.storyboardPrompt, isGeneratingPrompt: false } : g
+                                                          idx === gi ? { ...g, storyboardPromptText: data.storyboardPrompt, isGeneratingPrompt: false, storyboardPromptConfirmed: false } : g
                                                         ),
                                                       }
                                                     }));
@@ -16283,7 +16629,7 @@ export default function StoryboardGenerator() {
                                 <div>
                                   <CardTitle className="text-base">{getCanonicalEpisodeTitle(cs.chapterNumber)}</CardTitle>
                                   <CardDescription>
-                                    按连续镜头实际时长分组生成视频，单组不超过15秒，并使用故事版提示词、故事版总控图和最多9张关联素材图
+                                    按连续镜头实际时长分组生成视频，单组不超过15秒，并使用提示词模块提示词、故事版参考图和最多9张关联素材图
                                   </CardDescription>
                                 </div>
                                 <div className="text-sm text-gray-500">
@@ -16309,7 +16655,7 @@ export default function StoryboardGenerator() {
                                     referenceSelection.entities.characters.length +
                                     referenceSelection.entities.scenes.length +
                                     referenceSelection.entities.props.length;
-                                  const canGenerate = !!pg.storyboardPromptText || !!pg.combinedPrompt;
+                                  const canGenerate = !!pg.combinedPrompt;
 
                                   return (
                                     <div key={`group-video-${cs.chapterNumber}-${pg.groupIndex}`} className="border rounded-lg p-3">
@@ -16328,7 +16674,7 @@ export default function StoryboardGenerator() {
                                             )}
                                           </div>
                                           <p className="text-xs text-gray-500 line-clamp-2">
-                                            {(pg.storyboardPromptText || pg.combinedPrompt || '').slice(0, 180)}
+                                            {(pg.combinedPrompt || '').slice(0, 180)}
                                           </p>
                                           {referenceImages.length > 0 && (
                                             <div className="flex flex-wrap gap-1 pt-1">
@@ -17076,7 +17422,10 @@ export default function StoryboardGenerator() {
                     </div>
                   )}
                   <img
-                    src={getAssetPreviewUrl(getDisplayImageUrl(previewImage.url))}
+                    src={previewImage.type === 'storyboard'
+                      ? getDisplayImageUrl(previewImage.url)
+                      : getAssetPreviewUrl(getDisplayImageUrl(previewImage.url))
+                    }
                     alt={previewImage.name}
                     className={`max-h-full max-w-full object-contain transition-[transform,opacity] duration-200 ${isPreviewImageLoading ? 'opacity-0' : 'opacity-100'}`}
                     style={{ transform: `scale(${previewZoom})` }}

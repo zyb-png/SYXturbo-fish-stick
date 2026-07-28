@@ -188,7 +188,7 @@ function buildLocalVisualPrompt(
   const lighting = Array.isArray(imageSettings?.lighting) && imageSettings.lighting.length > 0 ? imageSettings.lighting.join('、') : '自然电影光';
   const bibleText = buildCreationBibleVisualText(creationBible);
 
-  return `横向超宽电影工业级分镜故事板总控图，章节「${chapterTitle || '未命名章节'}」第${groupIndex}组，包含${shots.length}个连续镜头格，总时长${formatStoryboardDurationSeconds(totalDuration)}秒。${bibleText ? `${bibleText}。` : ''}顶部中文项目信息栏，上方角色设定、场景设定、运镜方案，主体为时间分镜表，底部镜头说明/色彩指南/灯光参考。${shotLines}。画面风格：${styles}；光影：${lighting}。中文印刷级标注，清晰边框，真实导演工作板，不要水印，不要涂鸦，不要手写批注。${referenceImageCount > 0 ? `参考${referenceImageCount}张素材图，继承角色外观、场景质感和色彩光影。` : ''}`;
+  return `横屏16:9电影工业级分镜故事板总控图，章节「${chapterTitle || '未命名章节'}」第${groupIndex}组，包含${shots.length}个连续镜头格，总时长${formatStoryboardDurationSeconds(totalDuration)}秒。必须横向构图，完整展示画面信息，不要竖屏、不要长图、不要裁切主体。${bibleText ? `${bibleText}。` : ''}顶部中文项目信息栏，上方角色设定、场景设定、运镜方案，主体为时间分镜表，底部镜头说明/色彩指南/灯光参考。${shotLines}。画面风格：${styles}；光影：${lighting}。中文印刷级标注，清晰边框，真实导演工作板，不要水印，不要涂鸦，不要手写批注。${referenceImageCount > 0 ? `参考${referenceImageCount}张素材图，继承角色外观、场景质感和色彩光影。` : ''}`;
 }
 
 function prepareImagePrompt(
@@ -206,9 +206,10 @@ function prepareImagePrompt(
   if (!prompt) return fallbackPrompt;
 
   const normalized = prompt.replace(/\s+/g, ' ').trim();
-  if (normalized.length <= 1200) return [bibleText, normalized].filter(Boolean).join('。');
+  const storyboardLayoutRule = '故事版图片必须为横屏16:9，横向电影分镜总控图，完整显示画面，不要竖屏、不要长图、不要裁切主体';
+  if (normalized.length <= 1200) return [storyboardLayoutRule, bibleText, normalized].filter(Boolean).join('。');
 
-  return `${fallbackPrompt}\n用户确认提示词关键要求：${normalized.slice(0, 520)}`;
+  return `${fallbackPrompt}\n用户确认提示词关键要求：${storyboardLayoutRule}。${normalized.slice(0, 520)}`;
 }
 
 function getContentTypeFromFileName(fileName: string): string {
@@ -805,11 +806,8 @@ export async function POST(request: NextRequest) {
 
     // 第二步：用 RunningHub 图生图（rhart-image-g-2-official/image-to-image）
     // 传入所有参考图片，让 AI 继承角色/场景/道具的视觉风格
-    const ratio = imageSettings?.ratios?.[0] || '16:9';
-    const aspectRatioMap: Record<string, string> = {
-      '16:9': '16:9', '9:16': '9:16', '4:3': '4:3', '1:1': '1:1', '21:9': '21:9',
-    };
-    const aspectRatio = aspectRatioMap[ratio] || '16:9';
+    // 故事版总控图固定使用横屏，避免跟随视频竖屏比例导致预览信息太窄。
+    const aspectRatio = '16:9';
 
     let imageUrl: string;
     let imageModel = TEXT_TO_IMAGE_MODEL;
