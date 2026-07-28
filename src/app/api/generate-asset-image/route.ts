@@ -1038,6 +1038,37 @@ function getCharacterSkinRequirement(creationBible?: CreationBible): string {
   return '【人物皮肤要求】人物皮肤肤色均匀、无脏点，皮肤质感真实，呈自然哑光皮肤肤质；避免皮肤油光、脏污、斑驳、蜡像感和过度磨皮，保留细腻真实的自然皮肤纹理';
 }
 
+function getCharacterGenderPresentationDirectives(
+  gender: string,
+  data: Record<string, unknown>
+): string[] {
+  const context = [
+    data?.appearance,
+    data?.personality,
+    data?.background,
+    ...(Array.isArray(data?.looks)
+      ? data.looks.flatMap((look: any) => [look?.description, look?.costume, look?.hairstyle, look?.makeup])
+      : []),
+  ].map(value => String(value || '').trim()).filter(Boolean).join(' ');
+  const explicitlyAndrogynous = /(中性|雌雄莫辨|男女莫辨|反串|女扮男装|男扮女装|伪装成|性别模糊)/.test(context);
+  if (explicitlyAndrogynous) {
+    return ['【性别表达例外】剧本明确要求中性、反串或伪装，按剧本呈现；但人物真实身份、固定脸型和五官锚点仍须保持一致'];
+  }
+  if (gender === '女') {
+    return [
+      '【女性角色强约束】必须让观众一眼识别为女性角色。颧面柔和而有结构，下颌自然收束，眉眼与唇形具有清楚但真实的女性特征；避免宽重男性方颌、过强眉骨、男性化粗硬颈部和完全无女性信息的妆发',
+      '【女性妆发与轮廓】使用符合年龄、身份和时代的自然女性妆发与服装比例，不依赖夸张长发、浓妆或暴露服装区分性别；即使短发、职业装或战斗装，也必须保持稳定女性身份表达',
+    ];
+  }
+  if (gender === '男') {
+    return [
+      '【男性角色强约束】必须让观众一眼识别为男性角色。眉骨、眼窝、鼻梁、下颌、下巴与颈部保留自然男性骨相，眉形利落；避免细弯女妆眉、明显眼线睫毛妆、唇彩、女性化柔尖下巴和女性面部比例',
+      '【男性妆发与轮廓】服装肩颈和整体轮廓符合男性身份；清秀、年轻或温柔的男性仍须保留男性骨相和妆面，不得因为长发、白皙或精致五官而生成女性角色',
+    ];
+  }
+  return ['【性别表达】不得随机女性化。剧本没有明确女性证据时按男性角色呈现，并保持男性面部骨相、妆发和服装轮廓'];
+}
+
 function getCharacterFaceComposition(creationBible?: CreationBible): string {
   const creationType = normalizeCreationType(creationBible);
   if (creationType === '3D') {
@@ -1080,6 +1111,55 @@ type WardrobeLookContext = {
   mood?: unknown;
   sceneNames?: unknown;
 };
+
+function getDailyWardrobeSceneProfile(context: string): { label: string; directive: string } {
+  if (/(居家|家中|卧室|睡前|夜间在家|休息|睡衣|家居)/.test(context)) {
+    return {
+      label: '居家休息',
+      directive: '使用柔软针织、棉麻或细腻垂坠材质，以宽松但有比例的套装、罩衫或层次家居装呈现松弛感；保留人物签名色或小配饰，不要生成毫无版型的普通睡衣',
+    };
+  }
+  if (/(通勤|上班路上|地铁|街头|城市行走|赶路)/.test(context)) {
+    return {
+      label: '城市通勤',
+      directive: '强调可行动的利落外轮廓与叠穿关系，使用风衣、短外套、针织层或结构化包袋建立节奏；兼顾天气和移动需求，不要直接套用标准商务制服',
+    };
+  }
+  if (/(办公室|公司|职场|会议|工作|商务|谈判|发布)/.test(context)) {
+    return {
+      label: '职场工作',
+      directive: '通过肩线、领型、腰线和面料质感建立职业权力感，内外层级清楚，并用一处签名配饰或色彩焦点强化角色身份；避免模板化白衬衫黑西装',
+    };
+  }
+  if (/(约会|聚会|餐厅|酒吧|社交|见面|逛街|庆祝)/.test(context)) {
+    return {
+      label: '约会社交',
+      directive: '在人物日常衣橱上提高精致度，突出一处视觉焦点，例如领口、腰线、材质光泽、首饰或鞋履；有吸引力但不过度礼服化，不要堆叠多个抢眼元素',
+    };
+  }
+  if (/(旅行|出游|度假|游玩|郊外|海边|户外|露营)/.test(context)) {
+    return {
+      label: '休闲出游',
+      directive: '使用更轻松的层次、富有画面感的色块和适合环境的材质鞋履，兼顾活动性与镜头辨识度；避免随意T恤长裤式的无设计组合',
+    };
+  }
+  if (/(运动|训练|追逐|跑步|健身|行动|战斗)/.test(context)) {
+    return {
+      label: '运动行动',
+      directive: '采用便于动作的收束结构、功能分区和耐磨材质，以比例和拼接形成设计感；确保服装不会妨碍动作，不要生成泛化运动套装',
+    };
+  }
+  if (/(学校|校园|课堂|学生|宿舍|图书馆)/.test(context)) {
+    return {
+      label: '校园生活',
+      directive: '以符合年龄与校规的学院层次、针织、衬衫、夹克或裙裤比例建立青春感，用书包、鞋袜或小面积色彩形成角色记忆点；避免千篇一律制服模板',
+    };
+  }
+  return {
+    label: '日常生活',
+    directive: '以人物职业、收入、性格和当下活动为依据设计完整搭配，通过轮廓、比例、叠穿、材质和一个签名细节形成辨识度；避免无信息量的基础款堆叠',
+  };
+}
 
 function getLeadCastingDirectives(
   data: any,
@@ -1137,6 +1217,14 @@ function getLeadWardrobeDirectives(
     ...(Array.isArray(currentLook?.sceneNames) ? currentLook.sceneNames : []),
   ].map(value => String(value || '').trim()).filter(Boolean).join(' ');
   const isHighlight = /(宴会|舞会|婚礼|订婚|典礼|盛典|红毯|发布会|正式晚宴|加冕|登基|庆功|授勋|重要登场|身份揭晓|逆袭|复仇|决战|终局|告白|重逢|高光)/.test(lookContext);
+  const dailyProfile = getDailyWardrobeSceneProfile(lookContext);
+  const otherLookCostumes = Array.isArray(data.looks)
+    ? data.looks
+        .filter((look: unknown) => look && look !== currentLook && typeof look === 'object')
+        .map((look: any) => String(look.costume || look.description || '').trim())
+        .filter(Boolean)
+        .slice(0, 6)
+    : [];
 
   const directives = [
     `【主角服装设计】当前按“${isHighlight ? '高光造型' : '日常造型'}”执行。服装首先符合${background}、${region}、人物身份、场合、季节和动作需求，再强化设计感；不得照搬品牌成衣，不得无剧情依据跨时代混搭`,
@@ -1146,7 +1234,12 @@ function getLeadWardrobeDirectives(
   if (isHighlight) {
     directives.push('【高光强度】通过更明确的整体轮廓、材质对比、色彩焦点和配饰完成重要节点造型，保留2至3个视觉记忆点；高级、可拍摄、有戏剧张力，但不要堆满装饰');
   } else {
+    directives.push(`【日常情境：${dailyProfile.label}】${dailyProfile.directive}`);
     directives.push('【日常强度】日常不等于普通。用准确剪裁、身材比例、内外层次、材质差异和一个克制记忆点提升完成度；禁止仅生成泛化白衬衫黑裤子、普通西装或毫无结构的休闲装');
+  }
+
+  if (otherLookCostumes.length > 0) {
+    directives.push(`【造型去重】同人物已有造型摘要：${otherLookCostumes.join('；')}。当前造型不得只换颜色或微调配饰，至少在廓形、层次、材质或视觉焦点中的两项形成清楚差异；同时保留人物衣橱基因，不能变成另一个角色的随机穿搭`);
   }
 
   if (gender === '女') {
@@ -1315,6 +1408,9 @@ function buildPrompt(type: string, data: any, lookId?: string, imageVariant?: st
         character: data,
       });
       parts.push(...getCharacterStyleDirectives(creationBible));
+      if (!isAnimalCreature) {
+        parts.push(...getCharacterGenderPresentationDirectives(resolvedCharacterGender, data));
+      }
       if (isAnimalCreature) {
         parts.push(...getAnimalCreaturePromptDirectives(data));
       }
