@@ -27,7 +27,11 @@ import {
   inferCharacterEntityKind,
   resolveCharacterGenderByPolicy,
 } from '@/lib/character-semantic-rules';
-import { buildLeadCharacterGenerationDirectives } from '@/lib/lead-character-design';
+import {
+  buildLeadCharacterFinalFaceLock,
+  buildLeadCharacterGenerationDirectives,
+  isLeadCharacterRole,
+} from '@/lib/lead-character-design';
 import { buildCreationStyleInstruction } from '@/lib/creation-style-presets';
 
 // 图片数量限制
@@ -1082,6 +1086,17 @@ function getCharacterFaceComposition(creationBible?: CreationBible): string {
   return '【核心要求】人物正面人脸近景照片，只呈现头部到肩部，不生成全身';
 }
 
+function getLeadCharacterFaceComposition(creationBible?: CreationBible): string {
+  const creationType = normalizeCreationType(creationBible);
+  if (creationType === '3D') {
+    return '【核心要求】院线级风格化3D动画电影主角官方定妆肖像，正面头肩近景，像电影海报中心角色的选角概念图；精致面部拓扑、清楚眉眼情绪和有辨识度的头部轮廓，不生成全身';
+  }
+  if (creationType === '动漫') {
+    return '【核心要求】高品质二维动画电影主角官方定妆肖像，正面头肩近景，像动画主视觉海报中心角色；五官、眼神与发型轮廓精致鲜明，不生成全身';
+  }
+  return '【核心要求】电影或精品剧集主角的导演选角定妆肖像，正面头肩近景，具有海报中心人物的颜值、气质、眼神和银幕存在感；不是证件照、员工照或普通头像，不生成全身';
+}
+
 function getCharacterNegativeRequirement(creationBible?: CreationBible, fullBody = false): string {
   const framing = fullBody ? '不要裁切身体或脚部' : '不要全身照，不要半身环境照';
   const creationType = normalizeCreationType(creationBible);
@@ -1096,13 +1111,9 @@ function getCharacterNegativeRequirement(creationBible?: CreationBible, fullBody
 }
 
 function isLeadCharacter(data: any): boolean {
-  const role = String(data?.role || '').trim().toLowerCase();
-  return role === '主角' ||
-    role.includes('男主') ||
-    role.includes('女主') ||
-    role.includes('protagonist') ||
-    role === 'lead' ||
-    role === 'main character';
+  return isLeadCharacterRole(data?.role) ||
+    data?.isProtagonist === true ||
+    data?.isLead === true;
 }
 
 type WardrobeLookContext = {
@@ -1593,7 +1604,9 @@ function buildPrompt(type: string, data: any, lookId?: string, imageVariant?: st
         } else {
           parts.push(isAnimalCreature
             ? '【核心要求】奇幻动物角色身份基准图。四足角色采用完整四足全身的侧前方三分之四视图，清楚呈现动物头部、吻部、耳朵、眼睛、皮毛、爪、尾巴与整体物种轮廓；不得生成人类头像'
-            : getCharacterFaceComposition(creationBible));
+            : isMainCharacter
+              ? getLeadCharacterFaceComposition(creationBible)
+              : getCharacterFaceComposition(creationBible));
           parts.push(isAnimalCreature
             ? '【信息分流】读取物种、动物头骨、吻部、耳形、眼睛、牙齿、皮毛花纹、爪、尾巴与身体比例，忽略任何人类脸型、妆容和发型模板'
             : '【信息分流】这是正脸近景基准图，只读取发型、脸型、五官、肤色、皮肤质感和神态；忽略身高、体重、体型、肩腰、四肢比例与服装信息');
@@ -1694,6 +1707,28 @@ function buildPrompt(type: string, data: any, lookId?: string, imageVariant?: st
 
   const creationStyleInstruction = buildCreationStyleInstruction(creationBible?.creativeStyle);
   if (creationStyleInstruction) parts.push(creationStyleInstruction);
+  if (
+    type === 'character' &&
+    imageVariant === 'character-face' &&
+    isLeadCharacter(data) &&
+    inferCharacterEntityKind(data) !== 'animal-creature'
+  ) {
+    const resolvedCharacterGender = resolveCharacterGenderByPolicy({
+      name: data?.name,
+      currentGender: data?.gender,
+      character: data,
+    });
+    parts.push(...buildLeadCharacterFinalFaceLock({
+      gender: resolvedCharacterGender,
+      creationBible,
+      name: data?.name,
+      role: data?.role,
+      personality: data?.personality,
+      appearance: data?.appearance,
+      background: data?.background,
+      arc: data?.arc,
+    }));
+  }
   return parts.join('；');
 }
 
