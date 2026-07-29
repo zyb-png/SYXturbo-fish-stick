@@ -17,6 +17,7 @@ import {
   sumStoryboardDurations,
   STORYBOARD_GROUP_MAX_SECONDS,
 } from '@/lib/storyboard-duration-groups';
+import { buildCreationStyleInstruction } from '@/lib/creation-style-presets';
 import fs from 'fs';
 import path from 'path';
 import { createHash } from 'crypto';
@@ -119,13 +120,15 @@ type CreationBiblePayload = {
   creationType?: string;
   subjectRegion?: string;
   creationBackground?: string;
+  creativeStyle?: string;
 };
 
 function buildCreationBibleVisualText(creationBible?: CreationBiblePayload): string {
   const creationType = cleanText(creationBible?.creationType);
   const subjectRegion = cleanText(creationBible?.subjectRegion);
   const creationBackground = cleanText(creationBible?.creationBackground);
-  if (!creationType && !subjectRegion && !creationBackground) return '';
+  const creationStyleInstruction = buildCreationStyleInstruction(creationBible?.creativeStyle);
+  if (!creationType && !subjectRegion && !creationBackground && !creationStyleInstruction) return '';
 
   const parts: string[] = [];
   if (creationType === '仿真人') {
@@ -149,6 +152,7 @@ function buildCreationBibleVisualText(creationBible?: CreationBiblePayload): str
   } else if (creationBackground === '古代') {
     parts.push('创作背景为古代，服饰形制、发式、建筑、交通、照明、器物和礼仪符合古代语境，禁止无剧情依据的现代元素');
   }
+  if (creationStyleInstruction) parts.push(creationStyleInstruction);
 
   return parts.length > 0
     ? `${parts.join('；')}；不要改变剧情、台词和人物关系；剧本明确的回忆、年代跳转或穿越按原剧情呈现`

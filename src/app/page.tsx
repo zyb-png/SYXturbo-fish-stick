@@ -125,6 +125,12 @@ import {
   normalizeOpeningShotActionChange,
   normalizeOpeningShotContinuity,
 } from '@/lib/storyboard-opening-shot';
+import {
+  CREATION_STYLE_PRESETS,
+  getCreationStylePreset,
+  isCreationStyleCompatible,
+  type CreationStyleId,
+} from '@/lib/creation-style-presets';
 
 const STORYBOARD_BATCH_CONCURRENCY = 4;
 
@@ -1262,18 +1268,20 @@ interface CreationBibleSettings {
   creationType: CreationType | '';
   subjectRegion: CreationRegion | '';
   creationBackground: CreationBackground | '';
+  creativeStyle: CreationStyleId | '';
   confirmed: boolean;
 }
 
 type CreationBiblePayload = Pick<
   CreationBibleSettings,
-  'creationType' | 'subjectRegion' | 'creationBackground'
+  'creationType' | 'subjectRegion' | 'creationBackground' | 'creativeStyle'
 >;
 
 const DEFAULT_CREATION_BIBLE: CreationBibleSettings = {
   creationType: '',
   subjectRegion: '',
   creationBackground: '',
+  creativeStyle: '',
   confirmed: false,
 };
 
@@ -1991,6 +1999,10 @@ export default function StoryboardGenerator() {
     STORAGE_KEYS.CREATION_BIBLE,
     DEFAULT_CREATION_BIBLE
   );
+  const selectedCreationStylePreset = useMemo(
+    () => getCreationStylePreset(creationBible.creativeStyle),
+    [creationBible.creativeStyle]
+  );
 
   // 五个并行提取结果
   const [scenesData, setScenesData] = usePersistentState<any>(STORAGE_KEYS.SCENES_DATA, null);
@@ -2606,11 +2618,12 @@ export default function StoryboardGenerator() {
     !!creationBible.creationBackground
   ), [creationBible]);
 
-  const getCreationBiblePayload = useCallback(() => ({
+  const getCreationBiblePayload = useCallback((): CreationBiblePayload => ({
     creationType: creationBible.creationType,
     subjectRegion: creationBible.subjectRegion,
     creationBackground: creationBible.creationBackground,
-  }), [creationBible.creationBackground, creationBible.creationType, creationBible.subjectRegion]);
+    creativeStyle: creationBible.creativeStyle || '',
+  }), [creationBible.creationBackground, creationBible.creationType, creationBible.creativeStyle, creationBible.subjectRegion]);
 
   const playExecutionScriptSuccessSound = useCallback(() => {
     if (typeof window === 'undefined') return;
@@ -10264,7 +10277,7 @@ export default function StoryboardGenerator() {
   });
 
   const getCreationBibleExportText = () => (
-    `创作类型：${creationBible.creationType || '未选择'}；创作题材：${creationBible.subjectRegion || '未选择'}；创作背景：${creationBible.creationBackground || '未选择'}`
+    `创作类型：${creationBible.creationType || '未选择'}；创作风格：${selectedCreationStylePreset?.name || '沿用类型默认风格'}；创作题材：${creationBible.subjectRegion || '未选择'}；创作背景：${creationBible.creationBackground || '未选择'}`
   );
 
   const getPromptExportText = (
@@ -10679,6 +10692,14 @@ export default function StoryboardGenerator() {
   const confirmCreationBibleAndStartExtraction = async () => {
     if (!creationBible.creationType || !creationBible.subjectRegion || !creationBible.creationBackground) {
       toast.error('请先选择创作类型、创作题材和创作背景');
+      return;
+    }
+    if ((creationBible.creationType === '动漫' || creationBible.creationType === '3D') && !creationBible.creativeStyle) {
+      toast.error('请为当前创作类型选择一种固定创作风格');
+      return;
+    }
+    if (!isCreationStyleCompatible(creationBible.creationType, creationBible.creativeStyle)) {
+      toast.error('创作类型与创作风格不匹配，请重新选择');
       return;
     }
     if (!(await requireLoginBeforePaidAction())) return;
@@ -11792,11 +11813,26 @@ export default function StoryboardGenerator() {
 	                        <CheckCircle2 className="h-4 w-4" />
 	                        创作圣经已确认，后续流程将按以下方向执行
 	                      </div>
-                      <div className="grid gap-3 sm:grid-cols-3">
+                      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
 	                        <div className="rounded-md border border-amber-400/20 bg-black/20 px-3 py-2">
 	                          <div className="text-[11px] text-amber-200/70">创作类型</div>
 	                          <div className="mt-1 text-sm font-semibold text-amber-50">{creationBible.creationType}</div>
 	                        </div>
+                        <div className="overflow-hidden rounded-md border border-amber-400/20 bg-black/20">
+                          {selectedCreationStylePreset && (
+                            <img
+                              src={selectedCreationStylePreset.image}
+                              alt={selectedCreationStylePreset.name}
+                              className="aspect-[16/7] w-full object-cover object-top"
+                            />
+                          )}
+                          <div className="px-3 py-2">
+                            <div className="text-[11px] text-amber-200/70">创作风格</div>
+                            <div className="mt-1 text-sm font-semibold text-amber-50">
+                              {selectedCreationStylePreset?.name || '沿用类型默认风格'}
+                            </div>
+                          </div>
+                        </div>
                         <div className="rounded-md border border-amber-400/20 bg-black/20 px-3 py-2">
                           <div className="text-[11px] text-amber-200/70">创作题材</div>
                           <div className="mt-1 text-sm font-semibold text-amber-50">{creationBible.subjectRegion}</div>
@@ -11850,6 +11886,9 @@ export default function StoryboardGenerator() {
 	                                onClick={() => setCreationBible(prev => ({
 	                                  ...prev,
 	                                  creationType: option.value,
+	                                  creativeStyle: isCreationStyleCompatible(option.value, prev.creativeStyle)
+	                                    ? prev.creativeStyle
+	                                    : '',
 	                                  confirmed: false,
 	                                }))}
 	                              >
@@ -11862,6 +11901,68 @@ export default function StoryboardGenerator() {
 	                          })}
 	                        </div>
 	                      </div>
+
+                        <div className="space-y-2">
+                          <div className="flex flex-wrap items-end justify-between gap-2">
+                            <Label className="text-sm text-amber-100">创作风格（2D / 3D 单选）</Label>
+                            <span className="text-[11px] leading-5 text-amber-100/55">
+                              选择风格会同步匹配创作类型；仿真人可不选择动画风格
+                            </span>
+                          </div>
+                          <Tabs
+                            key={creationBible.creationType || 'creation-style'}
+                            defaultValue={creationBible.creationType === '3D' ? '3D' : '2D'}
+                            className="rounded-md border border-amber-400/20 bg-black/15 p-2"
+                          >
+                            <TabsList className="grid h-auto w-full grid-cols-2 bg-black/30 p-1">
+                              <TabsTrigger value="2D" className="py-2 text-xs">2D 动画风格</TabsTrigger>
+                              <TabsTrigger value="3D" className="py-2 text-xs">3D 卡通风格</TabsTrigger>
+                            </TabsList>
+                            {(['2D', '3D'] as const).map(category => (
+                              <TabsContent key={category} value={category} className="mt-2">
+                                <div className="grid gap-2 md:grid-cols-2">
+                                  {CREATION_STYLE_PRESETS.filter(preset => preset.category === category).map(preset => {
+                                    const selected = creationBible.creativeStyle === preset.id;
+                                    return (
+                                      <button
+                                        key={preset.id}
+                                        type="button"
+                                        aria-pressed={selected}
+                                        className={`overflow-hidden rounded-md border text-left transition-colors ${
+                                          selected
+                                            ? 'border-amber-300 bg-amber-500/10 shadow-[0_0_18px_rgba(245,184,64,0.25)]'
+                                            : 'border-amber-400/20 bg-black/25 hover:border-amber-300/55 hover:bg-amber-500/5'
+                                        }`}
+                                        onClick={() => setCreationBible(prev => ({
+                                          ...prev,
+                                          creationType: preset.category === '2D' ? '动漫' : '3D',
+                                          creativeStyle: preset.id,
+                                          confirmed: false,
+                                        }))}
+                                      >
+                                        <img
+                                          src={preset.image}
+                                          alt={`${preset.name}示例`}
+                                          loading="lazy"
+                                          className="aspect-video w-full object-cover object-top"
+                                        />
+                                        <span className="block px-3 py-2.5">
+                                          <span className="flex items-center justify-between gap-2">
+                                            <span className="text-sm font-semibold text-amber-50">{preset.name}</span>
+                                            <Badge variant={selected ? 'default' : 'outline'} className="shrink-0 text-[10px]">
+                                              {selected ? '已选择' : preset.category}
+                                            </Badge>
+                                          </span>
+                                          <span className="mt-1 block text-xs leading-5 text-amber-50/60">{preset.summary}</span>
+                                        </span>
+                                      </button>
+                                    );
+                                  })}
+                                </div>
+                              </TabsContent>
+                            ))}
+                          </Tabs>
+                        </div>
 
 	                      <div className="space-y-2">
 	                        <Label className="text-sm text-amber-100">创作题材（单选）</Label>
@@ -11925,7 +12026,8 @@ export default function StoryboardGenerator() {
 	                          isGeneratingExecutionScript ||
 	                          !creationBible.creationType ||
 	                          !creationBible.subjectRegion ||
-	                          !creationBible.creationBackground
+	                          !creationBible.creationBackground ||
+                              ((creationBible.creationType === '动漫' || creationBible.creationType === '3D') && !creationBible.creativeStyle)
 	                        }
 	                      >
 	                        {isGeneratingExecutionScript ? (

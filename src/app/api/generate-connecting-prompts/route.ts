@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { stream as oaiStream, invoke as oaiInvoke } from '@/lib/openai-client';
 import { estimateMessagesTokens, estimateTokens } from '@/lib/token-utils';
 import { requireUserLoginResponse } from '@/lib/auth-guard';
+import { buildCreationStyleInstruction } from '@/lib/creation-style-presets';
 
 // 设置 API 路由超时时间为 5 分钟（LLM 生成需要较长时间）
 export const maxDuration = 600; // 单位：秒
@@ -32,6 +33,7 @@ interface CreationBiblePayload {
   creationType?: string;
   subjectRegion?: string;
   creationBackground?: string;
+  creativeStyle?: string;
 }
 
 function cleanText(value: unknown): string {
@@ -163,7 +165,8 @@ function buildCreationBibleInstruction(creationBible?: CreationBiblePayload): st
   const creationType = cleanText(creationBible?.creationType);
   const subjectRegion = cleanText(creationBible?.subjectRegion);
   const creationBackground = cleanText(creationBible?.creationBackground);
-  if (!creationType && !subjectRegion && !creationBackground) return '';
+  const creationStyleInstruction = buildCreationStyleInstruction(creationBible?.creativeStyle);
+  if (!creationType && !subjectRegion && !creationBackground && !creationStyleInstruction) return '';
 
   const lines = ['【重要】创作圣经（必须应用于所有故事版面板描述和视频提示词）：'];
   if (creationType === '仿真人') {
@@ -187,6 +190,7 @@ function buildCreationBibleInstruction(creationBible?: CreationBiblePayload): st
   } else if (creationBackground === '古代') {
     lines.push('- 创作背景：古代。人物服饰形制、发式、建筑、陈设、交通、照明、器物和礼仪必须符合古代语境，禁止无剧情依据的现代元素。');
   }
+  if (creationStyleInstruction) lines.push(creationStyleInstruction);
 
   lines.push('- 创作圣经只约束视觉风格、题材语境和时代背景，不能修改原剧情、台词、人物关系和镜头事件；剧本明确的回忆、年代跳转或穿越仍按原剧情呈现。');
   return lines.join('\n');

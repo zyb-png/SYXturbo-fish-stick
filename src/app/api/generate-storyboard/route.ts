@@ -20,6 +20,7 @@ import {
   normalizeOpeningShotActionChange,
   normalizeOpeningShotContinuity,
 } from '@/lib/storyboard-opening-shot';
+import { buildCreationStyleInstruction } from '@/lib/creation-style-presets';
 
 interface Segment {
   id: number;
@@ -87,11 +88,13 @@ function buildCreationBibleInstruction(creationBible?: {
   creationType?: string;
   subjectRegion?: string;
   creationBackground?: string;
+  creativeStyle?: string;
 }): string {
   const creationType = cleanPromptText(creationBible?.creationType);
   const subjectRegion = cleanPromptText(creationBible?.subjectRegion);
   const creationBackground = cleanPromptText(creationBible?.creationBackground);
-  if (!creationType && !subjectRegion && !creationBackground) return '';
+  const creationStyleInstruction = buildCreationStyleInstruction(creationBible?.creativeStyle);
+  if (!creationType && !subjectRegion && !creationBackground && !creationStyleInstruction) return '';
 
   const lines = ['【创作圣经】'];
   if (creationType === '仿真人') {
@@ -115,6 +118,7 @@ function buildCreationBibleInstruction(creationBible?: {
   } else if (creationBackground === '古代') {
     lines.push('创作背景：古代。镜头内的服饰形制、发式、建筑、器物、交通、照明、礼仪和社会秩序必须符合古代语境，禁止无剧情依据的现代元素。');
   }
+  if (creationStyleInstruction) lines.push(creationStyleInstruction);
 
   lines.push('注意：创作圣经只约束视觉风格、题材语境和时代背景，不能改写剧情、台词、人物关系和事件顺序；如剧本明确存在回忆、年代跳转或穿越，按原剧情呈现相应时期。');
   return lines.join('\n');

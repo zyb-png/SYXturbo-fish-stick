@@ -22,6 +22,10 @@ import {
   resolveCharacterGenderByPolicy,
 } from '@/lib/character-semantic-rules';
 import { buildLeadCharacterExtractionInstruction } from '@/lib/lead-character-design';
+import {
+  buildCreationStyleInstruction,
+  getCreationStylePreset,
+} from '@/lib/creation-style-presets';
 
 export const maxDuration = 600;
 
@@ -33,6 +37,7 @@ type CreationBible = {
   creationType?: string;
   subjectRegion?: string;
   creationBackground?: string;
+  creativeStyle?: string;
 };
 
 function buildCreationBibleInstruction(creationBible?: CreationBible): string {
@@ -41,7 +46,8 @@ function buildCreationBibleInstruction(creationBible?: CreationBible): string {
   const creationBackground = typeof creationBible?.creationBackground === 'string'
     ? creationBible.creationBackground.trim()
     : '';
-  if (!creationType && !subjectRegion && !creationBackground) return '';
+  const creationStyleInstruction = buildCreationStyleInstruction(creationBible?.creativeStyle);
+  if (!creationType && !subjectRegion && !creationBackground && !creationStyleInstruction) return '';
 
   const lines = ['【创作圣经约束】'];
   if (creationType === '仿真人') {
@@ -63,6 +69,7 @@ function buildCreationBibleInstruction(creationBible?: CreationBible): string {
   } else if (creationBackground === '古代') {
     lines.push('创作背景：古代。人物的发式、冠帽、服装形制、妆容、首饰、鞋履和身份礼制应符合古代语境，禁止无剧情依据的现代服饰。');
   }
+  if (creationStyleInstruction) lines.push(creationStyleInstruction);
   lines.push('这些约束只影响视觉风格、题材语境和时代背景，不允许改动原剧情、人物关系、性别、年龄证据和关键事件；如剧本明确存在回忆、年代跳转或穿越，按原剧情呈现相应时期。');
   return lines.join('\n');
 }
@@ -91,6 +98,8 @@ function buildLeadWardrobeInstruction(creationBible?: CreationBible): string {
 }
 
 function getCreationStyleLabel(creationBible?: CreationBible): string {
+  const preset = getCreationStylePreset(creationBible?.creativeStyle);
+  if (preset) return preset.name;
   if (creationBible?.creationType === '3D') return '3D角色动画风格';
   if (creationBible?.creationType === '动漫') return '动漫角色设计风格';
   return '真人短剧写实风格';

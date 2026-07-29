@@ -6,6 +6,7 @@ import {
   sumStoryboardDurations,
   STORYBOARD_GROUP_MAX_SECONDS,
 } from '@/lib/storyboard-duration-groups';
+import { buildCreationStyleInstruction } from '@/lib/creation-style-presets';
 
 export const maxDuration = 300;
 
@@ -100,6 +101,7 @@ type StoryboardPromptPayload = {
     creationType?: string;
     subjectRegion?: string;
     creationBackground?: string;
+    creativeStyle?: string;
   };
 };
 
@@ -117,7 +119,8 @@ function buildCreationBibleText(creationBible?: StoryboardPromptPayload['creatio
   const creationType = cleanText(creationBible?.creationType);
   const subjectRegion = cleanText(creationBible?.subjectRegion);
   const creationBackground = cleanText(creationBible?.creationBackground);
-  if (!creationType && !subjectRegion && !creationBackground) return '';
+  const creationStyleInstruction = buildCreationStyleInstruction(creationBible?.creativeStyle);
+  if (!creationType && !subjectRegion && !creationBackground && !creationStyleInstruction) return '';
 
   const lines = ['创作圣经：'];
   if (creationType === '仿真人') {
@@ -141,6 +144,7 @@ function buildCreationBibleText(creationBible?: StoryboardPromptPayload['creatio
   } else if (creationBackground === '古代') {
     lines.push('创作背景为古代，所有面板中的服饰形制、发式、建筑、器物、交通、照明和礼仪符合古代语境，禁止无剧情依据的现代元素。');
   }
+  if (creationStyleInstruction) lines.push(creationStyleInstruction);
 
   lines.push('创作圣经只影响视觉风格、题材语境与时代背景，不改剧情、台词、人物关系和镜头事件；剧本明确的回忆、年代跳转或穿越仍按原剧情呈现。');
   return lines.join('\n');

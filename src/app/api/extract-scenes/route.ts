@@ -5,6 +5,7 @@ import { tryExtractAndFixJSON, removeControlCharsInStrings } from '@/lib/json-ut
 import { requireUserLoginResponse } from '@/lib/auth-guard';
 import { mapWithConcurrency, selectEvenlySpaced, splitTextForFullScan } from '@/lib/full-text-scan';
 import { normalizeSceneMarkerIdentity, normalizeSceneStateUnits } from '@/lib/scene-state-utils';
+import { buildCreationStyleInstruction } from '@/lib/creation-style-presets';
 
 export const maxDuration = 600;
 
@@ -16,6 +17,7 @@ type CreationBible = {
   creationType?: string;
   subjectRegion?: string;
   creationBackground?: string;
+  creativeStyle?: string;
 };
 
 type SceneOccurrence = {
@@ -31,7 +33,8 @@ function buildCreationBibleInstruction(creationBible?: CreationBible): string {
   const creationBackground = typeof creationBible?.creationBackground === 'string'
     ? creationBible.creationBackground.trim()
     : '';
-  if (!creationType && !subjectRegion && !creationBackground) return '';
+  const creativeStyleInstruction = buildCreationStyleInstruction(creationBible?.creativeStyle);
+  if (!creationType && !subjectRegion && !creationBackground && !creativeStyleInstruction) return '';
 
   const lines = ['【创作圣经约束】'];
   if (creationType === '仿真人') {
@@ -53,6 +56,7 @@ function buildCreationBibleInstruction(creationBible?: CreationBible): string {
   } else if (creationBackground === '古代') {
     lines.push('创作背景：古代。建筑形制、室内陈设、道路、交通、照明、标识、材料与生活设施应符合古代制度和传统工艺，禁止无剧情依据的现代科技元素。');
   }
+  if (creativeStyleInstruction) lines.push(creativeStyleInstruction);
   lines.push('这些约束只影响视觉风格、题材语境和时代背景，不允许改动原剧情、人物关系和关键事件；如剧本明确存在回忆、年代跳转或穿越，按原剧情呈现相应时期。');
   return lines.join('\n');
 }

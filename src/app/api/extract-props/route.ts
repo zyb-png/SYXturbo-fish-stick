@@ -4,6 +4,7 @@ import { estimateMessagesTokens, estimateTokens } from '@/lib/token-utils';
 import { tryExtractAndFixJSON } from '@/lib/json-utils';
 import { requireUserLoginResponse } from '@/lib/auth-guard';
 import { expandPropStateUnits } from '@/lib/prop-state-utils';
+import { buildCreationStyleInstruction } from '@/lib/creation-style-presets';
 
 // 每批处理的道具数
 const BATCH_SIZE = 8;
@@ -16,6 +17,7 @@ type CreationBible = {
   creationType?: string;
   subjectRegion?: string;
   creationBackground?: string;
+  creativeStyle?: string;
 };
 
 type PropOccurrence = {
@@ -59,7 +61,8 @@ function buildCreationBibleInstruction(creationBible?: CreationBible): string {
   const creationBackground = typeof creationBible?.creationBackground === 'string'
     ? creationBible.creationBackground.trim()
     : '';
-  if (!creationType && !subjectRegion && !creationBackground) return '';
+  const creationStyleInstruction = buildCreationStyleInstruction(creationBible?.creativeStyle);
+  if (!creationType && !subjectRegion && !creationBackground && !creationStyleInstruction) return '';
 
   const lines = ['【创作圣经约束】'];
   if (creationType === '仿真人') {
@@ -81,6 +84,7 @@ function buildCreationBibleInstruction(creationBible?: CreationBible): string {
   } else if (creationBackground === '古代') {
     lines.push('创作背景：古代。道具的造型、材料、制造工艺、文字形态和使用方式应符合古代生产力与礼制，禁止无剧情依据的现代工业品和电子设备。');
   }
+  if (creationStyleInstruction) lines.push(creationStyleInstruction);
   lines.push('这些约束只影响视觉风格、题材语境和时代背景，不允许改动原剧情、道具功能和归属关系；如剧本明确存在回忆、年代跳转或穿越，按原剧情保留跨时代道具。');
   return lines.join('\n');
 }

@@ -28,6 +28,7 @@ import {
   resolveCharacterGenderByPolicy,
 } from '@/lib/character-semantic-rules';
 import { buildLeadCharacterGenerationDirectives } from '@/lib/lead-character-design';
+import { buildCreationStyleInstruction } from '@/lib/creation-style-presets';
 
 // 图片数量限制
 const MAX_IMAGES_PER_ASSET = 3;
@@ -919,6 +920,7 @@ type CreationBible = {
   creationType?: string;
   subjectRegion?: string;
   creationBackground?: string;
+  creativeStyle?: string;
 };
 
 function normalizeCreationType(creationBible?: CreationBible): string {
@@ -1360,6 +1362,8 @@ function buildCustomAssetPrompt(
   } else if (normalizeCreationType(creationBible) === '动漫') {
     parts.push(TWO_D_ANIME_FINAL_LOCK);
   }
+  const creationStyleInstruction = buildCreationStyleInstruction(creationBible?.creativeStyle);
+  if (creationStyleInstruction) parts.push(creationStyleInstruction);
   return parts.filter(Boolean).join('；');
 }
 
@@ -1688,6 +1692,8 @@ function buildPrompt(type: string, data: any, lookId?: string, imageVariant?: st
       break;
   }
 
+  const creationStyleInstruction = buildCreationStyleInstruction(creationBible?.creativeStyle);
+  if (creationStyleInstruction) parts.push(creationStyleInstruction);
   return parts.join('；');
 }
 
