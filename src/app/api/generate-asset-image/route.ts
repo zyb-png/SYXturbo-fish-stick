@@ -1110,7 +1110,59 @@ type WardrobeLookContext = {
   costume?: unknown;
   mood?: unknown;
   sceneNames?: unknown;
+  hairstyle?: unknown;
+  accessories?: unknown;
+  makeup?: unknown;
 };
+
+function getLeadHairDesignDirectives(
+  data: Record<string, unknown>,
+  currentLook: WardrobeLookContext | null | undefined,
+  resolvedGender: string,
+  creationBible?: CreationBible
+): string[] {
+  if (!isLeadCharacter(data) || inferCharacterEntityKind(data) === 'animal-creature') return [];
+
+  const gender = String(resolvedGender || '').trim();
+  const background = normalizeCreationBackground(creationBible);
+  const region = normalizeSubjectRegion(creationBible) || '剧本对应地域';
+  const specifiedHair = String(currentLook?.hairstyle || '').trim();
+  const context = [
+    data.name,
+    data.role,
+    data.personality,
+    data.appearance,
+    currentLook?.scene,
+    currentLook?.stage,
+    currentLook?.description,
+    currentLook?.mood,
+  ].map(value => String(value || '').trim()).filter(Boolean).join(' ');
+  const hasUsableSpecifiedHair = specifiedHair.length >= 6 && !/^(自然|默认|日常|普通|简洁|利落|古代|现代|无)$/.test(specifiedHair);
+
+  const directives = [
+    `【主角发型设计】发型必须符合${background || '剧本对应时代'}、${region}、年龄、职业、脸型、性格和当前剧情场合；目标是形成一眼可识别的头部轮廓和银幕记忆点，不是默认短发、普通披发或千篇一律中分`,
+  ];
+
+  if (hasUsableSpecifiedHair) {
+    directives.push(`【当前发型为准】严格执行造型资料中的“${specifiedHair}”，保留其分缝/刘海、长度、卷直、蓬松度、束发结构和发饰关系；只补足描述中未写明的结构，不得擅自换成另一款发型`);
+  } else if (background === '古代' && gender === '女') {
+    directives.push('【古代女主发髻库】根据身份和剧情只选择一套最合适的完整设计：金步摇流苏、珍珠垂链发冠、凤凰金冠、玉兰花簪、红绸发带、白羽仙鹤发饰、翡翠牡丹发钗或梅花银簪；先设计清楚发髻体块，再配置一个视觉中心，禁止满头堆饰和现代影楼古装头');
+  } else if (background === '古代' && gender === '男') {
+    directives.push('【古代男主冠发库】根据身份和剧情只选择一套最合适的束发设计：束发金冠、玉梁发冠、盘龙冠、竹节银冠、云纹宝冠、翎羽冠饰、山字金冠或花丝冠梁；冠高、材质、纹样与阶层一致，发冠服务身份感，不做廉价影楼头套');
+  } else if (gender === '女') {
+    directives.push('【现代女主发型库】根据脸型与气质只选择一款并深化：中分蓬松短卷、湿发背头短卷、超短齐刘海直发、中分八字刘海及胸长发、深侧分长直发、姬发式双侧发髻、中分高马尾、无刘海湿发背头黑长直；明确发根蓬松度、发束走向和轮廓，避免普通披肩长发');
+  } else if (gender === '男') {
+    directives.push('【现代男主发型库】根据脸型、职业和气质只选择一款并深化：两侧推短狼尾、纹理侧分短发、高颅顶侧分短发、鲻鱼头层次碎发、中分垂顺短发、微分碎盖、利落寸头、低束马尾、侧背油头、摩根碎短发、羊毛卷短发、半扎层次短发、湿发纹理背头、纹理侧分长发、顶部蓬松飞机头、偏分微卷短发、中分锁骨长发或轻薄前刺短发；保持清楚男性轮廓，不生成女性假发感');
+  }
+
+  if (/(宴会|舞会|婚礼|典礼|盛典|发布会|加冕|登基|决战|高光|重要登场)/.test(context)) {
+    directives.push('【高光妆发】可以提高精致度、发丝控制和配饰等级，但只保留一个核心视觉焦点；不得同时堆叠复杂发型、夸张发饰和浓重妆容');
+  } else {
+    directives.push('【日常妆发】保持可生活、可行动和镜头连续性，在固定发型轮廓内用束发方式、纹理、发缝或小配饰做有意义的变化，不得每个场景随机换头');
+  }
+
+  return directives;
+}
 
 function getDailyWardrobeSceneProfile(context: string): { label: string; directive: string } {
   if (/(居家|家中|卧室|睡前|夜间在家|休息|睡衣|家居)/.test(context)) {
@@ -1187,6 +1239,12 @@ function getLeadCastingDirectives(
   return buildLeadCharacterGenerationDirectives({
     gender,
     creationBible,
+    name: data?.name,
+    role: data?.role,
+    personality: data?.personality,
+    appearance: data?.appearance,
+    background: data?.background,
+    arc: data?.arc,
   });
 }
 
@@ -1229,6 +1287,8 @@ function getLeadWardrobeDirectives(
   const directives = [
     `【主角服装设计】当前按“${isHighlight ? '高光造型' : '日常造型'}”执行。服装首先符合${background}、${region}、人物身份、场合、季节和动作需求，再强化设计感；不得照搬品牌成衣，不得无剧情依据跨时代混搭`,
     '【个人衣橱连续性】延续该主角稳定的主辅色、常用轮廓和1至2个签名细节。换装后仍应看出属于同一人物，不要每套衣服像不同项目的随机造型',
+    '【服装设计三层结构】第一层确定远看可识别的整体廓形和身材比例；第二层确定肩线、领型、腰线、下摆及内外层关系；第三层才加入材质对比、主辅色和一个签名细节。三层都要完整，禁止只罗列衣服名称',
+    '【镜头记忆点】整套造型只设置1至2个焦点，可从领型、肩线、腰封、袖型、下摆、纹样、首饰、包袋、鞋履或特殊材质中选择；其他部分负责衬托，避免全身每处都抢戏',
   ];
 
   if (isHighlight) {
@@ -1241,6 +1301,8 @@ function getLeadWardrobeDirectives(
   if (otherLookCostumes.length > 0) {
     directives.push(`【造型去重】同人物已有造型摘要：${otherLookCostumes.join('；')}。当前造型不得只换颜色或微调配饰，至少在廓形、层次、材质或视觉焦点中的两项形成清楚差异；同时保留人物衣橱基因，不能变成另一个角色的随机穿搭`);
   }
+
+  directives.push(...getLeadHairDesignDirectives(data, currentLook, resolvedGender, creationBible));
 
   if (gender === '女') {
     directives.push(isHighlight
@@ -1540,6 +1602,7 @@ function buildPrompt(type: string, data: any, lookId?: string, imageVariant?: st
           appendCharacterIdentity(false);
           if (isMainCharacter) {
             parts.push(...getLeadCastingDirectives(data, resolvedCharacterGender, creationBible));
+            parts.push(...getLeadHairDesignDirectives(data, null, resolvedCharacterGender, creationBible));
           }
         }
       }
