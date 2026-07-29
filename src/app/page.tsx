@@ -126,6 +126,7 @@ import {
   normalizeOpeningShotContinuity,
 } from '@/lib/storyboard-opening-shot';
 import {
+  buildCreationStyleInstruction,
   CREATION_STYLE_PRESETS,
   getCreationStylePreset,
   isCreationStyleCompatible,
@@ -6637,6 +6638,7 @@ export default function StoryboardGenerator() {
   };
 
   const buildVideoFilmToneInstruction = () => {
+    const creationStyleInstruction = buildCreationStyleInstruction(creationBible.creativeStyle);
     const styles = globalImageSettings.styles?.length
       ? globalImageSettings.styles.join('、')
       : '';
@@ -6648,6 +6650,10 @@ export default function StoryboardGenerator() {
       ? Array.from(new Set([effectiveRatio, ...globalImageSettings.ratios])).join('、')
       : effectiveRatio;
     const toneLines = [
+      creationBible.creationType ? `创作类型：${creationBible.creationType}` : '',
+      selectedCreationStylePreset ? `创作圣经固定风格：${selectedCreationStylePreset.name}` : '',
+      creationBible.subjectRegion ? `创作题材：${creationBible.subjectRegion}` : '',
+      creationBible.creationBackground ? `创作背景：${creationBible.creationBackground}` : '',
       `当前视频画面比例：${effectiveRatio}`,
       `提示词模块画面比例设置：${ratioOptions}`,
       styles ? `画面风格：${styles}` : '',
@@ -6657,8 +6663,10 @@ export default function StoryboardGenerator() {
     if (toneLines.length === 0) return '';
     return [
       '【全片统一影片基调】',
+      creationStyleInstruction,
       ...toneLines,
-      '以上基调必须贯穿本组视频：角色、场景、道具、色彩、材质、镜头质感和光影氛围保持一致；不得因为参考图或单镜头描述而偏离用户在提示词模块选择的风格与光影。',
+      '优先级要求：创作圣经的固定创作风格为最高视觉风格约束，提示词模块的画面风格、光影和比例在该固定风格内细化执行。',
+      '以上基调必须贯穿本组视频：角色、场景、道具、色彩、材质、镜头质感和光影氛围保持一致；不得因为参考图或单镜头描述而偏离用户在创作圣经及提示词模块选择的风格与光影。',
     ].join('\n');
   };
 
@@ -7985,7 +7993,10 @@ export default function StoryboardGenerator() {
     const response = await fetch('/api/generate-video', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
+      body: JSON.stringify({
+        ...payload,
+        creationBible: getCreationBiblePayload(),
+      }),
     });
     const data = await response.json();
     if (!response.ok || !data.success) {
@@ -16709,6 +16720,11 @@ export default function StoryboardGenerator() {
                   <p className="text-xs text-gray-500 mt-2">
                     切换格式后生成的新视频将使用新格式
                   </p>
+                  {selectedCreationStylePreset && (
+                    <p className="mt-1 text-xs text-amber-200/80">
+                      最终视频固定沿用创作圣经风格：{selectedCreationStylePreset.name}
+                    </p>
+                  )}
                 </div>
 
                 {Object.values(chapterStoryboards).some(cs => (cs.promptGroups?.length ?? 0) > 0) && (

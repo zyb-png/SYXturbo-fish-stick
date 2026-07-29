@@ -13,6 +13,7 @@ import {
   InsufficientCreationPointsError,
   settleCreationPointTaskByExternalId,
 } from '@/lib/creation-points';
+import { buildCreationStyleInstruction, getCreationStylePreset } from '@/lib/creation-style-presets';
 
 export const maxDuration = 300;
 export const dynamic = 'force-dynamic';
@@ -36,6 +37,16 @@ function cleanVideoPrompt(prompt: string): string {
     .replace(/[\u{1F300}-\u{1F9FF}]/gu, '')
     .trim()
     .slice(0, MAX_VIDEO_PROMPT_CHARS);
+}
+
+function stripEmbeddedCreationStyleInstructions(prompt: string): string {
+  return String(prompt || '')
+    .replace(
+      /【固定创作风格：[^\n]*】\n[^\n]*\n这是整部作品的固定视觉风格锁。[^\n]*(?:\n|$)/g,
+      ''
+    )
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
 }
 
 function cleanInlineText(value: unknown, maxLength: number): string {
@@ -160,7 +171,17 @@ export async function POST(request: NextRequest) {
       /【人物音色绑定】[\s\S]*?强制要求：[^\n]*(?:\n|$)/g,
       ''
     );
-    const prompt = cleanVideoPrompt([voiceInstruction, basePrompt].filter(Boolean).join('\n\n'));
+    const creativeStyle = body.creationBible?.creativeStyle;
+    const stylePreset = getCreationStylePreset(creativeStyle);
+    const styleInstruction = buildCreationStyleInstruction(creativeStyle);
+    const basePromptWithoutEmbeddedStyles = stripEmbeddedCreationStyleInstructions(basePrompt);
+    const prompt = cleanVideoPrompt([
+      voiceInstruction,
+      styleInstruction
+        ? `${styleInstruction}\n当前创作圣经风格为本次视频生成的最高视觉风格约束。`
+        : '',
+      basePromptWithoutEmbeddedStyles,
+    ].filter(Boolean).join('\n\n'));
     const ratio = normalizeRatio(body.ratio || body.videoRatio);
     const duration = normalizeDuration(body.duration);
     const imageUrls = Array.from(new Set([
@@ -184,11 +205,12 @@ export async function POST(request: NextRequest) {
         referenceImageCount: imageUrls.length,
         voiceBindingCount: voiceAssignments.length,
         model: 'moon-manfei-new',
+        creativeStyle: stylePreset?.id || '',
       },
     });
     creationPointTaskId = pointTask.taskId;
 
-    console.log(`[manfei] 准备 ${imageUrls.length} 张参考图、${voiceAssignments.length} 个人物音色约束，模型 moon-manfei-new，分辨率 720p，比例 ${ratio}，时长 ${duration} 秒`);
+    console.log(`[manfei] 准备 ${imageUrls.length} 张参考图、${voiceAssignments.length} 个人物音色约束，创作风格 ${stylePreset?.name || '未设置'}，模型 moon-manfei-new，分辨率 720p，比例 ${ratio}，时长 ${duration} 秒`);
     const assetIds = await prepareManfeiImageAssets(imageUrls, auth.account, 4);
     const taskId = await createManfeiVideoTask({
       prompt,
