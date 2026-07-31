@@ -21,6 +21,10 @@ import {
   normalizeOpeningShotContinuity,
 } from '@/lib/storyboard-opening-shot';
 import { buildCreationStyleInstruction } from '@/lib/creation-style-presets';
+import {
+  areSameSpatialScenes,
+  reconcileStoryboardSpatialContinuity,
+} from '@/lib/storyboard-spatial-continuity';
 
 interface Segment {
   id: number;
@@ -191,7 +195,7 @@ const SEGMENT_ANALYSIS_PROMPT = `你是一位专业的影视分镜策划专家�
 2. 先锁定本单元内全部声音时长、画面文字阅读时长和动作表演时长，再决定单元边界；任何单元都不得超过 15 秒
 3. 内容足够时优先形成 10-15 秒的完整单元；完整的短动作、短反应或短对白可以是 8-10 秒；少于 8 秒只允许用于触发、揭示、冲击、钩子或正文自然结束，禁止为了凑时长添加无信息镜头
 4. 单元边界优先落在动作完成、对白句意完成、视线/情绪转折、人物出入场或场景切换处，禁止机械按字数切割
-5. 每个单元先给出起始空间状态和末尾空间状态；后一单元的起始状态必须继承前一单元末态，包括人物位置、身体朝向、视线、动作、道具归属和场景状态
+5. 每个单元先给出起始空间状态和末尾空间状态；只有后一单元与前一单元属于同一连续场景、同一时段和同一空间状态时，才继承人物位置、身体朝向、视线、动作和道具归属；发生场景、时段或空间状态切换时，必须重新建立站位和行动轴线，禁止沿用上一场坐标
 6. 先保证剧情、动作、台词和空间连续，再估算该单元真正需要多少镜头；不要为了凑数量添加无信息镜头
 7. 普通剧情通常 5-6 镜，动作或反转通常 7-8 镜，打斗通常 8-10 镜；这些只是密度建议，必须随实际时长和内容增减
 8. 空镜、反应镜头、道具特写、手部特写只在服务剧情、情绪或连续性时规划，不要求每个单元机械齐全
@@ -286,9 +290,13 @@ ${prevLastShot}
 2. 本段首镜的人物位置/服装/道具状态与上一段末镜一致
 3. 本段首镜的情绪基调从上一段末镜的余韵自然过渡
 `;
-  } else {
+  } else if (segmentIndex === 0) {
     prompt += `
 【提示】本段是第一段，没有前序衔接要求。首镜从建立场景/氛围开始。
+`;
+  } else {
+    prompt += `
+【场景切换提示】本段与上一段不属于同一连续空间。首镜必须重新建立当前场景的人物站位、行动轴线、视线和道具位置，不得沿用上一场的人物坐标；剧情情绪可以连续，但空间位置必须以当前场景为准。
 `;
   }
 
@@ -489,7 +497,7 @@ E11=干脆决断(微距标点镜头+静切动)   E12=释放释怀(中焦+俯拍+
 2. 视线匹配：上一镜角色看右 → 下一镜对面角色必须从左侧出现且看左
 3. 道具状态连续：杯中液体量、烟头长度等在相邻镜头间必须一致
 4. 景别跳跃：避免连续 3 镜以上同景别
-5. 每一个有人物的镜头都必须确认 actorBlocking 与 characters[].position
+5. 每一个有人物的镜头都必须给出完整 actorBlocking，作为该镜唯一人物空间坐标；characters[].position 如需填写，只能逐字同步 actorBlocking 中对应人物的位置，不得另造第二套站位
 6. 本集第一镜必须在 actionChange 中建立初始肢体动作、脸部动作、表情和站位，禁止引用不存在的上一镜；从本集第二镜开始，每一个连续镜头都必须标注较上一镜发生的变化，没有改变时也要写"较上一镜：动作保持，仅眼神/呼吸变化"
 7. 每个视频单元的首镜必须建立规划给出的起始空间状态，末镜必须落实规划给出的末尾空间状态；下一单元从上一单元末态继续，不得把人物和道具复位
 
@@ -1020,9 +1028,9 @@ function resolveBasicSceneContext(
   candidate: unknown,
   sceneNames: unknown[] = [],
 ): string {
-  return findMentionedSceneName(content, sceneNames)
-    || inferSceneContextFromContent(content)
+  return inferSceneContextFromContent(content)
     || cleanSceneContextCandidate(candidate)
+    || findMentionedSceneName(content, sceneNames)
     || sceneNames.map(cleanSceneContextCandidate).find(Boolean)
     || '当前剧情场景';
 }
@@ -1050,6 +1058,45 @@ function buildDefaultEndSpatialState(
 ): string {
   const cast = characters.length > 0 ? characters.slice(0, 4).join('、') : '出场人物';
   return `${sceneContext}内，${cast}停留在“${description || '当前剧情动作完成'}”后的准确位置；保留末尾身体朝向、视线、表情、手部动作与道具归属，供下一单元承接。`;
+}
+
+function findSeedSegmentForContent(
+  content: string,
+  seedSegments: Segment[],
+  preferredIndex: number,
+): Segment | undefined {
+  const normalizedContent = normalizeSourceSlice(content);
+  const preferred = seedSegments[preferredIndex];
+  const overlapsContent = (segment?: Segment) => {
+    const normalizedSeed = normalizeSourceSlice(segment?.content || '');
+    return normalizedSeed.length >= 8
+      && (normalizedContent.includes(normalizedSeed) || normalizedSeed.includes(normalizedContent));
+  };
+  if (overlapsContent(preferred)) return preferred;
+  const matched = seedSegments.find(segment => overlapsContent(segment));
+  if (matched) return matched;
+  return preferred && !normalizeSourceSlice(preferred.content || '') ? preferred : undefined;
+}
+
+function resolveUnitStartSpatialState(
+  proposed: unknown,
+  sceneContext: string,
+  characters: string[],
+  previousSceneContext: string,
+  previousEndSpatialState: string,
+): string {
+  const canInherit = Boolean(
+    previousSceneContext
+    && previousEndSpatialState
+    && areSameSpatialScenes(previousSceneContext, sceneContext),
+  );
+  if (canInherit) return previousEndSpatialState;
+
+  const cleanedProposed = cleanPromptText(proposed);
+  const containsStaleInheritance = /(?:继承|承接|沿用).{0,16}(?:上一|前一)(?:镜|单元|场)/.test(cleanedProposed)
+    || /上一(?:镜|单元|场).{0,16}(?:末态|位置|站位|坐标)/.test(cleanedProposed);
+  return (!containsStaleInheritance ? cleanedProposed : '')
+    || buildDefaultStartSpatialState(sceneContext, characters, true);
 }
 
 function createSourceLockedVideoUnits(
@@ -1102,9 +1149,10 @@ function createSourceLockedVideoUnits(
   }
 
   let carriedSceneContext = '';
+  let previousSceneContext = '';
   let previousEndSpatialState = '';
   return buckets.map((content, index) => {
-    const seed = seedSegments[index];
+    const seed = findSeedSegmentForContent(content, seedSegments, index);
     const matchedCharacters = (characters || []).filter(name => content.includes(name));
     const isFinalUnit = index === buckets.length - 1;
     const plannedDuration = clampPlannedDuration(
@@ -1115,7 +1163,7 @@ function createSourceLockedVideoUnits(
     const seedSceneContext = cleanSceneContextCandidate(seed?.sceneContext);
     const sceneContext = resolveBasicSceneContext(
       content,
-      carriedSceneContext || seedSceneContext,
+      seedSceneContext || carriedSceneContext,
       scenes || [],
     );
     carriedSceneContext = cleanSceneContextCandidate(sceneContext) || carriedSceneContext;
@@ -1124,10 +1172,16 @@ function createSourceLockedVideoUnits(
     const charactersPresent = matchedCharacters.length > 0
       ? matchedCharacters
       : (seed?.charactersPresent?.length ? seed.charactersPresent : (characters || []));
-    const startSpatialState = previousEndSpatialState || cleanPromptText(seed?.startSpatialState)
-      || buildDefaultStartSpatialState(sceneContext, charactersPresent, index === 0);
+    const startSpatialState = resolveUnitStartSpatialState(
+      seed?.startSpatialState,
+      sceneContext,
+      charactersPresent,
+      previousSceneContext,
+      previousEndSpatialState,
+    );
     const endSpatialState = cleanPromptText(seed?.endSpatialState)
       || buildDefaultEndSpatialState(sceneContext, charactersPresent, seed?.description || '连续原文动作与情绪节拍');
+    previousSceneContext = sceneContext;
     previousEndSpatialState = endSpatialState;
     return {
       id: index + 1,
@@ -1168,6 +1222,7 @@ function repairSegmentsAgainstSource(
 
   if (completeCoverage && plausibleUnitCount && unitsAreShortEnough) {
     let carriedSceneContext = '';
+    let previousSceneContext = '';
     let previousEndSpatialState = '';
     return segments.map((segment, index) => {
       const isFinalUnit = index === segments.length - 1;
@@ -1179,17 +1234,22 @@ function repairSegmentsAgainstSource(
       const modelSceneContext = cleanSceneContextCandidate(segment.sceneContext);
       const sceneContext = resolveBasicSceneContext(
         segment.content,
-        carriedSceneContext || modelSceneContext,
+        modelSceneContext || carriedSceneContext,
         scenes || [],
       );
       carriedSceneContext = cleanSceneContextCandidate(sceneContext) || carriedSceneContext;
       const densityType = classifyVideoUnitDensity(segment.content, segment.densityType);
       const timing = estimateContentDurationBreakdown(segment.content);
-      const startSpatialState = previousEndSpatialState
-        || cleanPromptText(segment.startSpatialState)
-        || buildDefaultStartSpatialState(sceneContext, segment.charactersPresent || [], index === 0);
+      const startSpatialState = resolveUnitStartSpatialState(
+        segment.startSpatialState,
+        sceneContext,
+        segment.charactersPresent || [],
+        previousSceneContext,
+        previousEndSpatialState,
+      );
       const endSpatialState = cleanPromptText(segment.endSpatialState)
         || buildDefaultEndSpatialState(sceneContext, segment.charactersPresent || [], segment.description);
+      previousSceneContext = sceneContext;
       previousEndSpatialState = endSpatialState;
       return {
         ...segment,
@@ -1385,19 +1445,20 @@ function resolveStoryboardSceneContext(
   const chapterSceneNames = (globalContext.scenes || [])
     .map(cleanSceneContextCandidate)
     .filter(Boolean);
-  const sourceMatchedLocation = findSceneRecordForContent(
-    segment.content,
-    chapterSceneRecords,
-  )
-    || findMentionedSceneName(segment.content, chapterSceneNames)
-    || inferSceneContextFromContent(segment.content);
-  if (sourceMatchedLocation) return sourceMatchedLocation;
+  const explicitHeadingLocation = inferSceneContextFromContent(segment.content);
+  if (explicitHeadingLocation) return explicitHeadingLocation;
+
+  const plannedLocation = cleanSceneContextCandidate(segment.sceneContext);
+  if (plannedLocation) return plannedLocation;
 
   const directLocation = cleanSceneContextCandidate(rawLocation);
   if (directLocation) return directLocation;
 
-  const plannedLocation = cleanSceneContextCandidate(segment.sceneContext);
-  if (plannedLocation) return plannedLocation;
+  const sourceMatchedLocation = findSceneRecordForContent(
+    segment.content,
+    chapterSceneRecords,
+  ) || findMentionedSceneName(segment.content, chapterSceneNames);
+  if (sourceMatchedLocation) return sourceMatchedLocation;
 
   return cleanSceneContextCandidate(chapterSceneRecords[0]?.name)
     || chapterSceneNames[0]
@@ -1511,17 +1572,22 @@ function normalizeShot(
     combinedDialogue,
     dialogueLocks,
   );
+  const structuredBlocking = normalizedCharacters.length > 0
+    && normalizedCharacters.every(character => Boolean(character.position))
+    ? normalizedCharacters
+      .map(character => `${character.name}位于${character.position}`)
+      .join('；')
+    : '';
 
   return {
     shotNumber,
     shotType: rawShot?.shotType || plannedStyle.shotType,
     shotPurpose: rawShot?.shotPurpose || rawShot?.purpose || plannedStyle.shotPurpose,
     cameraAngle: rawShot?.cameraAngle || rawShot?.angle || plannedStyle.cameraAngle,
-    actorBlocking: rawShot?.actorBlocking || rawShot?.blocking || rawShot?.positioning || (
-      characterNames.length > 1
-        ? `${characterNames[0]}位于画面左前景，${characterNames[1]}位于右后景，两人保持同一轴线相对，距离随剧情保持连续。`
-        : `${characterNames[0] || '人物'}位于画面中心偏左，身体朝向主要行动方向，背景保留场景空间。`
-    ),
+    actorBlocking: rawShot?.actorBlocking
+      || rawShot?.blocking
+      || rawShot?.positioning
+      || structuredBlocking,
     actionChange: normalizeOpeningShotActionChange(
       shotNumber,
       rawShot?.actionChange || rawShot?.movementChange,
@@ -1815,9 +1881,7 @@ function createFallbackShots(
         : isReaction
           ? `${primary}听到上一句后出现短暂停顿，脸部和手部细节产生反应`
           : description,
-      actorBlocking: characters.length > 1
-        ? `${primary}在画面左前景，${secondary}在右后景，两人保持同一行动轴线，身体朝向随对话轻微变化。`
-        : `${primary}位于画面中心偏左，身体朝向主要行动方向，背景留出环境信息。`,
+      actorBlocking: '',
       actionChange: absoluteIndex === 0
         ? '首镜建立动作和人物站位'
         : `较上一镜：${primary}从静止转为轻微抬眼/收紧手指，脸部表情发生细微变化。`,
@@ -1827,7 +1891,7 @@ function createFallbackShots(
         dialogue: '',
         dialogueType: '',
         reaction: segment.emotionalTone || '情绪随剧情变化',
-        position: name === primary ? '画面左前景或中心偏左，面向主要行动方向' : '画面右后景，回应主角视线',
+        position: '',
         action: isReaction ? '手指短暂停在道具边缘，肩膀轻微绷紧' : '顺着当前剧情动作移动半步或调整身体朝向',
         expression: isReaction ? '眼神短暂闪避后重新聚焦，嘴角或眉心出现细微变化' : '表情随节拍由克制转为更明确',
         facialAction: '抬眼、眨眼或吞咽动作清晰可见',
@@ -2099,6 +2163,7 @@ ${finalContent}
           // ================================================================
           let globalShotCount = 0;
           let lastSegmentLastShot: string | null = null;
+          let lastSegmentSceneContext = '';
           const allShots: any[] = [];
           const startTime = Date.now();
 
@@ -2144,11 +2209,15 @@ ${finalContent}
             );
 
             const segmentDialogueLocks = filterDialoguesForSegment(sourceDialogues, segment.content);
+            const previousShotForPrompt = lastSegmentLastShot
+              && areSameSpatialScenes(lastSegmentSceneContext, segment.sceneContext)
+              ? lastSegmentLastShot
+              : null;
 
             // 构建该段的 Prompt
             const shotPrompt = buildSegmentShotPrompt(
               segment, segIdx, totalSegments,
-              lastSegmentLastShot, globalContext,
+              previousShotForPrompt, globalContext,
               segmentDialogueLocks,
             );
 
@@ -2264,6 +2333,10 @@ ${finalContent}
                 segmentDialogueLocks,
               );
             }
+            normalizedShots = reconcileStoryboardSpatialContinuity(
+              normalizedShots,
+              allShots.length > 0 ? allShots[allShots.length - 1] : null,
+            );
 
             const validatedShots = validateVideoUnitShots(
               normalizedShots,
@@ -2271,6 +2344,7 @@ ${finalContent}
               segIdx,
             );
             validatedShots.forEach(emitShot);
+            lastSegmentSceneContext = segment.sceneContext;
 
             const actualDuration = sumShotDurations(validatedShots);
             const generatedUnitCount = new Set(

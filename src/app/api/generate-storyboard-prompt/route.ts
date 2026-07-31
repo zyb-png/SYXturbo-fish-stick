@@ -7,6 +7,7 @@ import {
   STORYBOARD_GROUP_MAX_SECONDS,
 } from '@/lib/storyboard-duration-groups';
 import { buildCreationStyleInstruction } from '@/lib/creation-style-presets';
+import { reconcileStoryboardSpatialContinuity } from '@/lib/storyboard-spatial-continuity';
 
 export const maxDuration = 300;
 
@@ -156,7 +157,6 @@ function uniq(values: string[]): string[] {
 
 function formatCharacterForPrompt(character: any, shot: any): string {
   const name = cleanText(character?.name, '未命名人物');
-  const position = cleanText(character?.position || character?.blocking);
   const action = cleanText(character?.action || shot?.actionAndDialogue || shot?.action);
   const gesture = cleanText(character?.gesture || character?.bodyAction || character?.movement);
   const expression = cleanText(character?.expression || character?.facialAction || character?.face);
@@ -165,7 +165,6 @@ function formatCharacterForPrompt(character: any, shot: any): string {
 
   return [
     name,
-    position ? `站位：${position}` : '',
     action ? `动作：${action}` : '',
     gesture ? `肢体：${gesture}` : '',
     expression ? `表情：${expression}` : '',
@@ -205,7 +204,9 @@ function formatShotForPrompt(shot: any, index: number): string {
 }
 
 function buildLocalStoryboardPrompt(payload: StoryboardPromptPayload): string {
-  const shots = Array.isArray(payload.shots) ? payload.shots : [];
+  const shots = reconcileStoryboardSpatialContinuity(
+    Array.isArray(payload.shots) ? payload.shots : [],
+  );
   const totalDuration = sumStoryboardDurations(shots.map(shot => shot?.duration));
   const safeReferenceImages = Array.isArray(payload.referenceImages)
     ? payload.referenceImages.filter((url): url is string => typeof url === 'string' && url.trim().length > 0)
@@ -232,6 +233,9 @@ ${bibleText ? `${bibleText}\n` : ''}
 左上「角色设定」采用影视角色档案布局，展示主要角色小图组、服装状态、情绪状态、动作习惯、人物关系、关键视觉特征。
 中上「美术/场景设定」采用空间设定板布局，展示空间结构、区域功能、关键道具、人物动线、场景氛围、空间关系。
 右上「运镜方案」采用导演调度图布局，展示主机位、辅助机位、移动轨迹、视线方向、调度逻辑、切换节奏、空间压力；路线和箭头必须是干净的矢量标注。
+
+空间坐标规则：
+当参考图中包含场景图时，优先把（image1）作为固定空间坐标基准。必须先识别其门窗、墙体、楼梯、固定家具、通道、可站立区域和前中后景，再安放人物；不得为了迁就文字站位而重排场景结构。人物站位总表是唯一文字坐标口径，人物详情不再另写一套站位。相邻镜头处于同一场景和同一时段时，承接上一镜末态；切换场景或时段后，重新建立空间坐标，不继承上一场的位置。
 
 主体区域是时间分镜表，占整张画面 60% 到 70%。每个镜头格按时间顺序从左到右、从上到下排列；画面预览大于文字说明。每格必须包含中文字段：镜头编号、时间段、画面内容、景别、焦段、机位、运镜、人物动作、人物台词、情绪变化、声音提示、镜头意图。
 
@@ -268,7 +272,12 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: '请提供分镜数据' }, { status: 400 });
     }
 
-    const groupDuration = sumStoryboardDurations(shots.map(shot => shot?.duration));
+    const reconciledShots = reconcileStoryboardSpatialContinuity(shots);
+    const normalizedPayload: StoryboardPromptPayload = {
+      ...payload,
+      shots: reconciledShots,
+    };
+    const groupDuration = sumStoryboardDurations(reconciledShots.map(shot => shot?.duration));
     if (groupDuration > STORYBOARD_GROUP_MAX_SECONDS) {
       return NextResponse.json({
         error: `本组分镜总时长为${formatStoryboardDurationSeconds(groupDuration)}秒，不能超过15秒，请重新按时长分组`,
@@ -277,25 +286,25 @@ export async function POST(request: NextRequest) {
 
     console.log(`🎬 生成故事板文字提示词: 章节="${chapterTitle}", 第${groupIndex}组, ${shots.length}个镜头`);
 
-    const localPrompt = buildLocalStoryboardPrompt(payload);
+    const localPrompt = buildLocalStoryboardPrompt(normalizedPayload);
 
     // 默认使用结构化分镜直接生成，避免模型超时/返回空导致按钮报错。
     // 如需重新启用模型润色，可在环境变量中设置 ENABLE_LLM_STORYBOARD_PROMPT=true。
     const shouldUseModelPrompt = process.env.ENABLE_LLM_STORYBOARD_PROMPT === 'true';
-    if (!shouldUseModelPrompt || shots.length >= 4 || (Array.isArray(referenceImages) && referenceImages.length > 8)) {
+    if (!shouldUseModelPrompt || reconciledShots.length >= 4 || (Array.isArray(referenceImages) && referenceImages.length > 8)) {
       console.log(`✅ 故事板提示词本地生成成功: ${localPrompt.substring(0, 100)}...`);
 
       return NextResponse.json({
         success: true,
         storyboardPrompt: localPrompt,
         groupIndex,
-        shotCount: shots.length,
+        shotCount: reconciledShots.length,
         source: 'local',
       });
     }
 
     // 构建分镜组描述
-    const shotDescriptions = shots.map((shot: any) => {
+    const shotDescriptions = reconciledShots.map((shot: any) => {
       const scene = shot.scene || {};
       const characters = shot.characters || [];
       const charDesc = characters.map((c: any) => {
@@ -305,9 +314,9 @@ export async function POST(request: NextRequest) {
       return `[镜头${shot.shotNumber}] 景别=${shot.shotType || '中景'} | 焦段=${shot.focalLength || ''} | 机位=${shot.cameraPosition || ''} | 运镜=${shot.cameraMovement || ''} | 内容=${shot.description || ''} | 人物=${charDesc} | 场景=${scene.location || ''}(${scene.time || ''},${scene.atmosphere || ''})`;
     }).join('\n');
 
-    const allCharacters = shots.flatMap((s: any) => (s.characters || []).map((c: any) => c.name));
+    const allCharacters = reconciledShots.flatMap((s: any) => (s.characters || []).map((c: any) => c.name));
     const uniqueChars = [...new Set(allCharacters)];
-    const mainScene = shots[0]?.scene?.location || '';
+    const mainScene = reconciledShots[0]?.scene?.location || '';
 
     // 构建参考图描述
     let refDesc = '';
@@ -320,7 +329,7 @@ export async function POST(request: NextRequest) {
     }
 
     const userMsg = `章节名称：${chapterTitle}
-第 ${groupIndex} 组分镜（${shots.length} 个连续镜头，总时长${formatStoryboardDurationSeconds(groupDuration)}秒）：
+第 ${groupIndex} 组分镜（${reconciledShots.length} 个连续镜头，总时长${formatStoryboardDurationSeconds(groupDuration)}秒）：
 
 ${shotDescriptions}
 
@@ -355,7 +364,7 @@ ${buildCreationBibleText(creationBible)}
         success: true,
         storyboardPrompt: trimmed,
         groupIndex,
-        shotCount: shots.length,
+        shotCount: reconciledShots.length,
         source: 'llm',
       });
     } catch (modelError: any) {
@@ -365,7 +374,7 @@ ${buildCreationBibleText(creationBible)}
         success: true,
         storyboardPrompt: localPrompt,
         groupIndex,
-        shotCount: shots.length,
+        shotCount: reconciledShots.length,
         source: 'local-fallback',
         warning: modelError?.message || '模型生成失败，已使用本地提示词',
       });

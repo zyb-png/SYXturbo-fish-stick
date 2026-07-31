@@ -3,6 +3,7 @@ import { stream as oaiStream, invoke as oaiInvoke } from '@/lib/openai-client';
 import { estimateMessagesTokens, estimateTokens } from '@/lib/token-utils';
 import { requireUserLoginResponse } from '@/lib/auth-guard';
 import { buildCreationStyleInstruction } from '@/lib/creation-style-presets';
+import { reconcileStoryboardSpatialContinuity } from '@/lib/storyboard-spatial-continuity';
 
 // 设置 API 路由超时时间为 5 分钟（LLM 生成需要较长时间）
 export const maxDuration = 600; // 单位：秒
@@ -232,13 +233,26 @@ export async function POST(request: NextRequest) {
         { status: 400 }
       );
     }
+    const rawInputShots = hasImageStoryboards
+      ? imageStoryboards.filter((shot: any) => !shot.error)
+      : storyboard;
+    const reconciledOriginalShots = reconcileStoryboardSpatialContinuity(
+      rawInputShots.map((shot: any) => (
+        hasImageStoryboards ? (shot.originalShot || shot) : shot
+      )),
+    );
+    const inputShots = hasImageStoryboards
+      ? rawInputShots.map((shot: any, index: number) => ({
+        ...shot,
+        shotNumber: shot.shotNumber || reconciledOriginalShots[index]?.shotNumber || index + 1,
+        originalShot: reconciledOriginalShots[index],
+      }))
+      : reconciledOriginalShots;
 
     // 初始化 LLM 客户端
 
     // 计算分镜数量
-    const totalShots = hasImageStoryboards 
-      ? imageStoryboards.filter((s: any) => !s.error).length 
-      : storyboard.length;
+    const totalShots = inputShots.length;
 
     // 构建图像设置描述
     const imageSettingsDesc = imageSettings ? `
@@ -295,11 +309,12 @@ ${creationBibleDesc}
 3. 将 actionAndDialogue（台词嵌入动作）直接使用——保持台词原文
 4. 将 focalLength/aperture 融入镜头语言描述
 
-【分镜衔接 - 强制要求】
-- 除第一个分镜外，每个分镜的 panelDescription **开头必须包含与上一镜末尾的衔接描述**
-- 衔接方式："承接上一镜，[上一镜末尾动作/状态]，镜头切换至..."
-- 例如："承接上一镜花十掐灭烟头的动作，镜头拉开至中景，露夏低头搅拌奶茶..."
-- 确保人物服装、道具状态、环境光线在相邻镜头间一致
+【分镜衔接与空间坐标 - 强制要求】
+- 只有相邻分镜处于同一场景、同一时段时，后一镜的 panelDescription 才承接上一镜末尾状态
+- 同场衔接方式："承接上一镜，[上一镜末尾动作/位置/道具状态]，镜头切换至..."
+- 切换场景或日夜时，必须写明"切换至新场景并重新建立空间坐标"，不得继承上一场的人物位置
+- 每镜只允许采用输入中的"人物站位"总表作为人物空间坐标；人物详情只描述动作、表情和台词，不得另造第二套位置
+- 确保同场相邻镜头的人物服装、道具状态、环境光线、行动轴线和视线方向连续
 
 【绝对重要】数量要求：
 - 输入的分镜数量为 ${totalShots} 个
@@ -309,10 +324,10 @@ ${creationBibleDesc}
 - shotNumber 必须与输入的分镜编号一一对应
 
 【重要】场景设计要求：
-- 场景设计必须大胆创新，视觉冲击力强
-- 画面极具吸引力，构图独特
-- 色彩对比鲜明，光影效果震撼
-- 每个镜头都要有视觉亮点
+- 有场景参考图时，场景图是固定的物理空间坐标，不得重排门窗、墙体、楼梯、固定家具、通道、前中后景和可站立区域
+- 无场景参考图时，只能依据剧本和创作圣经建立空间；同一场景首次建立后，后续镜头必须复用相同结构
+- 在不改变空间结构的前提下，通过机位、景别、人物调度、光影和色彩制造视觉重点
+- 人物只能落在真实可站立、可坐或可通行区域，不得穿墙、占用固定家具或堵塞通道
 
 【专业分镜版提示词格式 - 强制要求】
 每个 panelDescription 必须以电影工业级分镜故事板的专业格式编写，像真实电影剧组中导演对摄影师的分镜指令，包含以下内容：
@@ -355,14 +370,15 @@ ${creationBibleDesc}
     
     if (hasImageStoryboards) {
       // 方式1：基于图片分镜数据（兼容旧流程）
-      shotsDescription = imageStoryboards
-        .filter((s: any) => !s.error)
+      shotsDescription = inputShots
         .map((s: any, index: number) => {
           return `
 【分镜 ${s.shotNumber}】
 画面描述：${s.originalShot.description || '无'}
 场景：${s.originalShot.scene?.location || '无'}，${s.originalShot.scene?.atmosphere || '无'}
 人物：${s.originalShot.characters?.map((c: any) => `${c.name} ${c.action || ''}`).join('、') || '无'}
+人物站位：${s.originalShot.actorBlocking || '无'}
+空间连续：${s.originalShot.continuity || '无'}
 镜头运动：${s.originalShot.cameraMovement || '无'}
 图片提示词：${s.prompt}
 `;
@@ -370,7 +386,7 @@ ${creationBibleDesc}
         .join('\n');
     } else if (hasStoryboard) {
       // 方式2：基于纯文字分镜数据（新流程）- 包含 Skill 5 影视级字段
-      shotsDescription = storyboard
+      shotsDescription = inputShots
         .map((shot: any, index: number) => {
           const scene = shot.scene || {};
           const characters = shot.characters || [];
@@ -394,7 +410,7 @@ ${creationBibleDesc}
 连续性：${shot.continuity || '无'}
 拍摄备注：${shot.notes || '无'}
 人物详情：${characters.map((c: any) => 
-  `${c.name || '未知'} - 站位：${c.position || '无'} - 表演：${c.performance || '无'} - 动作：${c.action || '无'} - 表情：${c.expression || '无'} - 脸部动作：${c.facialAction || '无'} - 手势：${c.gesture || '无'} - 动作变化：${c.actionChange || '无'} - 反应：${c.reaction || '无'} - 对白：${c.dialogue ? `"${c.dialogue}"` : '无'} - 对白类型：${c.dialogueType || '无'}`
+  `${c.name || '未知'} - 表演：${c.performance || '无'} - 动作：${c.action || '无'} - 表情：${c.expression || '无'} - 脸部动作：${c.facialAction || '无'} - 手势：${c.gesture || '无'} - 动作变化：${c.actionChange || '无'} - 反应：${c.reaction || '无'} - 对白：${c.dialogue ? `"${c.dialogue}"` : '无'} - 对白类型：${c.dialogueType || '无'}`
 ).join(' | ') || '无'}
 【Skill 5 影视参数】
 焦段：${shot.focalLength || '无'}
@@ -423,12 +439,15 @@ ${shotsDescription}
 【重要要求】
 1. 为每个分镜生成自然语言描述的故事板面板 panelDescription
 2. 充分利用 Skill 5 的机位/构图/焦段/光圈信息，融入视频提示词中
-3. ★ 除第一个分镜外，每个分镜的 panelDescription 开头必须包含与上一镜末尾的衔接过渡
+3. ★ 同场同一时段的后续分镜必须承接上一镜末尾；换场或换时段必须重新建立空间坐标
 4. 台词必须保持原文，嵌入动作描述中
 5. cameraPosition 的机位描述要自然融入提示词
-6. 场景设计大胆创新，画面极具吸引力和视觉冲击力
+6. 有场景参考图时严格保持其物理结构；无参考图时按剧本建立空间并在同场后续镜头中保持不变
 7. 分镜之间的道具状态、人物服装、环境光线要保持一致
-8. 每个 panelDescription 必须按【专业分镜版提示词格式】的要求编写，以【镜头编号 | 时间段】开头，包含画面内容、景别焦段、机位运镜、人物动作台词、情绪变化、色彩光影、声音提示、镜头意图`
+8. 每个 panelDescription 必须按【专业分镜版提示词格式】的要求编写，以【镜头编号 | 时间段】开头，包含画面内容、景别焦段、机位运镜、人物动作台词、情绪变化、色彩光影、声音提示、镜头意图
+9. 人物站位只采用“人物站位”总表这一套坐标，不得再根据人物详情另造第二套位置
+10. 有场景参考图时，场景图是固定空间坐标基准；门窗、墙体、楼梯、固定家具、通道和可站立区域不得重排，人物不得穿墙、占用固定家具或堵塞通道
+11. 同一场景同一时段承接上一镜末态；切换场景或时段时重新建立坐标，不继承上一场的位置`
       }
     ];
 
@@ -587,11 +606,6 @@ ${shotsDescription}
       const generatedCount = connectingPrompts.shotPrompts.length;
       console.log(`提示词生成: 期望 ${totalShots}, 实际生成 ${generatedCount}`);
       
-      // 获取输入数据源
-      const inputShots = hasImageStoryboards 
-        ? imageStoryboards.filter((s: any) => !s.error)
-        : storyboard;
-      
       // 构建期望的 shotNumber 列表
       const expectedShotNumbers = inputShots.map((s: any, index: number) => s.shotNumber || index + 1);
       
@@ -660,7 +674,7 @@ ${shotsDescription}
           let characterImageUrls: string[] = [];
           let propImageUrls: string[] = [];
           
-          if (!imageUrl && assetImages) {
+          if (assetImages) {
             // 获取场景图片
             const shot = hasImageStoryboards ? (shotData as any)?.originalShot : shotData;
             const sceneName = shot?.scene?.location;
@@ -735,12 +749,32 @@ ${shotsDescription}
           // 确定最终使用的图片 URL
           // 优先级：图片分镜 > 场景图片 > 人物图片 > 道具图片
           const finalImageUrl = imageUrl || sceneImageUrl || (characterImageUrls.length > 0 ? characterImageUrls[0] : undefined) || (propImageUrls.length > 0 ? propImageUrls[0] : undefined);
+          const spatialReferenceInstruction = sceneImageUrl
+            ? '空间基准：场景参考图为固定空间坐标；保持门窗、墙体、楼梯、固定家具、通道及前中后景关系，人物只落在真实可站立或可通行区域。'
+            : '';
+          const spatialShot = hasImageStoryboards
+            ? ((shotData as any)?.originalShot || shotData)
+            : shotData;
+          const authoritativeSpatialInstruction = [
+            spatialReferenceInstruction,
+            spatialShot?.actorBlocking
+              ? `唯一人物站位总表：${spatialShot.actorBlocking}`
+              : '',
+            spatialShot?.continuity
+              ? `空间连续性：${spatialShot.continuity}`
+              : '',
+            '空间执行优先级：本段空间基准与人物站位高于上文任何冲突的位置描述；若有冲突，忽略冲突内容。',
+          ].filter(Boolean).join(' ');
           
           if (existingPrompt) {
             // 使用已生成的提示词，确保 shotNumber 正确，并添加图片 URL
             finalShotPrompts.push({
               ...existingPrompt,
               shotNumber: shotNum,
+              panelDescription: [
+                existingPrompt.panelDescription,
+                authoritativeSpatialInstruction,
+              ].filter(Boolean).join(' '),
               imageUrl: finalImageUrl,
               imageUrlEndFrame,
               sceneImageUrl,     // 场景图片（供参考）
@@ -749,28 +783,29 @@ ${shotsDescription}
             });
           } else {
             // 为缺失的分镜生成默认提示词（包含所有字段，含 Skill 5 字段）
-            const description = shotData?.description || shotData?.originalShot?.description || '';
-            const scene = shotData?.scene || shotData?.originalShot?.scene || {};
-            const characters = shotData?.characters || shotData?.originalShot?.characters || [];
-            const props = shotData?.scene?.props || shotData?.originalShot?.scene?.props || [];
-            const shotType = shotData?.shotType || '中景';
-            const shotPurpose = shotData?.shotPurpose || '';
-            const cameraAngle = shotData?.cameraAngle || '';
-            const actorBlocking = shotData?.actorBlocking || '';
-            const actionChange = shotData?.actionChange || '';
-            const continuity = shotData?.continuity || '';
-            const cameraMovement = shotData?.cameraMovement || '固定镜头';
-            const notes = shotData?.notes || '';
-            const emotionalBeat = shotData?.emotionalBeat || '';
-            const duration = shotData?.duration || 4;
+            const shot = hasImageStoryboards ? (shotData?.originalShot || shotData) : shotData;
+            const description = shot?.description || '';
+            const scene = shot?.scene || {};
+            const characters = shot?.characters || [];
+            const props = shot?.scene?.props || [];
+            const shotType = shot?.shotType || '中景';
+            const shotPurpose = shot?.shotPurpose || '';
+            const cameraAngle = shot?.cameraAngle || '';
+            const actorBlocking = shot?.actorBlocking || '';
+            const actionChange = shot?.actionChange || '';
+            const continuity = shot?.continuity || '';
+            const cameraMovement = shot?.cameraMovement || '固定镜头';
+            const notes = shot?.notes || '';
+            const emotionalBeat = shot?.emotionalBeat || '';
+            const duration = shot?.duration || 4;
             
             // Skill 5 字段
-            const focalLength = shotData?.focalLength || '';
-            const aperture = shotData?.aperture || '';
-            const cameraPosition = shotData?.cameraPosition || '';
-            const composition = shotData?.composition || '';
-            const actionAndDialogue = shotData?.actionAndDialogue || '';
-            const restrictions = shotData?.restrictions || '';
+            const focalLength = shot?.focalLength || '';
+            const aperture = shot?.aperture || '';
+            const cameraPosition = shot?.cameraPosition || '';
+            const composition = shot?.composition || '';
+            const actionAndDialogue = shot?.actionAndDialogue || '';
+            const restrictions = shot?.restrictions || '';
             
             const formatTime = (seconds: number) => {
               const safeSeconds = Math.max(0, Math.floor(seconds));
@@ -795,7 +830,6 @@ ${shotsDescription}
             const characterText = characters.length > 0
               ? characters.map((c: any) => {
                   const details = [
-                    c.position ? `站位：${c.position}` : '',
                     c.performance ? `表演：${c.performance}` : '',
                     c.action ? `动作：${c.action}` : '',
                     c.expression ? `表情：${c.expression}` : '',
@@ -819,6 +853,7 @@ ${shotsDescription}
               cameraPosition ? `${cameraPosition}` : `${cameraAngle || '眼平平视'}拍摄，${cameraMovement}。`,
               composition ? `构图：${composition}。` : '',
               actorBlocking ? `人物站位：${actorBlocking}。` : '',
+              spatialReferenceInstruction,
               description ? `画面内容：${description}。` : '',
               actionAndDialogue ? `动作与台词：${actionAndDialogue}。` : '',
               characterText ? `人物表演：${characterText}。` : '',

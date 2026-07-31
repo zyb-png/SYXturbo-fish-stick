@@ -126,6 +126,10 @@ import {
   normalizeOpeningShotContinuity,
 } from '@/lib/storyboard-opening-shot';
 import {
+  getFrameSpatialSnapshot,
+  reconcileStoryboardSpatialContinuity,
+} from '@/lib/storyboard-spatial-continuity';
+import {
   buildCreationStyleInstruction,
   CREATION_STYLE_PRESETS,
   getCreationStylePreset,
@@ -5795,9 +5799,15 @@ export default function StoryboardGenerator() {
     shot: Shot,
     imageSettings?: ImageStoryboardSettings,
     hasSceneReference?: boolean,
-    frameType: 'start' | 'end' = 'start'  // 帧类型：首帧或尾帧
+    frameType: 'start' | 'end' = 'start',
+    previousShot?: Shot,
   ): string => {
     const parts: string[] = [];
+    const spatialSnapshot = getFrameSpatialSnapshot(
+      shot,
+      previousShot || null,
+      frameType,
+    );
 
     // 帧类型说明
     if (frameType === 'start') {
@@ -5808,9 +5818,10 @@ export default function StoryboardGenerator() {
 
     // 如果有场景参考图片，强调保持场景一致性
     if (hasSceneReference) {
-      parts.push('【重要】保持场景风格一致性');
-      parts.push('场景布局、物品位置、背景细节必须与参考图片保持完全一致');
-      parts.push('仅调整人物位置、表情、动作和镜头角度');
+      parts.push('【空间坐标基准】场景参考图是本镜固定空间基准');
+      parts.push('门窗、墙体、楼梯、固定家具、通道及前中后景关系不得重排');
+      parts.push('人物必须站在参考图中真实可站立或可通行区域，不得穿墙、占用固定家具或堵塞通道');
+      parts.push('文字站位与场景物理结构冲突时，以场景参考图的物理结构为准，仅调整人物动作、表情和机位');
     }
 
     // 1. 镜头类型和景别
@@ -5848,8 +5859,8 @@ export default function StoryboardGenerator() {
         parts.push(`画面内容结束：${shot.description}`);
       }
     }
-    if (shot.actorBlocking) {
-      parts.push(`人物相对站位：${shot.actorBlocking}`);
+    if (spatialSnapshot.actorBlocking) {
+      parts.push(`人物相对站位（唯一空间口径）：${spatialSnapshot.actorBlocking}`);
     }
     const normalizedShotActionChange = normalizeOpeningShotActionChange(
       shot.shotNumber,
@@ -5870,8 +5881,6 @@ export default function StoryboardGenerator() {
 
         // 人物姓名
         if (char.name) charDesc.push(`人物：${char.name}`);
-        if (char.position) charDesc.push(`站位：${char.position}`);
-
         // 对白（重要：原句保留）
         if (char.dialogue) {
           const dialogueType = char.dialogueType || '对白';
@@ -5962,13 +5971,7 @@ export default function StoryboardGenerator() {
     if (shot.notes) {
       parts.push(`备注：${shot.notes}`);
     }
-    const normalizedShotContinuity = normalizeOpeningShotContinuity(
-      shot.shotNumber,
-      shot.continuity,
-    );
-    if (normalizedShotContinuity) {
-      parts.push(`连续性：${normalizedShotContinuity}`);
-    }
+    parts.push(`空间连续性：${spatialSnapshot.continuity}`);
 
     // 10. 应用用户选择的风格
     if (imageSettings?.styles && imageSettings.styles.length > 0) {
@@ -5983,7 +5986,7 @@ export default function StoryboardGenerator() {
     // 12. 艺术风格和质量要求
     parts.push('高质量，电影级画面，专业摄影，细节丰富');
     if (!hasSceneReference) {
-      parts.push('场景设计大胆创新，画面极具吸引力，视觉冲击力强，构图独特，色彩鲜明');
+      parts.push('依据剧本和创作圣经建立清楚、可执行的空间结构；同一场景后续镜头复用相同门窗、固定家具、通道和前中后景关系');
     }
 
     return parts.join('。');
@@ -5996,10 +5999,12 @@ export default function StoryboardGenerator() {
   ): ShotPrompt[] => {
     if (!storyboard || !storyboard.shots) return [];
 
-    return storyboard.shots.map((shot) => {
+    const spatialShots = reconcileStoryboardSpatialContinuity(storyboard.shots) as Shot[];
+    return spatialShots.map((shot, index) => {
+      const previousShot = index > 0 ? spatialShots[index - 1] : undefined;
       // 生成首帧和尾帧两个提示词
-      const promptStart = buildShotPrompt(shot, imageSettings, undefined, 'start');
-      const promptEnd = buildShotPrompt(shot, imageSettings, undefined, 'end');
+      const promptStart = buildShotPrompt(shot, imageSettings, undefined, 'start', previousShot);
+      const promptEnd = buildShotPrompt(shot, imageSettings, undefined, 'end', previousShot);
 
       return {
         shotNumber: shot.shotNumber,
@@ -6210,13 +6215,13 @@ export default function StoryboardGenerator() {
     };
 
     groupShots.forEach(shot => {
+      const sceneReference = getShotSceneReference(shot, cs.chapterNumber);
+      addUrl(sceneReference.imageUrl);
+    });
+    groupShots.forEach(shot => {
       (shot.characters || []).forEach(character => {
         addUrl(getShotCharacterReference(shot, character.name, cs.chapterNumber).imageUrl);
       });
-    });
-    groupShots.forEach(shot => {
-      const sceneReference = getShotSceneReference(shot, cs.chapterNumber);
-      addUrl(sceneReference.imageUrl);
     });
     groupShots.forEach(shot => {
       (shot.scene?.props || []).forEach(propName => {
@@ -6691,6 +6696,9 @@ export default function StoryboardGenerator() {
       ...selection.missingImageEntities,
       ...selection.overflowEntities,
     ];
+    const sceneReferenceIndexes = selection.images
+      .map((item, index) => item.type === 'scene' ? index + 1 : 0)
+      .filter(Boolean);
 
     return [
       `【本次必须关联的全部实体】\n${entityLines.join('\n')}`,
@@ -6699,6 +6707,9 @@ export default function StoryboardGenerator() {
         : '【参考图序号对应关系】无独立参考图',
       notIndependentlyReferenced.length > 0
         ? `未单独传图的实体：${notIndependentlyReferenced.map(item => item.name).join('、')}。这些实体仍必须出现在对应镜头中，并严格沿用故事板总控图中的形象、空间和道具设计。`
+        : '',
+      sceneReferenceIndexes.length > 0
+        ? `【固定空间基准】图${sceneReferenceIndexes.join('、图')}为场景资产图。先识别门窗、墙体、楼梯、固定家具、通道、可站立区域和前中后景，再安排人物；不得重排场景结构。`
         : '',
     ].filter(Boolean).join('\n\n');
   };
@@ -6741,7 +6752,9 @@ export default function StoryboardGenerator() {
     pg: PromptGroup,
     referenceSelection: VideoReferenceSelection,
   ) => {
-    const groupShots = getPromptGroupShots(cs, pg);
+    const groupShots = reconcileStoryboardSpatialContinuity(
+      getPromptGroupShots(cs, pg),
+    ) as Shot[];
     const voiceResolution = resolveVideoVoiceAssignments(
       groupShots,
       cs.chapterNumber,
@@ -6764,7 +6777,7 @@ export default function StoryboardGenerator() {
     return [
       `请生成第${cs.chapterNumber}集第${pg.groupIndex}组连续视频，本组${pg.shotNumbers.length}个连续镜头的实际总时长为${formatStoryboardDurationSeconds(groupDuration)}秒，成片时长按本组实际总时长执行。`,
       buildVideoReferenceManifest(referenceSelection),
-      `核心参考：本组故事版总控图只作为画面构图、人物站位和空间关系参考；视频的文字描述必须以提示词模块中的本组提示词为准。`,
+      `核心参考：提示词模块中的本组提示词决定剧情、动作、台词和镜头表达；故事板总控图负责镜头构图与动作节拍；场景资产图负责固定物理空间。若故事板中的空间与场景资产图冲突，以场景资产图的门窗、墙体、楼梯、固定家具、通道和可站立区域为准，并在有效区域内调整人物站位。`,
       `本次会提供${referenceSelection.images.length}张参考图。提示词中出现的全部人物、场景、道具都必须参与对应镜头，不能因为没有独立参考图而遗漏。`,
       buildVideoFilmToneInstruction(),
       `【提示词模块-本组视频提示词】\n${promptModulePrompt}`,
@@ -6803,6 +6816,7 @@ export default function StoryboardGenerator() {
         buildVideoFilmToneInstruction(),
         `【镜头生成提示词】\n${promptText}`,
         voiceResolution.instruction,
+        '场景资产图是固定物理空间基准；故事板只控制本镜构图与动作。两者冲突时保持场景门窗、墙体、固定家具、通道和可站立区域不变，在有效区域内调整人物站位。',
         '提示词中出现的全部人物、场景、道具都必须参与画面，严格对应参考图，不得遗漏或自行替换。',
       ].filter(Boolean).join('\n\n'),
       imageUrls: referenceSelection.images.map(item => item.url),
