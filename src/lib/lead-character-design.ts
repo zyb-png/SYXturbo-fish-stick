@@ -1,11 +1,20 @@
+import { getCreationStylePreset } from './creation-style-presets';
+
 export type LeadCharacterDesignBible = {
   creationType?: string;
   subjectRegion?: string;
   creationBackground?: string;
+  creativeStyle?: string;
 };
 
 function normalize(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
+}
+
+function usesPhotorealisticLeadEnhancement(
+  creationBible?: LeadCharacterDesignBible
+): boolean {
+  return normalize(creationBible?.creationType) === '仿真人';
 }
 
 export function isLeadCharacterRole(value: unknown): boolean {
@@ -24,10 +33,20 @@ export function isLeadCharacterRole(value: unknown): boolean {
 }
 
 function getStyleLabel(creationBible?: LeadCharacterDesignBible): string {
+  const preset = getCreationStylePreset(creationBible?.creativeStyle);
+  if (preset) return `${preset.name}（${preset.category}）`;
   const creationType = normalize(creationBible?.creationType);
   if (creationType === '3D') return '院线级风格化3D动画电影';
   if (creationType === '动漫') return '高品质二维动画电影';
   return '真人电影或精品短剧';
+}
+
+function getStylePriorityDirective(creationBible?: LeadCharacterDesignBible): string {
+  const preset = getCreationStylePreset(creationBible?.creativeStyle);
+  if (preset) {
+    return `【固定创作风格最高优先级】严格使用创作圣经已选的“${preset.name}”视觉风格。主角规则只能提升颜值、骨相、气质、身份辨识度和造型完成度，不得另起一套摄影、线稿、建模、材质、上色、布光或调色语言；不得擅自改成现代美妆杂志、通用商业海报或另一部作品的角色`;
+  }
+  return '【画风一致性最高优先级】主角必须与同项目配角使用完全相同的表现媒介、造型语言、渲染或线稿方式、材质、上色、布光与调色；主角感只通过骨相、神态、气质和身份设计体现，不得另起一套画风';
 }
 
 function getContextLabel(creationBible?: LeadCharacterDesignBible): string {
@@ -112,6 +131,10 @@ export function buildLeadCharacterExtractionInstruction(
   const style = getStyleLabel(creationBible);
   const context = getContextLabel(creationBible);
 
+  if (!usesPhotorealisticLeadEnhancement(creationBible)) {
+    return `【主角画风保护】当前创作类型不是仿真人。人物提取必须让主角与配角共同服从${style}的角色设计、线稿/建模、材质、上色、布光与调色语言；不要向主角的 appearance、faceFeatures 或 looks 写入美妆杂志、商业海报、85mm定妆照、真人选角摄影、真实皮肤摄影或写实妆面等仿真人专用语义。主角层级只通过剧本中的身份、性格、人物弧光、五官辨识度、发型轮廓和服装造型体现，不另起一套画风；同时严格符合${context}。`;
+  }
+
   return `【主角形象设计规则】
 1. 仅用于 role=主角 的人类角色。参考的是爆款主角脸的审美结构，不得复制现实演员、网红或参考图中的具体身份；必须结合人物性格、阶层、经历和剧情重新设计独立面孔。
 2. 主角脸的核心不是单纯大眼、白皮或尖下巴，而是：三庭比例协调、眼距自然、眉眼关系清楚、鼻唇下巴衔接顺畅、骨相轮廓可识别，正脸和轻微侧转都稳定上镜。
@@ -139,6 +162,10 @@ export function buildLeadCharacterGenerationDirectives(options: {
   background?: string;
   arc?: string;
 }): string[] {
+  // Casting/editorial lead enhancement is intentionally photorealistic-only.
+  // 2D and 3D characters must use the same native style language as supporting roles.
+  if (!usesPhotorealisticLeadEnhancement(options.creationBible)) return [];
+
   const gender = normalizeLeadGender(options.gender);
   const style = getStyleLabel(options.creationBible);
   const context = getContextLabel(options.creationBible);
@@ -152,8 +179,9 @@ export function buildLeadCharacterGenerationDirectives(options: {
   ].map(normalize).filter(Boolean).join('；');
   const archetype = selectLeadArchetype(gender, characterText);
   const shared = [
-    `【主角选角目标】以${style}导演选角与定妆照标准设计独立面孔：第一眼漂亮或帅气、有明星级银幕存在感和主角光环，同时自然可信、耐看且具有故事感；不要普通证件照、素人路人脸、无记忆点商务头像或批量网红脸`,
-    '【角色层级必须可见】这张脸必须明显高于普通配角和背景人物的完成度：轮廓更利落、眉眼更有情绪、五官关系更精致、头部轮廓更有记忆点；不能只是端正或普通好看，必须达到剧集封面与海报中心人物的选角等级',
+    getStylePriorityDirective(options.creationBible),
+    `【主角选角目标】在${style}既定视觉语言内设计独立面孔：第一眼漂亮或帅气、有明星级银幕存在感和主角光环，同时自然可信、耐看且具有故事感；不要普通证件照、素人路人脸、无记忆点商务头像或批量网红脸`,
+    '【角色层级必须可见】主角与配角保持同一画风和同一制作规格，但主角的轮廓更利落、眉眼更有情绪、五官关系更精致、头部轮廓更有记忆点；差异来自角色设计和气质，不来自更换渲染、摄影、线稿、材质、布光或调色方式',
     `【气质原型：${archetype.label}】${archetype.directive}。所有五官、神态和妆发围绕这一种核心气质统一设计，不混搭互相冲突的审美标签`,
     `【面部结构】三庭协调、眼距自然、眉眼关系清楚、鼻唇下巴衔接顺畅，正脸与轻微侧转都稳定上镜；美感来自骨相比例、神态和人物气场，不靠夸张五官`,
     '【身份记忆点】只设置1至2个清楚且可继承的美观特征，例如独特眼型、眉骨走势、鼻尖、唇峰、酒窝、痣或下颌转折；不要把多个网红特征机械拼接在一张脸上',
@@ -170,7 +198,7 @@ export function buildLeadCharacterGenerationDirectives(options: {
     shared.push('【主角脸设计】在不擅自改变性别表达的前提下，以清楚骨相、协调五官、情绪眼神和稳定记忆点建立主角存在感，拒绝模板脸');
   }
 
-  shared.push('【构图与主体】只生成目标主角一人，白色干净背景，正面近景定妆照，85mm人像镜头观感，双眼清晰对焦，脸部无遮挡；不要第二个人、多人合影、拼图、文字或水印');
+  shared.push('【构图与主体】只生成目标主角一人，使用与同项目其他人物身份基准图相同的白色干净背景、正面头肩近景、画面尺度和光影逻辑，双眼清晰、脸部无遮挡；不要第二个人、多人合影、拼图、文字或水印');
   shared.push('【审美禁止项】不要普通证件照、路人脸、无记忆点商务头像、极端V脸、刀削尖下巴、夸张大眼、失衡眼距、过窄鼻梁、过度填充嘴唇、机械左右对称、明星仿脸、同质化白幼瘦');
   return shared;
 }
@@ -185,6 +213,8 @@ export function buildLeadCharacterFinalFaceLock(options: {
   background?: string;
   arc?: string;
 }): string[] {
+  if (!usesPhotorealisticLeadEnhancement(options.creationBible)) return [];
+
   const gender = normalizeLeadGender(options.gender);
   const style = getStyleLabel(options.creationBible);
   const context = getContextLabel(options.creationBible);
@@ -204,9 +234,10 @@ export function buildLeadCharacterFinalFaceLock(options: {
       : '一眼明确具有中心人物的银幕吸引力与身份辨识度';
 
   return [
-    `【最终主角脸锁·最高优先级】前文所有画风、地域和时代要求都必须服务于主角选角，不得把主角降级为普通路人或模板角色。输出必须是${style}的海报中心人物：${genderTarget}`,
+    getStylePriorityDirective(options.creationBible),
+    `【最终主角身份与颜值锁】在${style}固定视觉语言内强化主角选角，不得把主角降级为普通路人或模板角色，也不得为了主角感切换画风。输出必须做到：${genderTarget}`,
     `【最终气质锁】只强化“${archetype.label}”：${archetype.directive}。必须符合${context}与剧本年龄身份，但不能因为真实、朴素、日常、素颜或白背景而降低颜值与镜头吸引力`,
-    '【定妆照而非证件照】采用高端影视选角定妆与美妆杂志肖像的精致布光、眼神塑造、发型轮廓和面部层次；背景保持干净白色，但成片不能像身份证、员工照、普通自拍或电商模特头像',
-    '【生成前自检】如果第一眼更像配角、路人、普通商务头像、无记忆点网红脸，或男女主气质不明确，则视为不合格，重新优化骨相比例、眉眼神态、鼻唇关系、发型轮廓和1至2个身份记忆点后再输出；禁止使用现实明星姓名或复制具体真人身份',
+    '【统一定妆表现】与同项目配角使用完全相同的表现媒介、线条或建模方式、材质、上色、颗粒、布光和调色，只通过眼神塑造、发型轮廓、面部层次与身份记忆点提升主角吸引力；背景保持干净白色，但成片不能像身份证、员工照、普通自拍或电商模特头像',
+    '【生成前自检】如果第一眼更像配角、路人、普通商务头像、无记忆点网红脸，或男女主气质不明确，则优化骨相比例、眉眼神态、鼻唇关系、发型轮廓和1至2个身份记忆点；如果与配角的画风、材质、线条、建模、布光或调色不同，也视为不合格并按创作圣经固定风格重新统一。禁止使用现实明星姓名或复制具体真人身份',
   ];
 }

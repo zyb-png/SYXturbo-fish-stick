@@ -1,6 +1,6 @@
-export const STORYBOARD_GROUP_MIN_SECONDS = 14;
+export const STORYBOARD_GROUP_PREFERRED_MIN_SECONDS = 10;
 export const STORYBOARD_GROUP_MAX_SECONDS = 15;
-export const STORYBOARD_DURATION_GROUPING_STRATEGY = 'planned-unit-14-15-v2';
+export const STORYBOARD_DURATION_GROUPING_STRATEGY = 'content-driven-max-15-v3';
 
 const DURATION_PRECISION = 10;
 const DURATION_EPSILON = 0.0001;
@@ -51,27 +51,32 @@ export interface StoryboardDurationGroup<T> {
 }
 
 interface GroupByDurationOptions<T> {
-  minDuration?: number;
+  preferredMinDuration?: number;
   maxDuration?: number;
   fallbackDuration?: number;
   getGroupKey?: (item: T) => string | number | undefined;
 }
 
 /**
- * Groups adjacent shots without reordering them. A group closes once it reaches
- * the target window, before the next complete shot would exceed the maximum, or
- * when the model-planned video-unit key changes.
+ * Groups adjacent shots without reordering them. Model-planned video-unit keys
+ * are authoritative. The duration fallback only prevents a group from exceeding
+ * the provider limit; it never pads a short but complete unit.
  */
 export function groupContiguousItemsByDuration<T>(
   items: readonly T[],
   getDuration: (item: T) => unknown,
   options: GroupByDurationOptions<T> = {},
 ): Array<StoryboardDurationGroup<T>> {
-  const minDuration = options.minDuration ?? STORYBOARD_GROUP_MIN_SECONDS;
+  const preferredMinDuration = options.preferredMinDuration
+    ?? STORYBOARD_GROUP_PREFERRED_MIN_SECONDS;
   const maxDuration = options.maxDuration ?? STORYBOARD_GROUP_MAX_SECONDS;
   const fallbackDuration = options.fallbackDuration ?? 3;
 
-  if (minDuration <= 0 || maxDuration <= 0 || minDuration > maxDuration) {
+  if (
+    preferredMinDuration <= 0
+    || maxDuration <= 0
+    || preferredMinDuration > maxDuration
+  ) {
     throw new Error('Invalid storyboard duration grouping range');
   }
 
@@ -131,7 +136,10 @@ export function groupContiguousItemsByDuration<T>(
 
     if (
       plannedUnitEnds
-      || (currentDuration >= minDuration - DURATION_EPSILON && nextWouldExceed)
+      || (
+        currentDuration >= preferredMinDuration - DURATION_EPSILON
+        && nextWouldExceed
+      )
     ) {
       closeCurrentGroup();
     }

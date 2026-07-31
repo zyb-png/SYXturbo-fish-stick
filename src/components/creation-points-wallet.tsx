@@ -218,16 +218,26 @@ export function CreationPointsWallet() {
       setOpen(true);
     };
     const openLogin = () => {
-      setOpen(true);
+      // Keep a single modal focus scope active. The handcraft iframe can request
+      // login directly, so opening the wallet and login dialogs together causes
+      // their focus guards to compete in some browsers.
+      setOpen(false);
       setLoginOpen(true);
+    };
+    const handleFrameMessage = (event: MessageEvent) => {
+      if (event.origin !== window.location.origin) return;
+      if (event.data?.type === 'manfei:open-login') openLogin();
+      if (event.data?.type === 'manfei:open-wallet') openWallet();
     };
 
     window.addEventListener('manfei:open-wallet', openWallet);
     window.addEventListener('manfei:open-login', openLogin);
+    window.addEventListener('message', handleFrameMessage);
 
     return () => {
       window.removeEventListener('manfei:open-wallet', openWallet);
       window.removeEventListener('manfei:open-login', openLogin);
+      window.removeEventListener('message', handleFrameMessage);
     };
   }, []);
 
@@ -293,7 +303,7 @@ export function CreationPointsWallet() {
   };
 
   return (
-    <div className="flex items-center gap-2">
+    <div className="creation-points-wallet-actions flex items-center gap-2">
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogTrigger asChild>
           <Button variant="outline" size="sm" className="gap-2">

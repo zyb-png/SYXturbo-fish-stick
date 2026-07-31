@@ -180,12 +180,15 @@ function toHandcraftApiUrl(url) {
 
 function openSharedWalletLogin(event) {
   event?.preventDefault();
-  try {
-    const EventCtor = window.parent?.CustomEvent || CustomEvent;
-    window.parent?.dispatchEvent(new EventCtor('manfei:open-login'));
-  } catch {
-    window.dispatchEvent(new CustomEvent('manfei:open-login'));
+  if (window.parent && window.parent !== window) {
+    window.parent.postMessage(
+      { type: 'manfei:open-login' },
+      window.location.origin,
+    );
+    return;
   }
+
+  window.dispatchEvent(new CustomEvent('manfei:open-login'));
 }
 
 document.addEventListener('DOMContentLoaded', async () => {

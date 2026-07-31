@@ -1,6 +1,14 @@
-export type CreationStyleCategory = '2D' | '3D';
+export type CreationStyleCategory = '仿真人' | '2D' | '3D';
 
 export type CreationStyleId =
+  | 'shaw-studio-wuxia-live'
+  | 'hk-kungfu-1970s-live'
+  | 'oriental-ink-wuxia-live'
+  | 'hollywood-teal-orange-live'
+  | 'korean-noir-crime-live'
+  | 'showa-japanese-nostalgia-live'
+  | 'republican-shanghai-retro-live'
+  | 'northwest-rural-epic-live'
   | 'jp-tv-anime-2d'
   | 'cn-chibi-2d'
   | 'healing-handdrawn-2d'
@@ -24,6 +32,70 @@ export interface CreationBibleWithStyle {
 }
 
 export const CREATION_STYLE_PRESETS: CreationStylePreset[] = [
+  {
+    id: 'shaw-studio-wuxia-live',
+    name: '邵氏棚拍武侠',
+    category: '仿真人',
+    summary: '1970年代香港棚拍、浓郁东方配色与细密胶片颗粒',
+    image: '/creation-style-presets/09-邵氏棚拍武侠.png',
+    prompt: '1970年代香港棚拍彩色武侠电影质感，人工布景具有清晰的前中后景，朱红、墨绿、金黄与靛蓝形成浓郁东方配色。正面硬光照亮主体，顶部轮廓光勾勒边缘，阴影清晰，肤色温暖。稳定的中景或全身构图，略低机位，Eastmancolor高饱和胶片色彩、轻微柔焦与细密颗粒。',
+  },
+  {
+    id: 'hk-kungfu-1970s-live',
+    name: '70年代香港功夫',
+    category: '仿真人',
+    summary: '实景功夫片、温暖朴素年代色与完整动作构图',
+    image: '/creation-style-presets/10-70年代香港功夫.png',
+    prompt: '1970年代香港实景功夫片影像，砖红、土黄、棕褐与褪色墨绿构成温暖朴素的色彩，日光直接照射人物，亮部偏黄，阴影厚重而自然。使用28mm至35mm老式球面镜头，以平视全身镜头记录动作，保留人物手脚、重心和移动方向。画面带有细微手持感、老式变焦镜头的呼吸感、粗颗粒35mm胶片与真实的年代褪色。',
+  },
+  {
+    id: 'oriental-ink-wuxia-live',
+    name: '东方水墨武侠',
+    category: '仿真人',
+    summary: '低饱和水墨层次、雾感天光与沉静东方气韵',
+    image: '/creation-style-presets/11-东方水墨武侠.png',
+    prompt: '东方写意武侠电影影像，以黑、灰、青灰、雾白和极低饱和墨绿组织色彩，整体层次像水墨浓淡一样逐级展开。柔和天光形成薄雾般的明暗过渡，人物边缘由微弱逆光分离，衣料与环境保留真实电影摄影质感。长焦镜头压缩空间，大面积留白包围主体，景深层次含蓄，影像具有细腻胶片颗粒、轻柔高光和沉静的东方气韵。',
+  },
+  {
+    id: 'hollywood-teal-orange-live',
+    name: '好莱坞青橙调色',
+    category: '仿真人',
+    summary: '青蓝环境、暖金肤色与现代商业电影光影',
+    image: '/creation-style-presets/12-好莱坞青橙调色.png',
+    prompt: '现代好莱坞商业电影级调色，背景、阴影与环境光统一进入青蓝、深青和冷灰色域，人物肤色及主要高光保持自然的琥珀橙与暖金色，冷暖颜色在主体边缘形成清晰分离。采用方向明确的暖色主光与冷色环境光，黑位深沉且保有纹理，高光集中。使用现代电影镜头的浅景深、柔和椭圆散景、细微水平光晕和锐利主体细节，呈现高动态范围数字摄影质感。',
+  },
+  {
+    id: 'korean-noir-crime-live',
+    name: '韩式冷峻犯罪',
+    category: '仿真人',
+    summary: '低饱和冷色纪实光、略低曝光与压迫构图',
+    image: '/creation-style-presets/13-韩式冷峻犯罪.png',
+    prompt: '韩国现实主义犯罪电影影像，灰绿、铅灰、暗棕和浑浊土黄组成低饱和色彩，环境光冷而平，人物面部由单一方向的自然光或现场灯光塑形。整体曝光略低，暗部保留厚重层次，高光克制，肤色真实偏冷。镜头使用35mm或50mm焦段，人物偏离中心，前景遮挡与大面积空白制造压迫感，画面带有细微手持感、低反差胶片颗粒和冷静的纪实观察感。',
+  },
+  {
+    id: 'showa-japanese-nostalgia-live',
+    name: '昭和日式怀旧',
+    category: '仿真人',
+    summary: '柔和低饱和日常色、窗边自然光与温和胶片感',
+    image: '/creation-style-presets/14-昭和日式怀旧.png',
+    prompt: '昭和后期日本生活电影的怀旧色彩，米白、茶褐、褪色绿、深蓝和暖灰形成柔和低饱和画面。自然光从窗边或侧后方缓慢铺开，阴影泛着轻微青色，亮部呈乳白与淡黄色，人物肤色温润。使用50mm镜头的自然透视，构图安静、平衡，镜头高度接近日常视线。影像拥有细密胶片颗粒、轻微褪色、柔软高光、淡淡光晕和温和反差。',
+  },
+  {
+    id: 'republican-shanghai-retro-live',
+    name: '民国上海复古',
+    category: '仿真人',
+    summary: '墨绿暗金与酒红、钨丝暖光和 Art Deco 秩序',
+    image: '/creation-style-presets/15-民国上海复古.png',
+    prompt: '民国上海都市电影的精致复古影像，深墨绿、暗金、酒红、胡桃棕与灰蓝交织，钨丝灯把人物肤色染成柔和暖金，环境阴影沉入带绿色的冷灰。画面中的玻璃、金属、木材和织物呈现细长高光与柔和反射。使用50mm镜头和端正典雅的构图，空间比例带有Art Deco式秩序，覆盖细腻胶片颗粒、轻微柔焦、暖色光晕和优雅的暗部层次。',
+  },
+  {
+    id: 'northwest-rural-epic-live',
+    name: '西北乡土史诗',
+    category: '仿真人',
+    summary: '赭石土地色、低角度自然光与宏大环境构图',
+    image: '/creation-style-presets/16-西北乡土史诗.png',
+    prompt: '中国西北乡土史诗电影质感，土地色、赭石、暗红、枯草黄、深棕与灰蓝构成厚重色谱。低角度自然光横向扫过人物和环境，粗糙材质获得清晰纹理，天空与地面形成宏大的明暗关系。采用24mm至35mm镜头和稳定的远景、全景构图，人物体量相对环境更小，地平线明确。画面呈现颗粒明显的35mm胶片、微微压暗的曝光与沉稳肤色。',
+  },
   {
     id: 'jp-tv-anime-2d',
     name: '日式TV动画卡通风',
@@ -112,6 +184,7 @@ export function buildCreationStyleInstruction(value: unknown): string {
 export function isCreationStyleCompatible(creationType: unknown, styleId: unknown): boolean {
   const preset = getCreationStylePreset(styleId);
   if (!preset) return true;
+  if (creationType === '仿真人') return preset.category === '仿真人';
   if (creationType === '动漫') return preset.category === '2D';
   if (creationType === '3D') return preset.category === '3D';
   return false;

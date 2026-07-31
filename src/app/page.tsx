@@ -413,6 +413,25 @@ async function readImageGenerationResponse(response: Response, fallback: string)
   return { success: false, error: statusReason };
 }
 
+function notifyVisualAssetWarnings(result: unknown, label: string): void {
+  const payload = result && typeof result === 'object'
+    ? result as {
+        promptWarnings?: unknown;
+        qualityReview?: { warnings?: unknown };
+      }
+    : {};
+  const warnings = [
+    ...(Array.isArray(payload.promptWarnings) ? payload.promptWarnings : []),
+    ...(Array.isArray(payload.qualityReview?.warnings) ? payload.qualityReview.warnings : []),
+  ]
+    .map((item: unknown) => String(item || '').trim())
+    .filter(Boolean);
+
+  if (warnings.length > 0) {
+    toast.warning(`${label}已生成，请复核：${warnings.slice(0, 2).join('；')}`);
+  }
+}
+
 function getImageRequestFailureReason(error: unknown, operation: string): string {
   if (error instanceof Error && error.name === 'AbortError') {
     return `${operation}等待超时，后台任务可能仍在处理，系统会继续检查结果`;
@@ -1191,6 +1210,11 @@ interface Shot {
   actionChange?: string;
   continuity?: string;
   restrictions?: string;
+  soundType?: 'onscreen_dialogue' | 'voice_over' | 'off_screen' | 'phone' | 'recording' | 'device_broadcast' | 'ambient' | 'none';
+  lipSyncRequired?: boolean;
+  videoUnitStartState?: string;
+  videoUnitEndState?: string;
+  videoUnitDensityType?: 'ordinary' | 'action_reversal' | 'fight';
 }
 
 interface Storyboard {
@@ -1384,6 +1408,17 @@ interface AssetSingleImage {
   lookId?: string; // 新增：对应的造型ID（如：look-1, look-2）
   lookScene?: string; // 新增：对应的造型场景（如：初见、战斗）
   isImg2Img?: boolean;
+  visualAssetType?: 'character' | 'scene' | 'prop' | 'effect';
+  promptCompilerVersion?: string;
+  qualityReview?: {
+    status: 'passed' | 'warning';
+    format?: string;
+    width?: number;
+    height?: number;
+    expectedAspectRatio?: string;
+    warnings?: string[];
+    manualChecks?: string[];
+  };
 }
 
 // 素材图片集合 - 每个素材可以有多张图片
@@ -2438,6 +2473,9 @@ export default function StoryboardGenerator() {
   // 非持久化状态
   const [uploadedFile, setUploadedFile] = useState<File | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
+  const [isStartingProductionExtraction, setIsStartingProductionExtraction] = useState(false);
+  const [showAllOutlineEpisodes, setShowAllOutlineEpisodes] = useState(false);
+  const productionExtractionStartingRef = useRef(false);
   const [isGeneratingExecutionScript, setIsGeneratingExecutionScript] = useState(false);
   const [executionScriptElapsedSeconds, setExecutionScriptElapsedSeconds] = useState(0);
   const [executionScriptProgressMessage, setExecutionScriptProgressMessage] = useState('DeepSeek 正在通读全文并规范剧本结构');
@@ -2569,6 +2607,34 @@ export default function StoryboardGenerator() {
     if (selected.size === 0) return chapters;
     return chapters.filter(chapter => selected.has(chapter.chapterNumber));
   }, [outline?.chapters, selectedProductionEpisodes]);
+
+  const hasStartedProductionExtraction = useMemo(() => (
+    isStartingProductionExtraction ||
+    stepConfirmed.extraction ||
+    [
+      effectiveExtractionStatus.scenes,
+      effectiveExtractionStatus.characters,
+      effectiveExtractionStatus.voices,
+      effectiveExtractionStatus.props,
+    ].some(status => status !== 'pending')
+  ), [
+    effectiveExtractionStatus.characters,
+    effectiveExtractionStatus.props,
+    effectiveExtractionStatus.scenes,
+    effectiveExtractionStatus.voices,
+    isStartingProductionExtraction,
+    stepConfirmed.extraction,
+  ]);
+  const shouldLimitOutlineToSelected = hasStartedProductionExtraction && selectedProductionEpisodes.length > 0;
+  const outlineChaptersForDisplay = useMemo(() => {
+    const chapters = outline?.chapters || [];
+    if (!shouldLimitOutlineToSelected || showAllOutlineEpisodes) return chapters;
+    return productionChapters;
+  }, [outline?.chapters, productionChapters, shouldLimitOutlineToSelected, showAllOutlineEpisodes]);
+  const unselectedOutlineEpisodeCount = Math.max(
+    0,
+    (outline?.chapters?.length || 0) - productionChapters.length,
+  );
 
   const getSelectedProductionContent = useCallback(() => {
     const fullContent = getExtractionSourceContent();
@@ -6324,7 +6390,7 @@ export default function StoryboardGenerator() {
     return Array.from(references.values());
   };
 
-  // 按原镜头顺序累计实际时长：以14-15秒为目标，且单组绝不超过15秒。
+  // 优先沿用模型规划的视频单元；缺少单元标识时按实际时长兜底，单组不超过 15 秒。
   const groupShotsIntoPromptGroups = (
     videoPrompts: VideoPromptItem[],
     shots: Shot[]
@@ -6909,9 +6975,19 @@ export default function StoryboardGenerator() {
           return;
         }
         if (!(await requireLoginBeforePaidAction())) return;
-        resetProductionOutputsForEpisodeSelection();
-        toast.info(`已选择 ${selectedProductionEpisodes.length} 集，开始只拆解这些集数的人物、场景、道具和音色`);
-        await extractAllParallel(selectedContent, getCurrentFileName(), getCreationBiblePayload(), { includeOutline: false });
+        if (productionExtractionStartingRef.current) return;
+
+        productionExtractionStartingRef.current = true;
+        setIsStartingProductionExtraction(true);
+        setShowAllOutlineEpisodes(false);
+        try {
+          resetProductionOutputsForEpisodeSelection();
+          toast.info(`已选择 ${selectedProductionEpisodes.length} 集，开始只拆解这些集数的人物、场景、道具和音色`);
+          await extractAllParallel(selectedContent, getCurrentFileName(), getCreationBiblePayload(), { includeOutline: false });
+        } finally {
+          productionExtractionStartingRef.current = false;
+          setIsStartingProductionExtraction(false);
+        }
         return;
       }
     }
@@ -7266,6 +7342,7 @@ export default function StoryboardGenerator() {
           charactersData,
           propsData,
           creationBible: getCreationBiblePayload(),
+          imageSettings: globalImageSettings,
         }),
       });
 
@@ -7371,6 +7448,7 @@ export default function StoryboardGenerator() {
           charactersData,
           propsData,
           creationBible: getCreationBiblePayload(),
+          imageSettings: globalImageSettings,
         }),
       });
 
@@ -8782,6 +8860,9 @@ export default function StoryboardGenerator() {
           promptSource: result.prompt ? 'actual' : 'rebuilt',
           isGenerating: false,
           isCustom: false,
+          visualAssetType: result.visualAssetType,
+          promptCompilerVersion: result.promptCompilerVersion,
+          qualityReview: result.qualityReview,
         };
         setAssetImages(prev => {
           const newMap = new Map(prev);
@@ -8818,6 +8899,7 @@ export default function StoryboardGenerator() {
         });
         requestAssetLibrarySync();
         options?.onSuccess?.(generatedImage);
+        notifyVisualAssetWarnings(result, data.name);
         if (!options?.silent) toast.success(`${data.name} 图片生成成功`);
         return true;
       } else {
@@ -9382,6 +9464,7 @@ export default function StoryboardGenerator() {
           fourViewIdentityNeedsReview: Boolean(look.fourViewImageUrl),
         }, character);
         requestAssetLibrarySync();
+        notifyVisualAssetWarnings(result, `${character.name} - ${look.scene || lookId}`);
         toast.success(`${character.name} - ${look.scene || lookId} 造型图片生成成功`);
       } else {
         const failureReason = result.error || '造型图片生成失败：接口没有返回原因';
@@ -9500,6 +9583,7 @@ export default function StoryboardGenerator() {
           fourViewIdentityNeedsReview: false,
         }, character);
         requestAssetLibrarySync();
+        notifyVisualAssetWarnings(result, `${character.name}的四视图`);
         toast.success(`${character.name}的四视图生成成功`);
       } else {
         const failureReason = result.error || '四视图生成失败：接口没有返回原因';
@@ -9631,6 +9715,7 @@ export default function StoryboardGenerator() {
           fourViewIdentityNeedsReview: Boolean(look.fourViewImageUrl),
         }, character);
         requestAssetLibrarySync();
+        notifyVisualAssetWarnings(result, `${character.name} - ${look.scene || lookId}`);
         toast.success(`${character.name} 造型图片重新生成成功`);
       } else {
         const failureReason = result.error || '造型图片重新生成失败：接口没有返回原因';
@@ -9749,6 +9834,9 @@ export default function StoryboardGenerator() {
                       isGenerating: false,
                       isCustom: false,
                       isImg2Img: true,
+                      visualAssetType: result.visualAssetType,
+                      promptCompilerVersion: result.promptCompilerVersion,
+                      qualityReview: result.qualityReview,
                     }
                   : img
               ),
@@ -9763,6 +9851,7 @@ export default function StoryboardGenerator() {
           return next;
         });
         requestAssetLibrarySync();
+        notifyVisualAssetWarnings(result, data.name);
         toast.success(`基于参考图片生成成功 (Seedream 模型)`);
       } else {
         const failureReason = result.error || '图生图失败：接口没有返回原因';
@@ -10705,7 +10794,7 @@ export default function StoryboardGenerator() {
       toast.error('请先选择创作类型、创作题材和创作背景');
       return;
     }
-    if ((creationBible.creationType === '动漫' || creationBible.creationType === '3D') && !creationBible.creativeStyle) {
+    if (!creationBible.creativeStyle) {
       toast.error('请为当前创作类型选择一种固定创作风格');
       return;
     }
@@ -11824,35 +11913,35 @@ export default function StoryboardGenerator() {
 	                        <CheckCircle2 className="h-4 w-4" />
 	                        创作圣经已确认，后续流程将按以下方向执行
 	                      </div>
-                      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+	                      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-[repeat(3,minmax(0,0.8fr))_minmax(170px,1.7fr)]">
+		                        <div className="rounded-md border border-amber-400/20 bg-black/20 px-3 py-2">
+		                          <div className="text-[11px] text-amber-200/70">创作类型</div>
+		                          <div className="mt-1 text-sm font-semibold text-amber-50">{creationBible.creationType}</div>
+		                        </div>
 	                        <div className="rounded-md border border-amber-400/20 bg-black/20 px-3 py-2">
-	                          <div className="text-[11px] text-amber-200/70">创作类型</div>
-	                          <div className="mt-1 text-sm font-semibold text-amber-50">{creationBible.creationType}</div>
+	                          <div className="text-[11px] text-amber-200/70">创作题材</div>
+	                          <div className="mt-1 text-sm font-semibold text-amber-50">{creationBible.subjectRegion}</div>
+                        </div>
+                        <div className="rounded-md border border-amber-400/20 bg-black/20 px-3 py-2">
+	                          <div className="text-[11px] text-amber-200/70">创作背景</div>
+	                          <div className="mt-1 text-sm font-semibold text-amber-50">{creationBible.creationBackground}</div>
 	                        </div>
-                        <div className="overflow-hidden rounded-md border border-amber-400/20 bg-black/20">
-                          {selectedCreationStylePreset && (
-                            <img
-                              src={selectedCreationStylePreset.image}
-                              alt={selectedCreationStylePreset.name}
-                              className="aspect-[16/7] w-full object-cover object-top"
-                            />
-                          )}
-                          <div className="px-3 py-2">
-                            <div className="text-[11px] text-amber-200/70">创作风格</div>
-                            <div className="mt-1 text-sm font-semibold text-amber-50">
-                              {selectedCreationStylePreset?.name || '沿用类型默认风格'}
-                            </div>
-                          </div>
-                        </div>
-                        <div className="rounded-md border border-amber-400/20 bg-black/20 px-3 py-2">
-                          <div className="text-[11px] text-amber-200/70">创作题材</div>
-                          <div className="mt-1 text-sm font-semibold text-amber-50">{creationBible.subjectRegion}</div>
-                        </div>
-                        <div className="rounded-md border border-amber-400/20 bg-black/20 px-3 py-2">
-                          <div className="text-[11px] text-amber-200/70">创作背景</div>
-                          <div className="mt-1 text-sm font-semibold text-amber-50">{creationBible.creationBackground}</div>
-                        </div>
-	                      </div>
+	                        <div className="overflow-hidden rounded-md border border-amber-400/20 bg-black/20 sm:col-span-2 xl:col-span-1">
+	                          {selectedCreationStylePreset && (
+	                            <img
+	                              src={selectedCreationStylePreset.image}
+	                              alt={selectedCreationStylePreset.name}
+	                              className="aspect-video w-full object-cover object-top"
+	                            />
+	                          )}
+	                          <div className="px-3 py-2.5">
+	                            <div className="text-[11px] text-amber-200/70">创作风格</div>
+	                            <div className="mt-1 text-sm font-semibold text-amber-50">
+	                              {selectedCreationStylePreset?.name || '沿用类型默认风格'}
+	                            </div>
+	                          </div>
+	                        </div>
+		                      </div>
 	                      <AlertDialog>
 	                        <AlertDialogTrigger asChild>
 	                          <Button
@@ -11915,21 +12004,28 @@ export default function StoryboardGenerator() {
 
                         <div className="space-y-2">
                           <div className="flex flex-wrap items-end justify-between gap-2">
-                            <Label className="text-sm text-amber-100">创作风格（2D / 3D 单选）</Label>
+                            <Label className="text-sm text-amber-100">创作风格（仿真人 / 2D / 3D 单选）</Label>
                             <span className="text-[11px] leading-5 text-amber-100/55">
-                              选择风格会同步匹配创作类型；仿真人可不选择动画风格
+                              固定风格会贯穿人物、场景、道具、故事版和视频
                             </span>
                           </div>
                           <Tabs
                             key={creationBible.creationType || 'creation-style'}
-                            defaultValue={creationBible.creationType === '3D' ? '3D' : '2D'}
+                            defaultValue={
+                              creationBible.creationType === '仿真人'
+                                ? '仿真人'
+                                : creationBible.creationType === '3D'
+                                  ? '3D'
+                                  : '2D'
+                            }
                             className="rounded-md border border-amber-400/20 bg-black/15 p-2"
                           >
-                            <TabsList className="grid h-auto w-full grid-cols-2 bg-black/30 p-1">
-                              <TabsTrigger value="2D" className="py-2 text-xs">2D 动画风格</TabsTrigger>
-                              <TabsTrigger value="3D" className="py-2 text-xs">3D 卡通风格</TabsTrigger>
+                            <TabsList className="grid h-auto w-full grid-cols-3 bg-black/30 p-1">
+                              <TabsTrigger value="仿真人" className="px-1 py-2 text-[11px] sm:text-xs">仿真人电影风格</TabsTrigger>
+                              <TabsTrigger value="2D" className="px-1 py-2 text-[11px] sm:text-xs">2D 动画风格</TabsTrigger>
+                              <TabsTrigger value="3D" className="px-1 py-2 text-[11px] sm:text-xs">3D 卡通风格</TabsTrigger>
                             </TabsList>
-                            {(['2D', '3D'] as const).map(category => (
+                            {(['仿真人', '2D', '3D'] as const).map(category => (
                               <TabsContent key={category} value={category} className="mt-2">
                                 <div className="grid gap-2 md:grid-cols-2">
                                   {CREATION_STYLE_PRESETS.filter(preset => preset.category === category).map(preset => {
@@ -11946,7 +12042,12 @@ export default function StoryboardGenerator() {
                                         }`}
                                         onClick={() => setCreationBible(prev => ({
                                           ...prev,
-                                          creationType: preset.category === '2D' ? '动漫' : '3D',
+                                          creationType:
+                                            preset.category === '仿真人'
+                                              ? '仿真人'
+                                              : preset.category === '2D'
+                                                ? '动漫'
+                                                : '3D',
                                           creativeStyle: preset.id,
                                           confirmed: false,
                                         }))}
@@ -12038,7 +12139,7 @@ export default function StoryboardGenerator() {
 	                          !creationBible.creationType ||
 	                          !creationBible.subjectRegion ||
 	                          !creationBible.creationBackground ||
-                              ((creationBible.creationType === '动漫' || creationBible.creationType === '3D') && !creationBible.creativeStyle)
+                              !creationBible.creativeStyle
 	                        }
 	                      >
 	                        {isGeneratingExecutionScript ? (
@@ -12105,10 +12206,20 @@ export default function StoryboardGenerator() {
                           <Button
                             size="sm"
                             onClick={() => confirmStep('extraction')}
-                            disabled={isProcessing}
+                            disabled={isProcessing || isStartingProductionExtraction}
+                            aria-busy={isStartingProductionExtraction}
                           >
-                            <CheckCircle2 className="w-4 h-4 mr-1" />
-                            {isEffectiveExtractionSuccess ? '确认进入分镜' : '按所选集数开始拆解'}
+                            {isStartingProductionExtraction ? (
+                              <>
+                                <Loader2 className="w-4 h-4 mr-1 animate-spin" />
+                                正在拆解 {selectedProductionEpisodes.length} 集...
+                              </>
+                            ) : (
+                              <>
+                                <CheckCircle2 className="w-4 h-4 mr-1" />
+                                {isEffectiveExtractionSuccess ? '确认进入分镜' : '按所选集数开始拆解'}
+                              </>
+                            )}
                           </Button>
                         </div>
                         <p className="text-xs text-gray-500 mt-2 pl-8">
@@ -12123,7 +12234,7 @@ export default function StoryboardGenerator() {
                               setSelectedProductionEpisodes(outlineEpisodeNumbers);
                               resetProductionOutputsForEpisodeSelection();
                             }}
-                            disabled={outlineEpisodeNumbers.length === 0}
+                            disabled={outlineEpisodeNumbers.length === 0 || isStartingProductionExtraction}
                           >
                             全选
                           </Button>
@@ -12135,7 +12246,7 @@ export default function StoryboardGenerator() {
                               setSelectedProductionEpisodes([]);
                               resetProductionOutputsForEpisodeSelection();
                             }}
-                            disabled={selectedProductionEpisodes.length === 0}
+                            disabled={selectedProductionEpisodes.length === 0 || isStartingProductionExtraction}
                           >
                             清空
                           </Button>
@@ -12145,8 +12256,30 @@ export default function StoryboardGenerator() {
 
                     {/* 分集列表 */}
                     <div className="space-y-2 mt-4">
-                      <p className="text-sm font-medium text-gray-700 dark:text-gray-300">分集列表：</p>
-                      {outline.chapters.map((chapter, index) => (
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <p className="text-sm font-medium text-gray-700 dark:text-gray-300">分集列表：</p>
+                        {shouldLimitOutlineToSelected && unselectedOutlineEpisodeCount > 0 && (
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="ghost"
+                            className="h-7 px-2 text-xs text-amber-200 hover:text-amber-100"
+                            onClick={() => setShowAllOutlineEpisodes(previous => !previous)}
+                            disabled={isStartingProductionExtraction}
+                          >
+                            <ChevronDown className={`mr-1 h-3.5 w-3.5 transition-transform ${showAllOutlineEpisodes ? 'rotate-180' : ''}`} />
+                            {showAllOutlineEpisodes
+                              ? '只显示已选集数'
+                              : `展开其余 ${unselectedOutlineEpisodeCount} 集`}
+                          </Button>
+                        )}
+                      </div>
+                      {shouldLimitOutlineToSelected && !showAllOutlineEpisodes && unselectedOutlineEpisodeCount > 0 && (
+                        <p className="text-xs text-gray-500">
+                          已按本次制作范围收起 {unselectedOutlineEpisodeCount} 个未选集数
+                        </p>
+                      )}
+                      {outlineChaptersForDisplay.map((chapter, index) => (
                         <div
                           key={`chapter-list-${chapter.chapterNumber}-${index}`}
                           className={`p-3 rounded-lg border transition ${
@@ -12179,6 +12312,7 @@ export default function StoryboardGenerator() {
                                     });
                                     resetProductionOutputsForEpisodeSelection();
                                   }}
+                                  disabled={isStartingProductionExtraction}
                                 >
                                   {selectedProductionEpisodes.includes(chapter.chapterNumber) ? '已选' : '选择'}
                                 </Button>

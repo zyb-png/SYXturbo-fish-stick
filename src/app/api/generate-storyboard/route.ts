@@ -33,13 +33,22 @@ interface Segment {
   suggestedShots: number;
   plannedDuration: number;
   isFinalUnit: boolean;
+  densityType: VideoUnitDensity;
+  startSpatialState: string;
+  endSpatialState: string;
+  soundDuration: number;
+  visualReadingDuration: number;
+  actionDuration: number;
 }
+
+type VideoUnitDensity = 'ordinary' | 'action_reversal' | 'fight';
 
 interface DialogueLock {
   speaker: string;
   text: string;
   normalized: string;
   fullLine: string;
+  soundType: StoryboardSoundType;
 }
 
 type StoryboardGlobalContext = {
@@ -50,11 +59,30 @@ type StoryboardGlobalContext = {
   scenesData?: any;
   propsData?: any;
   creationBibleInstruction?: string;
+  promptBaselineInstruction?: string;
 };
 
-const VIDEO_UNIT_TARGET_MIN_SECONDS = 14;
+type StoryboardSoundType =
+  | 'onscreen_dialogue'
+  | 'voice_over'
+  | 'off_screen'
+  | 'phone'
+  | 'recording'
+  | 'device_broadcast'
+  | 'ambient'
+  | 'none';
+
+interface ContentDurationBreakdown {
+  soundDuration: number;
+  visualReadingDuration: number;
+  actionDuration: number;
+  totalDuration: number;
+}
+
+const VIDEO_UNIT_PREFERRED_MIN_SECONDS = 10;
+const VIDEO_UNIT_SHORT_THRESHOLD_SECONDS = 8;
 const VIDEO_UNIT_TARGET_MAX_SECONDS = 15;
-const DEFAULT_VIDEO_UNIT_SECONDS = 14.5;
+const DEFAULT_VIDEO_UNIT_SECONDS = 12;
 const MIN_SHOT_DURATION_SECONDS = 1.5;
 const MAX_SHOT_DURATION_SECONDS = 8;
 const MAX_VIDEO_UNITS_PER_EPISODE = 48;
@@ -123,6 +151,36 @@ function buildCreationBibleInstruction(creationBible?: {
   lines.push('注意：创作圣经只约束视觉风格、题材语境和时代背景，不能改写剧情、台词、人物关系和事件顺序；如剧本明确存在回忆、年代跳转或穿越，按原剧情呈现相应时期。');
   return lines.join('\n');
 }
+
+function buildPromptBaselineInstruction(imageSettings?: {
+  ratios?: unknown;
+  styles?: unknown;
+  lighting?: unknown;
+}): string {
+  const ratios = Array.isArray(imageSettings?.ratios)
+    ? imageSettings.ratios.map(cleanPromptText).filter(Boolean)
+    : [];
+  const styles = Array.isArray(imageSettings?.styles)
+    ? imageSettings.styles.map(cleanPromptText).filter(Boolean)
+    : [];
+  const lighting = Array.isArray(imageSettings?.lighting)
+    ? imageSettings.lighting.map(cleanPromptText).filter(Boolean)
+    : [];
+  if (ratios.length === 0 && styles.length === 0 && lighting.length === 0) return '';
+
+  const lines = ['【全片统一画面基调】'];
+  if (ratios.length > 0) {
+    lines.push(`画面比例：${ratios.join(' / ')}。构图、人物站位和运动路径必须适应该比例，重要主体不得落在裁切风险区。`);
+  }
+  if (styles.length > 0) {
+    lines.push(`画面风格：${styles.join('、')}。所有场景、人物、道具及镜头描述必须保持同一视觉语言。`);
+  }
+  if (lighting.length > 0) {
+    lines.push(`光影效果：${lighting.join('、')}。在不违背剧情时间和场景光源的前提下统一全片照明基调。`);
+  }
+  lines.push('这些设置是后续故事版和视频生成共用的影片基调，不得在不同视频单元中自行更换。');
+  return lines.join('\n');
+}
 // ================================================================
 // Phase 1 Prompt：视频单元规划（快，非流式）
 // ================================================================
@@ -130,11 +188,15 @@ const SEGMENT_ANALYSIS_PROMPT = `你是一位专业的影视分镜策划专家�
 
 【视频单元规划原则】
 1. 每个视频单元必须是一个连贯、可独立生成的视频段落，围绕同一空间轴线、连续动作、同一对白节拍或完整情绪转折组织
-2. 除最后一个单元可因正文结束而短于 14 秒外，每个单元计划时长应为 14-15 秒，任何单元都不得超过 15 秒
-3. 单元边界优先落在动作完成、对白句意完成、视线/情绪转折、人物出入场或场景切换处，禁止机械按字数切割
-4. 先保证剧情、动作、台词和空间连续，再估算该单元真正需要多少镜头；不要为了凑数量添加无信息镜头
-5. 空镜、反应镜头、道具特写、手部特写只在服务剧情、情绪或连续性时规划，不要求每个单元机械齐全
-6. 所有 content 按顺序拼接后必须完整覆盖原文，不能重叠、遗漏、改写或调整事件顺序
+2. 先锁定本单元内全部声音时长、画面文字阅读时长和动作表演时长，再决定单元边界；任何单元都不得超过 15 秒
+3. 内容足够时优先形成 10-15 秒的完整单元；完整的短动作、短反应或短对白可以是 8-10 秒；少于 8 秒只允许用于触发、揭示、冲击、钩子或正文自然结束，禁止为了凑时长添加无信息镜头
+4. 单元边界优先落在动作完成、对白句意完成、视线/情绪转折、人物出入场或场景切换处，禁止机械按字数切割
+5. 每个单元先给出起始空间状态和末尾空间状态；后一单元的起始状态必须继承前一单元末态，包括人物位置、身体朝向、视线、动作、道具归属和场景状态
+6. 先保证剧情、动作、台词和空间连续，再估算该单元真正需要多少镜头；不要为了凑数量添加无信息镜头
+7. 普通剧情通常 5-6 镜，动作或反转通常 7-8 镜，打斗通常 8-10 镜；这些只是密度建议，必须随实际时长和内容增减
+8. 空镜、反应镜头、道具特写、手部特写只在服务剧情、情绪或连续性时规划，不要求每个单元机械齐全
+9. 旁白、画外音、电话、录音、系统/设备播报都要计算声音时长，但只有画面内人物直接说话时才安排口型同步
+10. 所有 content 按顺序拼接后必须完整覆盖原文，不能重叠、遗漏、改写或调整事件顺序
 
 【输出格式】
 严格输出 JSON 数组，不要任何其他文字：
@@ -147,7 +209,13 @@ const SEGMENT_ANALYSIS_PROMPT = `你是一位专业的影视分镜策划专家�
     "emotionalTone": "本单元的核心情绪基调",
     "sceneContext": "场景信息",
     "charactersPresent": ["出场人物列表"],
-    "plannedDuration": 14.5,
+    "densityType": "ordinary",
+    "startSpatialState": "单元开始时的人物站位、身体朝向、视线、动作、道具归属和场景状态",
+    "endSpatialState": "单元结束时上述状态的准确末态，供下一单元承接",
+    "soundDuration": 5.2,
+    "visualReadingDuration": 0,
+    "actionDuration": 5.8,
+    "plannedDuration": 11,
     "suggestedShots": 5
   }
 ]
@@ -156,7 +224,7 @@ const SEGMENT_ANALYSIS_PROMPT = `你是一位专业的影视分镜策划专家�
 1. 不要改编原文内容，content字段必须原文节选
 2. 不要遗漏任何原文内容——所有段落合并后应覆盖全章
 3. 不要把总镜头数设为固定目标，也不要要求每集至少 50 镜
-4. 不要把单元固定成相同镜头数；suggestedShots 只是内容驱动的建议值，通常 3-8 镜，也允许完整长镜头或更细的动作组合
+4. 不要把单元固定成相同镜头数；suggestedShots 只是内容和密度驱动的建议值，也允许完整长镜头或更细的动作组合
 5. 不要让单个单元的 plannedDuration 超过 15 秒`;
 
 // ================================================================
@@ -180,7 +248,14 @@ function buildSegmentShotPrompt(
 出场人物：${segment.charactersPresent?.join('、') || '未知'}
 计划总时长：${segment.plannedDuration} 秒（上限 15 秒）
 建议镜头数：约 ${segment.suggestedShots} 个，仅供节奏参考，不是硬性数量
+节奏密度：${segment.densityType === 'fight' ? '打斗剧情' : segment.densityType === 'action_reversal' ? '动作/反转剧情' : '普通剧情'}
+声音时长估算：${segment.soundDuration} 秒
+画面文字阅读时长估算：${segment.visualReadingDuration} 秒
+动作表演时长估算：${segment.actionDuration} 秒
+起始空间状态：${segment.startSpatialState}
+末尾空间状态：${segment.endSpatialState}
 ${globalContext.creationBibleInstruction ? `\n${globalContext.creationBibleInstruction}` : ''}
+${globalContext.promptBaselineInstruction ? `\n${globalContext.promptBaselineInstruction}` : ''}
 
 【本单元连续原文】
 ${segment.content}
@@ -190,7 +265,7 @@ ${segment.content}
     prompt += `
 【本段原文台词锁定表】
 下面是本段唯一允许使用的原文台词。characters[].dialogue 与 actionAndDialogue 里的引号台词只能逐字使用这些内容，不能按意思改写，也不能从摘要或上下文补写。
-${dialogueLocks.map((item, index) => `${index + 1}. ${item.speaker ? `${item.speaker}：` : ''}「${item.text}」`).join('\n')}
+${dialogueLocks.map((item, index) => `${index + 1}. [${getSoundTypeLabel(item.soundType)}] ${item.speaker ? `${item.speaker}：` : ''}「${item.text}」`).join('\n')}
 `;
   } else {
     prompt += `
@@ -279,19 +354,20 @@ ${prevLastShot}
 
   prompt += `
 【本视频单元生成要求】
-1. 先在内部完成动作、对白和情绪节拍规划，再输出真正有叙事价值的镜头；建议约 ${segment.suggestedShots} 镜，但可根据内容增减，禁止凑镜头数
-2. 本单元所有镜头时长相加以 ${segment.plannedDuration} 秒为目标，绝对不能超过 15 秒；最后一个单元可随正文自然结束
+1. 先在内部完成动作、对白、画面文字阅读和情绪节拍规划，再输出真正有叙事价值的镜头；建议约 ${segment.suggestedShots} 镜，但可根据内容增减，禁止凑镜头数
+2. 本单元所有镜头时长相加以 ${segment.plannedDuration} 秒为内容驱动目标，绝对不能超过 15 秒；不得为了接近 15 秒增加空镜、停顿或重复反应
 3. 时长要符合内容：环境建立约 2-4 秒，动作/插入/反应约 1.5-3 秒，普通对白约 3-6 秒，复杂动作或情绪表演约 4-8 秒；不能机械地全部写成同一时长
-4. 有台词的镜头必须给足自然说完原文的时间，长台词按原文标点拆镜；系统会校验并小幅微调时长，但不会修改台词和剧情
+4. 所有声音都必须给足自然播放时间。对白、旁白、画外音、电话、录音、系统/设备播报分别填写 soundType；只有画面内人物直接说话时 lipSyncRequired 才为 true
 5. 每个分镜必须包含：景别、运镜、镜头角度、机位、人物相对站位、人物肢体动作、脸部动作/表情、动作变化标注
 6. 人物站位必须写清楚，例如：A 在画面左前景，B 在右后景，两人相距约 1 米，A 面向 B，B 侧身避开视线
-7. ${prevLastShot
+7. 本单元首镜必须准确建立“${segment.startSpatialState}”；末镜必须到达“${segment.endSpatialState}”，让下一单元可直接承接
+8. ${prevLastShot
   ? '本段首镜不是本集第一镜，必须承接上方【上一段末镜衔接信息】并标注"较上一镜动作变化"，禁止重新写成"首镜建立动作"'
   : '本段首镜就是本集第一镜，没有上一镜，必须写"首镜建立动作"并建立人物站位、表情和道具状态，禁止出现"上一镜/前一镜"'}；从本集第二镜开始，动作变化应写清从坐直变成后退半步、从低头变成抬眼、右手从桌沿移到胸前等具体变化
-8. 台词必须来自上方【本段原文台词锁定表】，一字不改；长台词按原文标点拆成连续分镜，不能改写、概括或新编
-9. 空镜、反应镜头、道具或手部特写只在能建立空间、传递信息、推动情绪或保证连续性时使用，不要机械插入
-10. 每个镜头都必须新增剧情动作、人物反应、空间信息或情绪变化；删除该镜头后若不影响理解，就不应生成
-11. 景别和运镜要有变化，但变化必须有叙事动机；不要连续 3 个镜头使用同一景别或同一运镜
+9. 台词必须来自上方【本段原文台词锁定表】，一字不改；长台词按原文标点拆成连续分镜，不能改写、概括或新编
+10. 空镜、反应镜头、道具或手部特写只在能建立空间、传递信息、推动情绪或保证连续性时使用，不要机械插入
+11. 每个镜头都必须新增剧情动作、人物反应、空间信息或情绪变化；删除该镜头后若不影响理解，就不应生成
+12. 景别和运镜要有变化，但变化必须有叙事动机；不要连续 3 个镜头使用同一景别或同一运镜
 
 现在开始逐行输出本视频单元需要的分镜，内容完整后立即停止，不要补空镜凑数：`;
 
@@ -346,6 +422,8 @@ const SKILL5_SYSTEM_PROMPT = `你是专业的影视分镜专家（AI 视频分�
   "emotionalBeat": "闲聊试探 → 害羞犹豫", // 情感节拍（必填）
   "cameraMovement": "缓推（Slow Dolly In）", // 镜头运动（必填）
   "duration": 5,                        // 预估时长（秒，数字）（必填）
+  "soundType": "onscreen_dialogue",    // 声音类型：onscreen_dialogue/voice_over/off_screen/phone/recording/device_broadcast/ambient/none
+  "lipSyncRequired": true,              // 仅画面内人物直接说话时为 true，其余声音类型必须为 false
 
   // ★ 以下 6+1 个字段是 Skill 5 影视级分镜规范必填字段，必须严格按照规范填写
   "focalLength": "85mm",               // ★ 焦段：亲密=85-200mm长焦 / 客观=35-50mm标准 / 环境=14-24mm广角 / 物件=微距
@@ -373,15 +451,20 @@ const SKILL5_SYSTEM_PROMPT = `你是专业的影视分镜专家（AI 视频分�
 3. 台词必须来自剧本原文/台词锁定表，一字不改！不能编造或修改
 4. 长台词必须按原文标点拆成 2-3 个连续分镜，拆开的每一段仍必须是原文连续片段，不能改写、删字或换词
 5. 无对白镜头只写动作描述，不留占位
+6. 旁白、画外音、电话、录音、系统/设备播报仍需把原文写入 characters[].dialogue 或 actionAndDialogue，并正确标注 soundType，但不能要求画面人物口型同步
+7. soundType=onscreen_dialogue 时 lipSyncRequired=true；其他声音类型一律为 false
 
 【视频单元与时长 - 强制】
 1. 先理解本单元的完整动作、对白、空间和情绪，再决定镜头数量；不存在每集至少 50 镜或每单元固定镜数
-2. 本单元各镜头 duration 相加必须接近计划时长且不得超过 15 秒；duration 必须是数字，不能写范围或文字
+2. 本单元各镜头 duration 相加应匹配声音、画面阅读和动作真正需要的计划时长，且不得超过 15 秒；duration 必须是数字，不能写范围或文字
 3. 环境建立通常 2-4 秒，动作/插入/反应通常 1.5-3 秒，普通对白通常 3-6 秒，复杂动作或情绪表演通常 4-8 秒
 4. 台词时长必须足够角色自然说完原文；长对白按原文标点拆镜，但禁止把短句无意义地切碎
 5. 空镜、反应、手部或道具特写、连续组合镜头按剧情需要选用，不要求每个单元机械凑齐
 6. 反应镜头必须具体且推动理解：抬眼、皱眉、吞咽、手指停顿、肩膀绷紧、视线躲开等
 7. 空镜必须服务剧情：门缝光线、桌上杯子震动、走廊脚步声、手机屏幕亮起、窗外风声等
+8. 内容足够时通常形成 10-15 秒完整单元；完整短节拍可为 8-10 秒；少于 8 秒只用于触发、揭示、冲击、钩子或正文自然结束
+9. 普通剧情通常 5-6 镜，动作/反转通常 7-8 镜，打斗通常 8-10 镜；这是软建议，不能为达到数量补镜头
+10. 15 秒只是上限，不是必须填满的目标，禁止用空镜、停顿或重复反应补足时长
 
 【视听转译原则 - 强制】
 剧本中所有抽象/心理/文学描述必须转译为摄影机能拍的具象画面：
@@ -408,6 +491,7 @@ E11=干脆决断(微距标点镜头+静切动)   E12=释放释怀(中焦+俯拍+
 4. 景别跳跃：避免连续 3 镜以上同景别
 5. 每一个有人物的镜头都必须确认 actorBlocking 与 characters[].position
 6. 本集第一镜必须在 actionChange 中建立初始肢体动作、脸部动作、表情和站位，禁止引用不存在的上一镜；从本集第二镜开始，每一个连续镜头都必须标注较上一镜发生的变化，没有改变时也要写"较上一镜：动作保持，仅眼神/呼吸变化"
+7. 每个视频单元的首镜必须建立规划给出的起始空间状态，末镜必须落实规划给出的末尾空间状态；下一单元从上一单元末态继续，不得把人物和道具复位
 
 【绝对禁止】
 1. 不能编造或修改台词，必须来自剧本原文
@@ -603,6 +687,66 @@ function splitDialogueFragments(text: string): string[] {
   return fragments.length > 1 ? fragments : [];
 }
 
+function inferSoundType(speaker: string, fullLine = ''): StoryboardSoundType {
+  const label = `${speaker} ${fullLine}`.toLowerCase();
+  if (/旁白|解说|narrator|voice\s*over|\bvo\b/.test(label)) return 'voice_over';
+  if (/画外|场外|os\b|o\.s\.|off[ -]?screen/.test(label)) return 'off_screen';
+  if (/电话|手机|通话|来电|phone/.test(label)) return 'phone';
+  if (/录音|录制|音频|语音留言|recording/.test(label)) return 'recording';
+  if (/系统|设备|广播|导航|提示音|人工智能|\bai\b|播报/.test(label)) return 'device_broadcast';
+  return 'onscreen_dialogue';
+}
+
+function getSoundTypeLabel(soundType: StoryboardSoundType): string {
+  const labels: Record<StoryboardSoundType, string> = {
+    onscreen_dialogue: '画面内对白',
+    voice_over: '旁白',
+    off_screen: '画外音',
+    phone: '电话声音',
+    recording: '录音',
+    device_broadcast: '系统/设备播报',
+    ambient: '环境声音',
+    none: '无声音',
+  };
+  return labels[soundType];
+}
+
+function normalizeSoundType(
+  value: unknown,
+  dialogueType: unknown,
+  dialogue: string,
+  dialogueLocks: DialogueLock[],
+): StoryboardSoundType {
+  const normalizedValue = String(value || '').trim().toLowerCase();
+  const allowed: StoryboardSoundType[] = [
+    'onscreen_dialogue',
+    'voice_over',
+    'off_screen',
+    'phone',
+    'recording',
+    'device_broadcast',
+    'ambient',
+    'none',
+  ];
+  if (allowed.includes(normalizedValue as StoryboardSoundType)) {
+    return normalizedValue as StoryboardSoundType;
+  }
+
+  const normalizedDialogue = normalizeDialogueForCompare(dialogue);
+  const sourceLock = normalizedDialogue
+    ? dialogueLocks.find(lock => lock.normalized === normalizedDialogue)
+    : null;
+  if (sourceLock) return sourceLock.soundType;
+
+  const label = String(dialogueType || '');
+  if (/旁白|解说/.test(label)) return 'voice_over';
+  if (/画外|场外/.test(label)) return 'off_screen';
+  if (/电话|通话/.test(label)) return 'phone';
+  if (/录音|音频/.test(label)) return 'recording';
+  if (/系统|设备|广播|播报/.test(label)) return 'device_broadcast';
+  return dialogue ? 'onscreen_dialogue' : 'none';
+}
+
 function extractSourceDialogues(sourceContent: string): DialogueLock[] {
   const locks: DialogueLock[] = [];
   const seen = new Set<string>();
@@ -617,6 +761,7 @@ function extractSourceDialogues(sourceContent: string): DialogueLock[] {
       text: cleanText,
       normalized,
       fullLine,
+      soundType: inferSoundType(speaker, fullLine),
     });
   };
 
@@ -655,23 +800,76 @@ function estimateSpokenDurationSeconds(value: string): number {
     .replace(/[^\p{L}\p{N}\s'-]/gu, ' ')
     .split(/\s+/)
     .filter(Boolean).length;
-  const pauseCount = (text.match(/[，,。！？!?；;：:…]/g) || []).length;
-  return Math.max(1.5, cjkCount / 4 + latinWords / 2.4 + pauseCount * 0.12);
+  const commaPauses = (text.match(/[，,、]/g) || []).length;
+  const sentencePauses = (text.match(/[。！？!?；;：:…]/g) || []).length;
+  return Math.max(
+    1.5,
+    cjkCount / 4 + latinWords / 2.4 + commaPauses * 0.12 + sentencePauses * 0.28,
+  );
+}
+
+function estimateVisualReadingDurationSeconds(value: string): number {
+  const text = stripPerformanceParentheticals(String(value || ''))
+    .replace(/^[^：:]{1,24}[：:]\s*/, '')
+    .replace(/[“”"'「」『』]/g, '')
+    .trim();
+  if (!text) return 0;
+  const cjkCount = (text.match(/[\u3400-\u9fff]/g) || []).length;
+  const latinWords = text
+    .replace(/[\u3400-\u9fff]/g, ' ')
+    .split(/\s+/)
+    .filter(Boolean).length;
+  return Math.max(1.5, cjkCount / 5 + latinWords / 3);
+}
+
+function estimateActionDurationSeconds(value: string): number {
+  const compactLength = normalizeSourceSlice(value).length;
+  if (compactLength === 0) return 0;
+  const actionCount = (String(value).match(/，|,|并|随后|接着|转身|走|跑|抬|放|拿|推|拉|打|踢|挥|撞|倒/g) || []).length;
+  return Math.min(8, Math.max(1.5, 0.8 + compactLength / 20 + actionCount * 0.18));
+}
+
+function estimateContentDurationBreakdown(content: string): ContentDurationBreakdown {
+  const lines = String(content || '').split(/\n+/).map(line => line.trim()).filter(Boolean);
+  if (lines.length === 0) {
+    return {
+      soundDuration: 0,
+      visualReadingDuration: 0,
+      actionDuration: 3,
+      totalDuration: 3,
+    };
+  }
+
+  let soundDuration = 0;
+  let visualReadingDuration = 0;
+  let actionDuration = 0;
+
+  lines.forEach(line => {
+    const dialogueMatch = line.match(/^([^：:\n]{1,32})[：:]\s*(.+)$/);
+    if (dialogueMatch) {
+      soundDuration += estimateSpokenDurationSeconds(dialogueMatch[2]);
+      return;
+    }
+
+    if (/屏幕|手机|短信|消息|通知|信件|纸上|文件|合同|标题|字幕|标牌|招牌|写着|显示|文字/.test(line)) {
+      visualReadingDuration += estimateVisualReadingDurationSeconds(line);
+      return;
+    }
+
+    actionDuration += estimateActionDurationSeconds(line);
+  });
+
+  const rounded = (value: number) => Math.round(value * 10) / 10;
+  return {
+    soundDuration: rounded(soundDuration),
+    visualReadingDuration: rounded(visualReadingDuration),
+    actionDuration: rounded(actionDuration),
+    totalDuration: rounded(Math.max(1.5, soundDuration + visualReadingDuration + actionDuration)),
+  };
 }
 
 function estimateContentDurationSeconds(content: string): number {
-  const lines = String(content || '').split(/\n+/).map(line => line.trim()).filter(Boolean);
-  if (lines.length === 0) return 3;
-
-  return Math.max(1.5, lines.reduce((total, line) => {
-    const dialogueMatch = line.match(/^[^：:\n]{1,32}[：:]\s*(.+)$/);
-    if (dialogueMatch) {
-      return total + estimateSpokenDurationSeconds(dialogueMatch[1]);
-    }
-
-    const compactLength = normalizeSourceSlice(line).length;
-    return total + Math.min(6, Math.max(1.5, 0.8 + compactLength / 18));
-  }, 0));
+  return estimateContentDurationBreakdown(content).totalDuration;
 }
 
 function splitContentIntoVideoBeats(content: string): string[] {
@@ -684,34 +882,68 @@ function splitContentIntoVideoBeats(content: string): string[] {
       .split(/(?<=[，,])/)
       .map(item => item.trim())
       .filter(Boolean);
-    return smallerBeats.length > 1 ? smallerBeats : [beat];
+    if (smallerBeats.length > 1) return smallerBeats;
+
+    const hardChunks = beat.match(/[\s\S]{1,48}/g)?.map(item => item.trim()).filter(Boolean);
+    return hardChunks && hardChunks.length > 1 ? hardChunks : [beat];
   });
 }
 
 function clampPlannedDuration(value: unknown, isFinalUnit: boolean, content: string): number {
   const parsed = Number(value);
-  const estimated = estimateContentDurationSeconds(content);
-  const fallback = isFinalUnit
-    ? Math.min(VIDEO_UNIT_TARGET_MAX_SECONDS, Math.max(3, estimated))
-    : DEFAULT_VIDEO_UNIT_SECONDS;
-  const duration = Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
-  const minimum = isFinalUnit ? 1.5 : VIDEO_UNIT_TARGET_MIN_SECONDS;
+  const estimated = Math.min(
+    VIDEO_UNIT_TARGET_MAX_SECONDS,
+    Math.max(1.5, estimateContentDurationSeconds(content)),
+  );
+  const proposed = Number.isFinite(parsed) && parsed > 0 ? parsed : estimated;
+  const maximumUsefulDuration = Math.min(
+    VIDEO_UNIT_TARGET_MAX_SECONDS,
+    estimated + (isFinalUnit ? 0.8 : 1.5),
+  );
+  const duration = Math.max(estimated, Math.min(proposed, maximumUsefulDuration));
   return Math.round(
-    Math.min(VIDEO_UNIT_TARGET_MAX_SECONDS, Math.max(minimum, duration)) * 10,
+    Math.min(VIDEO_UNIT_TARGET_MAX_SECONDS, Math.max(1.5, duration)) * 10,
   ) / 10;
 }
 
-function estimateSuggestedShotCount(content: string, plannedDuration: number, suggested?: unknown): number {
+function classifyVideoUnitDensity(content: string, suggested?: unknown): VideoUnitDensity {
+  if (suggested === 'ordinary' || suggested === 'action_reversal' || suggested === 'fight') {
+    return suggested;
+  }
+  const text = String(content || '');
+  if (/打斗|搏斗|交战|追杀|混战|厮杀|格斗|挥拳|踢|劈|砍|刺|开枪|爆炸|法术对轰|战斗/.test(text)) {
+    return 'fight';
+  }
+  if (/反转|揭露|发现|震惊|突变|冲突|追逐|逃跑|闯入|摔|推开|冲出|转身|动作/.test(text)) {
+    return 'action_reversal';
+  }
+  return 'ordinary';
+}
+
+function estimateSuggestedShotCount(
+  content: string,
+  plannedDuration: number,
+  suggested?: unknown,
+  densityType: VideoUnitDensity = classifyVideoUnitDensity(content),
+): number {
   const parsed = Number(suggested);
+  const preferredMaximum = densityType === 'fight' ? 10 : densityType === 'action_reversal' ? 8 : 6;
+  const preferredAtFullLength = densityType === 'fight' ? 8 : densityType === 'action_reversal' ? 7 : 5;
+  const durationScale = Math.min(1, Math.max(0.35, plannedDuration / VIDEO_UNIT_PREFERRED_MIN_SECONDS));
+  const durationDrivenCount = Math.max(1, Math.round(preferredAtFullLength * durationScale));
   if (Number.isFinite(parsed) && parsed > 0) {
-    return Math.min(MAX_SUGGESTED_SHOTS_PER_UNIT, Math.max(1, Math.round(parsed)));
+    return Math.min(
+      MAX_SUGGESTED_SHOTS_PER_UNIT,
+      preferredMaximum,
+      Math.max(1, Math.round(parsed)),
+    );
   }
 
   const beatCount = splitContentIntoVideoBeats(content).length;
-  const durationDrivenCount = Math.round(plannedDuration / 3);
   return Math.min(
     MAX_SUGGESTED_SHOTS_PER_UNIT,
-    Math.max(1, Math.max(durationDrivenCount, Math.min(beatCount, 6))),
+    preferredMaximum,
+    Math.max(1, Math.max(durationDrivenCount, Math.min(beatCount, preferredMaximum))),
   );
 }
 
@@ -795,6 +1027,31 @@ function resolveBasicSceneContext(
     || '当前剧情场景';
 }
 
+function isSceneHeadingBeat(value: string): boolean {
+  return /^\s*\d+\s*[-—–.]\s*\d+\s*[:：]?/.test(value)
+    || /^\s*(?:场景|地点|环境)\s*[：:]/.test(value);
+}
+
+function buildDefaultStartSpatialState(
+  sceneContext: string,
+  characters: string[],
+  isFirstUnit: boolean,
+): string {
+  const cast = characters.length > 0 ? characters.slice(0, 4).join('、') : '出场人物';
+  return isFirstUnit
+    ? `${sceneContext}内，${cast}按原文首个动作就位；首镜明确左右前后、身体朝向、视线、手部动作与道具归属。`
+    : `${sceneContext}内，继承上一视频单元末态；人物位置、身体朝向、视线、动作进度和道具归属均不复位。`;
+}
+
+function buildDefaultEndSpatialState(
+  sceneContext: string,
+  characters: string[],
+  description: string,
+): string {
+  const cast = characters.length > 0 ? characters.slice(0, 4).join('、') : '出场人物';
+  return `${sceneContext}内，${cast}停留在“${description || '当前剧情动作完成'}”后的准确位置；保留末尾身体朝向、视线、表情、手部动作与道具归属，供下一单元承接。`;
+}
+
 function createSourceLockedVideoUnits(
   sourceContent: string,
   seedSegments: Segment[],
@@ -812,14 +1069,9 @@ function createSourceLockedVideoUnits(
     const beatDuration = estimateContentDurationSeconds(beat);
     const wouldExceed = current.length > 0
       && currentDuration + beatDuration > VIDEO_UNIT_TARGET_MAX_SECONDS;
+    const startsNewScene = current.length > 0 && isSceneHeadingBeat(beat);
 
-    if (
-      wouldExceed
-      && (
-        currentDuration >= VIDEO_UNIT_TARGET_MIN_SECONDS
-        || currentDuration >= 8
-      )
-    ) {
+    if (wouldExceed || startsNewScene) {
       buckets.push(current.join('\n'));
       bucketDurations.push(currentDuration);
       current = [];
@@ -828,13 +1080,6 @@ function createSourceLockedVideoUnits(
 
     current.push(beat);
     currentDuration += beatDuration;
-
-    if (currentDuration >= VIDEO_UNIT_TARGET_MIN_SECONDS) {
-      buckets.push(current.join('\n'));
-      bucketDurations.push(currentDuration);
-      current = [];
-      currentDuration = 0;
-    }
   });
 
   if (current.length > 0) {
@@ -842,7 +1087,22 @@ function createSourceLockedVideoUnits(
     bucketDurations.push(currentDuration);
   }
 
+  if (buckets.length > 1) {
+    const lastIndex = buckets.length - 1;
+    const previousIndex = lastIndex - 1;
+    const canMergeShortTail = bucketDurations[lastIndex] < VIDEO_UNIT_SHORT_THRESHOLD_SECONDS
+      && bucketDurations[previousIndex] + bucketDurations[lastIndex] <= VIDEO_UNIT_TARGET_MAX_SECONDS
+      && !isSceneHeadingBeat(buckets[lastIndex]);
+    if (canMergeShortTail) {
+      buckets[previousIndex] = `${buckets[previousIndex]}\n${buckets[lastIndex]}`;
+      bucketDurations[previousIndex] += bucketDurations[lastIndex];
+      buckets.pop();
+      bucketDurations.pop();
+    }
+  }
+
   let carriedSceneContext = '';
+  let previousEndSpatialState = '';
   return buckets.map((content, index) => {
     const seed = seedSegments[index];
     const matchedCharacters = (characters || []).filter(name => content.includes(name));
@@ -859,6 +1119,16 @@ function createSourceLockedVideoUnits(
       scenes || [],
     );
     carriedSceneContext = cleanSceneContextCandidate(sceneContext) || carriedSceneContext;
+    const densityType = classifyVideoUnitDensity(content, seed?.densityType);
+    const timing = estimateContentDurationBreakdown(content);
+    const charactersPresent = matchedCharacters.length > 0
+      ? matchedCharacters
+      : (seed?.charactersPresent?.length ? seed.charactersPresent : (characters || []));
+    const startSpatialState = previousEndSpatialState || cleanPromptText(seed?.startSpatialState)
+      || buildDefaultStartSpatialState(sceneContext, charactersPresent, index === 0);
+    const endSpatialState = cleanPromptText(seed?.endSpatialState)
+      || buildDefaultEndSpatialState(sceneContext, charactersPresent, seed?.description || '连续原文动作与情绪节拍');
+    previousEndSpatialState = endSpatialState;
     return {
       id: index + 1,
       name: seed?.name || `${chapterTitle || '章节'}-视频单元${index + 1}`,
@@ -866,12 +1136,16 @@ function createSourceLockedVideoUnits(
       content,
       emotionalTone: seed?.emotionalTone || '综合',
       sceneContext,
-      charactersPresent: matchedCharacters.length > 0
-        ? matchedCharacters
-        : (seed?.charactersPresent?.length ? seed.charactersPresent : (characters || [])),
-      suggestedShots: estimateSuggestedShotCount(content, plannedDuration, seed?.suggestedShots),
+      charactersPresent,
+      suggestedShots: estimateSuggestedShotCount(content, plannedDuration, seed?.suggestedShots, densityType),
       plannedDuration,
       isFinalUnit,
+      densityType,
+      startSpatialState,
+      endSpatialState,
+      soundDuration: timing.soundDuration,
+      visualReadingDuration: timing.visualReadingDuration,
+      actionDuration: timing.actionDuration,
     };
   });
 }
@@ -889,11 +1163,12 @@ function repairSegmentsAgainstSource(
   ) === normalizeSourceSlice(sourceContent);
   const plausibleUnitCount = segments.length > 0 && segments.length <= MAX_VIDEO_UNITS_PER_EPISODE;
   const unitsAreShortEnough = segments.every(segment => (
-    estimateContentDurationSeconds(segment.content) <= VIDEO_UNIT_TARGET_MAX_SECONDS * 1.5
+    estimateContentDurationSeconds(segment.content) <= VIDEO_UNIT_TARGET_MAX_SECONDS
   ));
 
   if (completeCoverage && plausibleUnitCount && unitsAreShortEnough) {
     let carriedSceneContext = '';
+    let previousEndSpatialState = '';
     return segments.map((segment, index) => {
       const isFinalUnit = index === segments.length - 1;
       const plannedDuration = clampPlannedDuration(
@@ -908,6 +1183,14 @@ function repairSegmentsAgainstSource(
         scenes || [],
       );
       carriedSceneContext = cleanSceneContextCandidate(sceneContext) || carriedSceneContext;
+      const densityType = classifyVideoUnitDensity(segment.content, segment.densityType);
+      const timing = estimateContentDurationBreakdown(segment.content);
+      const startSpatialState = previousEndSpatialState
+        || cleanPromptText(segment.startSpatialState)
+        || buildDefaultStartSpatialState(sceneContext, segment.charactersPresent || [], index === 0);
+      const endSpatialState = cleanPromptText(segment.endSpatialState)
+        || buildDefaultEndSpatialState(sceneContext, segment.charactersPresent || [], segment.description);
+      previousEndSpatialState = endSpatialState;
       return {
         ...segment,
         id: index + 1,
@@ -918,7 +1201,14 @@ function repairSegmentsAgainstSource(
           segment.content,
           plannedDuration,
           segment.suggestedShots,
+          densityType,
         ),
+        densityType,
+        startSpatialState,
+        endSpatialState,
+        soundDuration: timing.soundDuration,
+        visualReadingDuration: timing.visualReadingDuration,
+        actionDuration: timing.actionDuration,
       };
     });
   }
@@ -1184,6 +1474,43 @@ function normalizeShot(
   const props = Array.isArray(rawShot?.scene?.props)
     ? rawShot.scene.props
     : getContextProps(globalContext).slice(0, 3).map((prop: any) => prop?.name).filter(Boolean);
+  const normalizedCharacters: Array<Record<string, string>> = characterNames.map((name: string) => {
+    const existing = Array.isArray(rawShot?.characters)
+      ? rawShot.characters.find((char: any) => (char?.name || char) === name)
+      : null;
+    const action = existing?.action || existing?.bodyAction || '';
+    const expression = existing?.expression || existing?.facialExpression || existing?.facialAction || '';
+    const gesture = existing?.gesture || '';
+    const dialogue = sanitizeCharacterDialogue(existing?.dialogue || '', sourceContent || segment.content, dialogueLocks);
+    return {
+      name,
+      lookId: existing?.lookId || 'look_0',
+      dialogue,
+      dialogueType: dialogue ? (existing?.dialogueType || '对白') : '',
+      reaction: existing?.reaction || segment.emotionalTone || '情绪随剧情变化',
+      position: existing?.position || existing?.relativePosition || existing?.blocking || '',
+      action,
+      expression,
+      facialAction: existing?.facialAction || existing?.facialExpression || '',
+      gesture,
+      actionChange: normalizeOpeningShotActionChange(
+        shotNumber,
+        existing?.actionChange || existing?.movementChange,
+        'character',
+      ),
+      performance: existing?.performance || [action, expression, gesture].filter(Boolean).join('，') || '根据台词和动作做出自然反应',
+    };
+  });
+  const combinedDialogue = normalizedCharacters
+    .map(character => character.dialogue)
+    .filter(Boolean)
+    .join(' ');
+  const soundType = normalizeSoundType(
+    rawShot?.soundType,
+    rawShot?.dialogueType || normalizedCharacters.find(character => character.dialogue)?.dialogueType,
+    combinedDialogue,
+    dialogueLocks,
+  );
 
   return {
     shotNumber,
@@ -1207,36 +1534,12 @@ function normalizeShot(
       props,
     },
     description: rawShot?.description || segment.description || '人物在场景中完成关键动作',
-    characters: characterNames.map((name: string) => {
-      const existing = Array.isArray(rawShot?.characters)
-        ? rawShot.characters.find((char: any) => (char?.name || char) === name)
-        : null;
-      const action = existing?.action || existing?.bodyAction || '';
-      const expression = existing?.expression || existing?.facialExpression || existing?.facialAction || '';
-      const gesture = existing?.gesture || '';
-      const dialogue = sanitizeCharacterDialogue(existing?.dialogue || '', sourceContent || segment.content, dialogueLocks);
-      return {
-        name,
-        lookId: existing?.lookId || 'look_0',
-        dialogue,
-        dialogueType: dialogue ? (existing?.dialogueType || '对白') : '',
-        reaction: existing?.reaction || segment.emotionalTone || '情绪随剧情变化',
-        position: existing?.position || existing?.relativePosition || existing?.blocking || '',
-        action,
-        expression,
-        facialAction: existing?.facialAction || existing?.facialExpression || '',
-        gesture,
-        actionChange: normalizeOpeningShotActionChange(
-          shotNumber,
-          existing?.actionChange || existing?.movementChange,
-          'character',
-        ),
-        performance: existing?.performance || [action, expression, gesture].filter(Boolean).join('，') || '根据台词和动作做出自然反应',
-      };
-    }),
+    characters: normalizedCharacters,
     emotionalBeat: rawShot?.emotionalBeat || segment.emotionalTone || '剧情推进',
     cameraMovement: rawShot?.cameraMovement || plannedStyle.cameraMovement,
     duration: parseShotDurationSeconds(rawShot?.duration, 3),
+    soundType,
+    lipSyncRequired: soundType === 'onscreen_dialogue' && combinedDialogue.length > 0,
     focalLength: rawShot?.focalLength || '35mm',
     aperture: rawShot?.aperture || 'f/4',
     cameraPosition: rawShot?.cameraPosition || `摄影机位于主体正前方，眼平高度，以平视拍摄人物动作，景别为中景。`,
@@ -1244,10 +1547,17 @@ function normalizeShot(
     actionAndDialogue: actionAndDialogue || rawShot?.description || segment.description || '人物完成当前剧情动作',
     continuity: normalizeOpeningShotContinuity(
       shotNumber,
-      rawShot?.continuity || rawShot?.continuityNotes,
+      rawShot?.continuity || rawShot?.continuityNotes || (
+        shotNumber === 1
+          ? `建立视频单元起始空间状态：${segment.startSpatialState}`
+          : `承接上一镜，并朝视频单元末态推进：${segment.endSpatialState}`
+      ),
     ),
     notes: rawShot?.notes || `${rawShot?.shotPurpose || plannedStyle.shotPurpose}，突出当前节拍的动作和反应。`,
     restrictions: rawShot?.restrictions || '不允许出现字幕/水印/任何文字',
+    videoUnitStartState: segment.startSpatialState,
+    videoUnitEndState: segment.endSpatialState,
+    videoUnitDensityType: segment.densityType,
   };
 }
 
@@ -1413,13 +1723,14 @@ function validateVideoUnitShots(
 ): any[] {
   if (shots.length === 0) return [];
 
-  const minimumTarget = segment.isFinalUnit
-    ? Math.min(segment.plannedDuration, VIDEO_UNIT_TARGET_MIN_SECONDS)
-    : VIDEO_UNIT_TARGET_MIN_SECONDS;
+  const contentDrivenTarget = Math.min(
+    VIDEO_UNIT_TARGET_MAX_SECONDS,
+    Math.max(1.5, segment.plannedDuration),
+  );
   const balanced = rebalanceShotDurations(
     shots,
-    segment.plannedDuration,
-    Math.max(1.5, minimumTarget),
+    contentDrivenTarget,
+    contentDrivenTarget,
     VIDEO_UNIT_TARGET_MAX_SECONDS,
   );
 
@@ -1428,15 +1739,14 @@ function validateVideoUnitShots(
     : splitShotsAtVideoLimit(balanced);
 
   groups = groups.map((group, groupIndex) => {
-    const isLastGeneratedUnit = groupIndex === groups.length - 1;
-    const canBeShort = segment.isFinalUnit && isLastGeneratedUnit;
-    const groupMinimum = canBeShort
-      ? Math.min(segment.plannedDuration, VIDEO_UNIT_TARGET_MIN_SECONDS)
-      : VIDEO_UNIT_TARGET_MIN_SECONDS;
+    const actualGroupDuration = Math.min(
+      VIDEO_UNIT_TARGET_MAX_SECONDS,
+      Math.max(1.5, sumShotDurations(group)),
+    );
     return rebalanceShotDurations(
       group,
-      canBeShort ? Math.min(segment.plannedDuration, VIDEO_UNIT_TARGET_MAX_SECONDS) : DEFAULT_VIDEO_UNIT_SECONDS,
-      Math.max(1.5, groupMinimum),
+      actualGroupDuration,
+      actualGroupDuration,
       VIDEO_UNIT_TARGET_MAX_SECONDS,
     );
   });
@@ -1446,6 +1756,12 @@ function validateVideoUnitShots(
       ? String(segment.id)
       : `${segment.id}.${groupIndex + 1}`;
     const actualUnitDuration = sumShotDurations(group);
+    const groupStartState = groupIndex === 0
+      ? segment.startSpatialState
+      : `承接视频单元 ${segment.id}.${groupIndex} 的末镜状态，人物、视线、动作和道具不复位。`;
+    const groupEndState = groupIndex === groups.length - 1
+      ? segment.endSpatialState
+      : `保持当前空间轴线并停在本组末镜动作完成位置，供视频单元 ${segment.id}.${groupIndex + 2} 承接。`;
     return group.map(shot => ({
       ...shot,
       videoUnitId: unitId,
@@ -1453,6 +1769,9 @@ function validateVideoUnitShots(
       videoUnitSubIndex: groupIndex + 1,
       videoUnitTitle: segment.name,
       plannedUnitDuration: actualUnitDuration,
+      videoUnitStartState: groupStartState,
+      videoUnitEndState: groupEndState,
+      videoUnitDensityType: segment.densityType,
     }));
   });
 }
@@ -1530,6 +1849,16 @@ export async function POST(request: NextRequest) {
   if (auth.response) return auth.response;
 
   try {
+    const requestBody = await request.json().catch(() => null);
+    if (!requestBody || typeof requestBody !== 'object' || Array.isArray(requestBody)) {
+      return new Response(JSON.stringify({
+        error: '请求参数格式错误',
+      }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
     const {
       chapterContent,
       chapterTitle,
@@ -1541,16 +1870,14 @@ export async function POST(request: NextRequest) {
       scenesData,
       propsData,
       creationBible,
-    } = await request.json();
+      imageSettings,
+    } = requestBody;
     const creationBibleInstruction = buildCreationBibleInstruction(creationBible);
-    const storyboardLlmOptions = getStoryboardLlmOptions();
-
-    console.log(`[生成分镜API] 收到请求 - 章节: ${chapterTitle}`);
-    console.log(`[生成分镜API] 模型: ${storyboardLlmOptions.model}`);
+    const promptBaselineInstruction = buildPromptBaselineInstruction(imageSettings);
 
     // 台词只能来自章节正文；摘要是改写文本，不能混入正文供模型抽台词。
-    const sourceContent = (chapterContent || '').trim();
-    const summaryContent = (chapterSummary || '').trim();
+    const sourceContent = typeof chapterContent === 'string' ? chapterContent.trim() : '';
+    const summaryContent = typeof chapterSummary === 'string' ? chapterSummary.trim() : '';
     const finalContent = sourceContent || summaryContent;
 
     if (!finalContent || finalContent.trim().length < 10) {
@@ -1565,6 +1892,10 @@ export async function POST(request: NextRequest) {
         headers: { 'Content-Type': 'application/json' },
       });
     }
+
+    const storyboardLlmOptions = getStoryboardLlmOptions();
+    console.log(`[生成分镜API] 收到请求 - 章节: ${chapterTitle}`);
+    console.log(`[生成分镜API] 模型: ${storyboardLlmOptions.model}`);
 
     const wordCount = finalContent.length;
     const sourceDialogues = extractSourceDialogues(sourceContent || finalContent);
@@ -1623,7 +1954,7 @@ export async function POST(request: NextRequest) {
           // ================================================================
           safeEnqueue(encoder.encode(`data: ${JSON.stringify({
             type: 'status',
-            message: '正在规划 14-15 秒连续视频单元...',
+            message: '正在按内容规划连续视频单元（单组最长 15 秒）...',
             phase: 'analyzing',
           })}\n\n`));
 
@@ -1633,10 +1964,11 @@ export async function POST(request: NextRequest) {
             { role: 'system' as const, content: SEGMENT_ANALYSIS_PROMPT },
             {
               role: 'user' as const,
-              content: `请分析以下章节内容，先规划成连续的 14-15 秒视频单元。
+              content: `请分析以下章节内容，先规划成内容驱动的连续视频单元。单组最长 15 秒，15 秒不是必须填满的目标。
 
 章节标题：${chapterTitle}
 ${creationBibleInstruction ? `\n${creationBibleInstruction}\n` : ''}
+${promptBaselineInstruction ? `\n${promptBaselineInstruction}\n` : ''}
 主要人物：${characters?.join('、') || '未指定'}
 关键场景：${scenes?.join('、') || '未指定'}
 章节摘要（仅辅助理解整体剧情，禁止从摘要抽取或改写台词）：
@@ -1677,21 +2009,40 @@ ${finalContent}
             segments = Array.isArray(parsed) ? parsed : (parsed.segments || []);
             segments = segments
               .filter((segment: any) => segment && typeof segment === 'object')
-              .map((segment: any, index: number) => ({
-                id: Number(segment.id) || index + 1,
-                name: segment.name || `${chapterTitle || '章节'}-${index + 1}`,
-                description: segment.description || '剧情节拍',
-                content: segment.content || finalContent,
-                emotionalTone: segment.emotionalTone || '综合',
-                sceneContext: cleanSceneContextCandidate(segment.sceneContext),
-                charactersPresent: Array.isArray(segment.charactersPresent) ? segment.charactersPresent : (characters || []),
-                suggestedShots: Math.min(
-                  MAX_SUGGESTED_SHOTS_PER_UNIT,
-                  Math.max(1, Math.round(Number(segment.suggestedShots) || 5)),
-                ),
-                plannedDuration: Number(segment.plannedDuration) || DEFAULT_VIDEO_UNIT_SECONDS,
-                isFinalUnit: false,
-              }));
+              .map((segment: any, index: number) => {
+                const segmentContent = segment.content || finalContent;
+                const timing = estimateContentDurationBreakdown(segmentContent);
+                const densityType = classifyVideoUnitDensity(segmentContent, segment.densityType);
+                const charactersPresent = Array.isArray(segment.charactersPresent)
+                  ? segment.charactersPresent
+                  : (characters || []);
+                const sceneContext = cleanSceneContextCandidate(segment.sceneContext);
+                return {
+                  id: Number(segment.id) || index + 1,
+                  name: segment.name || `${chapterTitle || '章节'}-${index + 1}`,
+                  description: segment.description || '剧情节拍',
+                  content: segmentContent,
+                  emotionalTone: segment.emotionalTone || '综合',
+                  sceneContext,
+                  charactersPresent,
+                  suggestedShots: estimateSuggestedShotCount(
+                    segmentContent,
+                    Number(segment.plannedDuration) || timing.totalDuration,
+                    segment.suggestedShots,
+                    densityType,
+                  ),
+                  plannedDuration: Number(segment.plannedDuration) || timing.totalDuration || DEFAULT_VIDEO_UNIT_SECONDS,
+                  isFinalUnit: false,
+                  densityType,
+                  startSpatialState: cleanPromptText(segment.startSpatialState)
+                    || buildDefaultStartSpatialState(sceneContext || '当前剧情场景', charactersPresent, index === 0),
+                  endSpatialState: cleanPromptText(segment.endSpatialState)
+                    || buildDefaultEndSpatialState(sceneContext || '当前剧情场景', charactersPresent, segment.description || '剧情节拍'),
+                  soundDuration: Number(segment.soundDuration) || timing.soundDuration,
+                  visualReadingDuration: Number(segment.visualReadingDuration) || timing.visualReadingDuration,
+                  actionDuration: Number(segment.actionDuration) || timing.actionDuration,
+                };
+              });
             if (segments.length === 0) {
               throw new Error('视频单元规划结果为空');
             }
@@ -1736,6 +2087,9 @@ ${finalContent}
               emotionalTone: s.emotionalTone,
               suggestedShots: s.suggestedShots,
               plannedDuration: s.plannedDuration,
+              densityType: s.densityType,
+              startSpatialState: s.startSpatialState,
+              endSpatialState: s.endSpatialState,
             })),
             phase: 'generating',
           })}\n\n`));
@@ -1757,6 +2111,7 @@ ${finalContent}
             scenesData,
             propsData,
             creationBibleInstruction,
+            promptBaselineInstruction,
           };
 
           for (let segIdx = 0; segIdx < segments.length; segIdx++) {
@@ -1778,6 +2133,9 @@ ${finalContent}
               emotionalTone: segment.emotionalTone,
               targetShots: segment.suggestedShots,
               plannedDuration: segment.plannedDuration,
+              densityType: segment.densityType,
+              startSpatialState: segment.startSpatialState,
+              endSpatialState: segment.endSpatialState,
             })}\n\n`));
 
             console.log(
@@ -2034,12 +2392,20 @@ ${finalContent}
         console.error('[创作点] 文字分镜任务退回失败:', refundError);
       });
     }
+    const errorMessage = error instanceof Error ? error.message : '分镜脚本生成失败';
+    const isConfigurationError = errorMessage.includes('未配置文字分镜模型 API Key');
     return new Response(JSON.stringify({
       error: error instanceof InsufficientCreationPointsError
         ? error.message
-        : '分镜脚本生成失败',
+        : isConfigurationError
+          ? errorMessage
+          : '分镜脚本生成失败',
     }), {
-      status: error instanceof InsufficientCreationPointsError ? 402 : 500,
+      status: error instanceof InsufficientCreationPointsError
+        ? 402
+        : isConfigurationError
+          ? 503
+          : 500,
       headers: { 'Content-Type': 'application/json' },
     });
   }
