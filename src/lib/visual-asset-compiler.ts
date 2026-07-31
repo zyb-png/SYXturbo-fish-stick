@@ -103,6 +103,58 @@ function normalizePromptQualityLanguage(prompt: string): string {
     .trim();
 }
 
+const PROP_IMAGE_NON_VISUAL_LABEL_PATTERN = /^(?:道具)?(?:剧情作用|剧情功能|功能|作用|归属|归属人物|主人|持有者|使用者|关联人物|人物关系|关联事件|状态形成背景|状态形成原因|形成原因|前置事件|剧情识别重点|剧本依据|原文依据|证据|出现场景|关联集数|场次|备注)\s*[：:]/;
+const PROP_IMAGE_NARRATIVE_PATTERN = /(?:推动剧情|剧情(?:作用|功能|识别|发展|冲突)|揭示真相|身份线索|成为(?:线索|证据)|作为(?:线索|证据)|人物关系|关联人物|关联事件|原文依据|剧本依据|出现场次|关联集数|第[一二三四五六七八九十百千万0-9]+集)/;
+const PROP_IMAGE_RELATION_PATTERN = /(?:归属人物|人物姓名|主人|持有者|使用者|穿戴者|关联人物|人物关系|与[\p{Script=Han}A-Za-z·]{1,12}的关系)/u;
+const PROP_IMAGE_BODY_PATTERN = /(?:人物身体|人体部位|人脸|脸部|面部|眼球|眼眶|眼尾|眼角|肩膀|肩头|脖颈|脖子|颈侧|胸口|后背|手臂|手腕|手掌|手指|躯干|皮肤|伤口|伤疤|淤青)/;
+const PROP_IMAGE_HUMAN_ACTION_PATTERN = /(?:[\p{Script=Han}A-Za-z·]{1,16}(?:拿着|拿起|握着|抓着|手持|持有|佩戴|穿着|使用|挥舞|刺向|抵住|架在|攻击|威胁|伤害|赠送|交给|抢走|夺走|折断|打碎|摔碎|烧毁|撕破|弄脏|击碎|砸坏|划破|割破)|持刀者|被威胁者|受伤者|施法者|受术者)/u;
+
+function stripPropOwnerMentions(value: unknown, data?: Record<string, unknown>): string {
+  let result = String(value || '');
+  const ownerNames = String(data?.owner || '')
+    .split(/[、,，/]/)
+    .map(item => item.trim())
+    .filter(item => item && !/(公共|场景|未知|无)/.test(item));
+  for (const ownerName of ownerNames) {
+    const escapedOwnerName = ownerName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    result = result
+      .replace(new RegExp(`${escapedOwnerName}的`, 'g'), '')
+      .replace(new RegExp(escapedOwnerName, 'g'), '');
+  }
+  return result;
+}
+
+/**
+ * 道具生图只接收可见的物品形象。剧情作用、归属、人物动作和原文证据
+ * 仍可保存在业务数据中，但在任何文生图/图生图请求提交前都会被剔除。
+ */
+export function sanitizePropImagePromptText(value: unknown): string {
+  const source = String(value || '')
+    .replace(/\r/g, '')
+    .replace(/[\t ]{2,}/g, ' ')
+    .trim();
+  if (!source) return '';
+
+  const clauses = source
+    .split(/[；;。！？!?\n]+/)
+    .flatMap(section => section.split(/[，,]+/))
+    .map(clause => clause.trim())
+    .filter(Boolean);
+
+  const visualClauses = clauses.filter(clause => {
+    const plainClause = clause.replace(/^【[^】]+】\s*/, '').trim();
+    if (!plainClause) return false;
+    if (PROP_IMAGE_NON_VISUAL_LABEL_PATTERN.test(plainClause)) return false;
+    if (PROP_IMAGE_NARRATIVE_PATTERN.test(plainClause)) return false;
+    if (PROP_IMAGE_RELATION_PATTERN.test(plainClause)) return false;
+    if (PROP_IMAGE_BODY_PATTERN.test(plainClause)) return false;
+    if (PROP_IMAGE_HUMAN_ACTION_PATTERN.test(plainClause)) return false;
+    return true;
+  });
+
+  return normalizePromptQualityLanguage(visualClauses.join('；'));
+}
+
 function resolveAssetType(input: CompileVisualAssetPromptInput): VisualAssetType {
   if (input.type === 'prop' && input.isVisibleEffect) return 'effect';
   if (input.type === 'character' || input.type === 'scene' || input.type === 'prop') return input.type;
@@ -291,14 +343,28 @@ function buildPreflightChecks(
 export function compileVisualAssetPrompt(
   input: CompileVisualAssetPromptInput
 ): VisualAssetPromptCompilation {
-  const rawPrompt = normalizePromptQualityLanguage(input.rawPrompt || '');
+  const assetType = resolveAssetType(input);
+  const rawPrompt = assetType === 'prop' || assetType === 'effect'
+    ? sanitizePropImagePromptText(stripPropOwnerMentions(input.rawPrompt, input.data))
+    : normalizePromptQualityLanguage(input.rawPrompt || '');
   if (!rawPrompt) {
-    throw new VisualAssetValidationError('视觉资产提示词为空，已阻止提交生图');
+    throw new VisualAssetValidationError(
+      assetType === 'prop' || assetType === 'effect'
+        ? '道具视觉描述为空或只包含剧情/人物关系，已阻止提交生图'
+        : '视觉资产提示词为空，已阻止提交生图'
+    );
   }
 
-  const assetType = resolveAssetType(input);
   const variant = resolveVariant(input, assetType);
   const checks = buildPreflightChecks(input, assetType, variant);
+  if (assetType === 'prop' || assetType === 'effect') {
+    checks.push({
+      code: 'prop-visual-only',
+      label: '道具视觉字段隔离',
+      status: 'passed',
+      detail: '已剔除归属人物、剧情作用、人物动作、场次和原文证据，仅提交道具本体及当前可见状态',
+    });
+  }
   const warnings = checks
     .filter(check => check.status === 'warning')
     .map(check => check.detail);

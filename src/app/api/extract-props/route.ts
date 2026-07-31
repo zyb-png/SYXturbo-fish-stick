@@ -5,6 +5,7 @@ import { tryExtractAndFixJSON } from '@/lib/json-utils';
 import { requireUserLoginResponse } from '@/lib/auth-guard';
 import { expandPropStateUnits } from '@/lib/prop-state-utils';
 import { buildCreationStyleInstruction } from '@/lib/creation-style-presets';
+import { sanitizePropImagePromptText } from '@/lib/visual-asset-compiler';
 
 // 每批处理的道具数
 const BATCH_SIZE = 8;
@@ -325,7 +326,7 @@ function normalizePropInventory(value: unknown): PropInventoryItem[] {
               : '',
           episodeNumbers,
           occurrences,
-          visualChange: typeof state?.visualChange === 'string' ? state.visualChange.trim() : '',
+          visualChange: sanitizePropImagePromptText(state?.visualChange),
           transitionEvent: typeof state?.transitionEvent === 'string' ? state.transitionEvent.trim() : '',
           narrativeFunction: typeof state?.narrativeFunction === 'string'
             ? state.narrativeFunction.trim()
@@ -352,11 +353,7 @@ function normalizePropInventory(value: unknown): PropInventoryItem[] {
         : typeof raw.function === 'string'
           ? raw.function.trim()
           : '',
-      visualSummary: typeof raw.visualSummary === 'string'
-        ? raw.visualSummary.trim()
-        : typeof raw.visualDescription === 'string'
-          ? raw.visualDescription.trim()
-          : '',
+      visualSummary: sanitizePropImagePromptText(raw.visualSummary || raw.visualDescription),
       states,
       evidence: normalizeStringList(raw.evidence, 12).map(item => item.slice(0, 240)),
     });
@@ -535,6 +532,8 @@ ${buildCreationBibleInstruction(creationBible)}
 13. “泛黄的退货单”“磨损的旧皮箱”等从首次到最后都不变的固有外观，只是一个基准状态，不得再凭形容词虚构“完整状态 + 旧化状态”。同一状态在多集出现时合并到该状态的 episodeNumbers/occurrences。
 14. 必须从开头读到结尾后再输出；不限制数量，长剧本出现 100 至 300 个物品是正常情况。宁可多提取，不可漏掉普通小物件。
 15. 创作圣经用于规范 type、visualSummary 和状态视觉表达，但不得改写或凭空增加剧情物品、状态或集数。
+16. visualSummary 只能描述道具本体可见的形象：物品类别、形制结构、尺寸比例、材质、颜色、表面纹理、固定识别特征和当前磨损程度。不得写归属人物、人物姓名、人物关系、拿取/穿戴/使用动作、剧情作用、场次、原文证据或情绪氛围。
+17. states.visualChange 只能描述相对上一状态新增或改变的可见物理特征。transitionEvent、narrativeFunction、evidence 继续独立记录剧情资料，但这些字段不得复述到 visualSummary、visualChange 或任何外观描述中。
 
 输出严格 JSON：
 {
@@ -548,7 +547,7 @@ ${buildCreationBibleInstruction(creationBible)}
       "episodeNumbers": [1, 2],
       "appearanceScenes": ["场景名"],
       "functionSummary": "剧情中如何被使用；普通陈设也如实说明",
-      "visualSummary": "符合创作圣经的材质、颜色、形制和识别特征概括",
+      "visualSummary": "只写道具本体的类别、形制、尺寸比例、材质、颜色、纹理和固定识别特征，不写人物或剧情",
       "states": [
         {
           "stateName": "首次出现时的准确状态名",
@@ -556,7 +555,7 @@ ${buildCreationBibleInstruction(creationBible)}
           "occurrences": [
             {"episodeNumber": 1, "episodeLabel": "第1集", "sceneName": "场景名", "heading": "1-1 场景名", "stateLabel": "该状态名"}
           ],
-          "visualChange": "基准状态",
+          "visualChange": "只写当前状态可见的物理变化；首个状态写基准状态",
           "transitionEvent": "首个制作状态，无前置变化",
           "narrativeFunction": "该状态在对应场次中的剧情作用",
           "evidence": "能证明该物品及状态的简短原文依据"
@@ -971,8 +970,8 @@ function normalizeStateVariants(
       stateName: state.stateName,
       scene: state.sceneName,
       stage: state.episodeLabel,
-      description: state.evidence || state.visualChange || defaultDescription,
-      visualChange: state.visualChange,
+      description: sanitizePropImagePromptText(state.visualChange) || defaultDescription,
+      visualChange: sanitizePropImagePromptText(state.visualChange),
       transitionEvent: state.transitionEvent,
       narrativeFunction: state.narrativeFunction,
       evidence: state.evidence,
@@ -1008,10 +1007,10 @@ function normalizeStateVariants(
         ...duplicateOccurrences.map((item: any) => item.episodeNumber),
       ]);
       existingVariant.evidence ||= rawVariant?.evidence || '';
-      existingVariant.visualChange ||= rawVariant?.visualChange || '';
+      existingVariant.visualChange ||= sanitizePropImagePromptText(rawVariant?.visualChange);
       existingVariant.transitionEvent ||= rawVariant?.transitionEvent || '';
       existingVariant.narrativeFunction ||= rawVariant?.narrativeFunction || rawVariant?.storyFunction || '';
-      existingVariant.description ||= rawVariant?.description || '';
+      existingVariant.description ||= sanitizePropImagePromptText(rawVariant?.description);
       return;
     }
     seenStates.add(normalizedState);
@@ -1036,8 +1035,8 @@ function normalizeStateVariants(
       stateName,
       scene: rawVariant?.scene || firstOccurrence?.sceneName || firstOccurrence?.heading || '首次出现的场景',
       stage: rawVariant?.stage || firstOccurrence?.episodeLabel || (index === 0 ? '首次出现' : '后续状态'),
-      description: rawVariant?.description || rawVariant?.evidence || defaultDescription,
-      visualChange: rawVariant?.visualChange || (index === 0 ? '基准状态' : `在前一状态基础上变为${stateName}`),
+      description: sanitizePropImagePromptText(rawVariant?.description || rawVariant?.visualChange) || defaultDescription,
+      visualChange: sanitizePropImagePromptText(rawVariant?.visualChange) || (index === 0 ? '基准状态' : `在前一状态基础上变为${stateName}`),
       transitionEvent: rawVariant?.transitionEvent || (index === 0 ? '基准状态' : ''),
       narrativeFunction: rawVariant?.narrativeFunction || rawVariant?.storyFunction || '',
       evidence: rawVariant?.evidence || '',
@@ -1142,10 +1141,10 @@ ${buildCreationBibleInstruction(creationBible)}
 
 **重要规则**：
 1. 必须为每个道具生成完整的描述信息，不要遗漏任何字段
-2. description 字段必须详细描述道具的外观特点、材质、颜色、尺寸等（至少30字）
+2. description 字段只能详细描述道具本体的可见外观、材质、颜色、尺寸比例、结构和表面状态（至少30字）
 3. 如果文本中没有详细描述，请根据道具名称和剧情推断合理的描述
 4. function 字段必须描述道具在剧情中的作用或功能
-5. visualDescription 必须描述道具的视觉外观特点
+5. visualDescription 必须是可直接用于单独生成道具素材图的纯视觉描述，只写道具本体，不写任何人物或剧情
 6. appearanceScenes 必须列出道具出现的场景
 7. 同一道具在剧情中出现“完整/破碎/损坏/沾血/烧毁/被修复/打开/关闭/空/装满”等真实变化时，物理身份仍归入同一个 mainPropName，但每个视觉状态必须在 stateVariants 中独立记录，后续会分别制作一张图
 8. stateVariants 按剧本出场顺序排列；第一个状态用 text-to-image 建立身份基准，后续状态用 image-to-image 严格参考前一状态图，只改变剧本明确发生的部分
@@ -1158,6 +1157,8 @@ ${buildCreationBibleInstruction(creationBible)}
 15. 即使物品只是被提及、摆放、穿戴、食用或作为背景陈设，也必须生成详情；importance 可标记为普通道具或背景道具，但不能删除
 16. 如果输入中误含人物身体部位、伤势、表情、眼神、情绪、气味或氛围词，例如“眼尾、肩膀、脖颈、旧伤、伤口、血腥味、铁锈味、压迫感”，必须从输出中剔除，不能包装成道具。
 17. 可见法术/特效可以作为“特效道具”，但 visualDescription 必须描述可见效果本身，例如能量形态、符文、法阵、烟雾、火焰、闪电、光色和运动轨迹；不得把施法者、受伤者或人体部位画进道具素材。
+18. description、visualDescription、stateVariants.description 和 stateVariants.visualChange 是“视觉生图字段”：严禁出现 owner、人物姓名、人物关系、拿取/穿戴/使用动作、剧情功能、冲突结果、出现场景、集数、场次或原文证据。即使原文写“某人拿刀抵住某人”，视觉字段也只能写短刀本体及刀刃当前状态。
+19. owner、function、transitionEvent、narrativeFunction、evidence 是“资料管理字段”，仅用于检索和后续关联。不得把这些信息复制、改写或概括进任何视觉生图字段。
 
 每个道具包含：
 - id: 序号
@@ -1165,18 +1166,18 @@ ${buildCreationBibleInstruction(creationBible)}
 - mainPropName: 主道具名称（同一道具状态变化时保持一致）
 - type: 人物道具/场景道具/特效道具/服装配饰（必须填写）
 - importance: 关键道具/重要道具/普通道具/背景道具（必须填写）
-- description: 道具详细描述（必须填写，描述外观、材质、颜色、特点等，30-80字）
+- description: 道具本体视觉描述（必须填写，只描述外观、材质、颜色、结构、尺寸比例和表面状态，30-80字）
 - appearanceScenes: 出现场景数组（必须填写，列出道具出现的场景）
 - owner: 道具归属人物（如果是人物道具必须填写）
 - function: 道具功能/作用（必须填写，描述在剧情中的作用）
-- visualDescription: 视觉外观描述（详细描述外观特点）
+- visualDescription: 可直接用于生图的纯视觉外观描述（只含道具本体和当前可见状态）
 - stateVariants: 道具状态变化数组（至少1个；如完整、破碎、损坏、旧化等）
   - id: 状态ID（如 state-1）
   - stateName: 状态名称（如：完整状态、破碎状态）
   - scene: 该状态出现的场景
   - stage: 剧情阶段或时间
-  - description: 该状态下的外观描述
-  - visualChange: 相比上一状态发生的视觉变化
+  - description: 该状态下道具本体的外观描述，不写人物、动作或剧情
+  - visualChange: 相比上一状态发生的可见物理变化，不写形成原因和剧情作用
   - transitionEvent: 前一状态如何变成当前状态；首状态写“基准状态”
   - narrativeFunction: 当前状态在所关联的独立场次中产生的不同剧情推动作用
   - episodeNumbers: 只有该状态实际出现的集数
@@ -1284,7 +1285,8 @@ ${buildCreationBibleInstruction(creationBible)}
     // 尝试从 LLM 返回的数据中找到匹配的道具
     const matchedProp = findMatchingProp(props, propName);
     const inventoryItem = findMatchingInventoryItem(inventoryItems, propName);
-    const defaultDescription = inventoryItem?.visualSummary || `该道具"${propName}"的外观特点待补充。请根据剧本内容补充道具的材质、颜色、尺寸、特点等信息。`;
+    const defaultDescription = sanitizePropImagePromptText(inventoryItem?.visualSummary)
+      || `该道具"${propName}"的外观特点待补充。请根据剧本内容补充道具的材质、颜色、尺寸、特点等信息。`;
     const occurrenceInfo = inferPropOccurrences(content, propName, inventoryItem?.aliases || []);
     const stateVariants = normalizeStateVariants(
       propName,
@@ -1308,10 +1310,11 @@ ${buildCreationBibleInstruction(creationBible)}
     
     if (matchedProp) {
       // 判断 description 是否有效：存在、非空、且不是默认的待补充文本
-      const hasValidDescription = matchedProp.description && 
-        matchedProp.description.trim().length > 0 &&
-        !matchedProp.description.includes('待补充') &&
-        !matchedProp.description.includes('外观特点待补充');
+      const sanitizedDescription = sanitizePropImagePromptText(matchedProp.description);
+      const sanitizedVisualDescription = sanitizePropImagePromptText(matchedProp.visualDescription);
+      const hasValidDescription = sanitizedDescription &&
+        !sanitizedDescription.includes('待补充') &&
+        !sanitizedDescription.includes('外观特点待补充');
       
       return {
         id: globalId,
@@ -1320,7 +1323,7 @@ ${buildCreationBibleInstruction(creationBible)}
         aliases: inventoryItem?.aliases || [],
         type: matchedProp.type || inventoryItem?.type || '普通道具',
         importance: matchedProp.importance || (inventoryItem?.type === '背景道具' ? '背景道具' : '普通道具'),
-        description: hasValidDescription ? matchedProp.description : defaultDescription,
+        description: hasValidDescription ? sanitizedDescription : defaultDescription,
         appearanceScenes: matchedProp.appearanceScenes && matchedProp.appearanceScenes.length > 0 
           ? matchedProp.appearanceScenes 
           : (fallbackScenes.length > 0 ? fallbackScenes : ['待补充出现场景']),
@@ -1328,8 +1331,8 @@ ${buildCreationBibleInstruction(creationBible)}
         function: matchedProp.function && matchedProp.function.length > 0 
           ? matchedProp.function 
           : (inventoryItem?.functionSummary || '普通陈设或生活使用物品'),
-        visualDescription: matchedProp.visualDescription && matchedProp.visualDescription.length > 0 
-          ? matchedProp.visualDescription 
+        visualDescription: sanitizedVisualDescription
+          ? sanitizedVisualDescription
           : (inventoryItem?.visualSummary || defaultDescription),
         stateVariants,
         stateLabel: stateVariants[0]?.stateName || occurrenceInfo.occurrences[0]?.stateLabel || '完整状态',

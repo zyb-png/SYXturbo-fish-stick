@@ -36,6 +36,7 @@ import { buildCreationStyleInstruction } from '@/lib/creation-style-presets';
 import {
   compileVisualAssetPrompt,
   inspectGeneratedVisualAsset,
+  sanitizePropImagePromptText,
 } from '@/lib/visual-asset-compiler';
 
 // 图片数量限制
@@ -1435,17 +1436,22 @@ function getPropQualityPrompt(creationBible?: CreationBible): string[] {
 const VISIBLE_EFFECT_PROP_PATTERN = /(法术|法阵|阵法|符文|灵力|魔法|能量|光效|特效|烟雾|雾气|火焰|闪电|雷电|冰霜|结界|护盾|血雾|黑雾|光环|气刃|剑气)/;
 
 function sanitizePropVisualDetail(value: unknown): string {
-  const text = String(value || '').trim();
-  if (!text) return '';
-  let cleaned = text
-    .replace(/[^，。；;,.]*(眼尾|眼角|眼眶|眼睛|眼球|肩膀|肩头|脖颈|脖子|颈侧|胸口|后背|手臂|手腕|手掌|手指|旧伤|伤口|伤疤|血痕|淤青|身体|皮肤|人物|人脸|脸部|面部|持刀者|被威胁者|受伤者)[^，。；;,.]*/g, '只理解为剧情作用对象，不在画面中表现人体或人物')
-    .replace(/[^，。；;,.]*(血腥味|铁锈味|气味|味道|异味|氛围|气氛|压迫感|寒意|恐惧感|悲伤感|紧张感)[^，。；;,.]*/g, '')
-    .replace(/，{2,}/g, '，')
-    .replace(/。{2,}/g, '。')
-    .replace(/^[，。；;,.、\s]+|[，。；;,.、\s]+$/g, '')
-    .trim();
-  if (!cleaned && text) cleaned = '只表现道具本体或可见特效本身';
-  return cleaned;
+  return sanitizePropImagePromptText(value);
+}
+
+function stripPropOwnerFromVisualName(value: unknown, owner: unknown): string {
+  let name = String(value || '').trim();
+  const ownerNames = String(owner || '')
+    .split(/[、,，/]/)
+    .map(item => item.trim())
+    .filter(item => item && !/(公共|场景|未知|无)/.test(item));
+  for (const ownerName of ownerNames) {
+    if (name.startsWith(`${ownerName}的`)) {
+      name = name.slice(`${ownerName}的`.length).trim();
+      break;
+    }
+  }
+  return name;
 }
 
 function isVisibleEffectProp(data: any): boolean {
@@ -1685,31 +1691,27 @@ function buildPrompt(type: string, data: any, lookId?: string, imageVariant?: st
       parts.push('【核心要求】画面中不能出现任何字幕、文字、水印、标题、说明文字');
       parts.push('【单状态制作】本次只生成一个道具实体的一种当前状态；禁止左右对照、前后对比、分栏、多宫格、设计稿排版，禁止同时展示完整与损坏两种状态');
       parts.push(...getPropQualityPrompt(creationBible));
-      if (data.name) parts.push(`道具名称：${data.name}`);
-      if (data.mainPropName) parts.push(`同一道具身份：${data.mainPropName}`);
-      if (data.stateLabel || currentPropState?.stateName) {
-        parts.push(`本次唯一状态：${data.stateLabel || currentPropState.stateName}`);
-      }
+      const visualPropName = stripPropOwnerFromVisualName(data.name, data.owner);
+      const visualMainPropName = stripPropOwnerFromVisualName(data.mainPropName, data.owner);
+      if (visualPropName) parts.push(`道具名称：${visualPropName}`);
+      if (visualMainPropName) parts.push(`同一道具身份：${visualMainPropName}`);
+      const propStateLabel = sanitizePropVisualDetail(data.stateLabel || currentPropState?.stateName);
+      if (propStateLabel) parts.push(`本次唯一状态：${propStateLabel}`);
       const propDescription = sanitizePropVisualDetail(data.description);
       const propVisualDescription = sanitizePropVisualDetail(data.visualDescription);
       const propVisualChange = sanitizePropVisualDetail(data.stateVisualChange || currentPropState?.visualChange);
-      const propTransitionEvent = sanitizePropVisualDetail(data.stateTransitionEvent || currentPropState?.transitionEvent);
-      const propNarrativeFunction = sanitizePropVisualDetail(data.stateNarrativeFunction || currentPropState?.narrativeFunction);
-      if (propDescription) parts.push(propDescription);
-      if (data.visualDescription && data.visualDescription !== data.description) {
+      if (propVisualDescription) {
         parts.push(`当前状态视觉：${propVisualDescription}`);
+      } else if (propDescription) {
+        parts.push(`道具本体外观：${propDescription}`);
       }
       if (propVisualChange) {
         parts.push(`相对前一状态的唯一变化：${propVisualChange}`);
       }
-      if (propTransitionEvent) {
-        parts.push(`状态形成背景：${propTransitionEvent}；只呈现变化完成后的稳定结果，不表现同一场戏里的变化过程`);
-      }
-      if (propNarrativeFunction) {
-        parts.push(`该状态的剧情识别重点：${propNarrativeFunction}`);
-      }
-      if (data.referencePropName) {
-        parts.push(`【图生图身份锁定】输入参考图是前一状态“${data.referencePropName}”。必须保留同一件道具的尺寸比例、主体结构、材质、颜色、稳定纹样与识别特征，只表现本次状态要求的变化`);
+      parts.push('【信息隔离】归属人物、人物关系、剧情作用、状态形成事件、场次、原文证据和使用动作只用于资料管理，不得进入画面或影响构图');
+      const visualReferencePropName = stripPropOwnerFromVisualName(data.referencePropName, data.owner);
+      if (visualReferencePropName) {
+        parts.push(`【图生图身份锁定】输入参考图是前一状态“${visualReferencePropName}”。必须保留同一件道具的尺寸比例、主体结构、材质、颜色、稳定纹样与识别特征，只表现本次状态要求的变化`);
       } else {
         parts.push('【基准状态】这是该道具的首张身份基准图，完整建立稳定的形制、材质、颜色和识别特征，供后续状态图生图使用');
       }
@@ -1720,9 +1722,12 @@ function buildPrompt(type: string, data: any, lookId?: string, imageVariant?: st
         parts.push('【特效道具特别要求】这是视觉效果素材参考，不是人物表演画面；不要画施法者或受术者，只画特效形态、颜色、透明度、边缘光、粒子和运动方向');
       }
       parts.push('【构图要求】单个道具居中完整展示，不裁切；若当前状态为破碎或散落，可展示属于同一件道具的必要碎片，但不得再放一件完整道具作比较');
-      if (data.material) parts.push(`材质：${data.material}`);
-      if (data.color) parts.push(`颜色：${data.color}`);
-      if (data.size) parts.push(`尺寸：${data.size}`);
+      const propMaterial = sanitizePropVisualDetail(data.material);
+      const propColor = sanitizePropVisualDetail(data.color);
+      const propSize = sanitizePropVisualDetail(data.size);
+      if (propMaterial) parts.push(`材质：${propMaterial}`);
+      if (propColor) parts.push(`颜色：${propColor}`);
+      if (propSize) parts.push(`尺寸：${propSize}`);
       parts.push(propCreationType === '动漫'
         ? '二维动漫道具设定，线稿稳定自然，色块干净，结构和状态细节清晰可读'
         : propCreationType === '3D'

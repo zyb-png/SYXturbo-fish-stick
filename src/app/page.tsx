@@ -3283,7 +3283,7 @@ export default function StoryboardGenerator() {
                 stateName: state?.stateName || '基准状态',
                 scene: state?.sceneName || occurrences[0]?.sceneName || '',
                 stage: state?.episodeLabel || occurrences[0]?.episodeLabel || '',
-                description: state?.evidence || state?.visualChange || item?.visualSummary || '',
+                description: state?.visualChange || item?.visualSummary || '',
                 visualChange: stateIndex === 0 ? (state?.visualChange || '基准状态') : (state?.visualChange || ''),
                 transitionEvent: state?.transitionEvent || (stateIndex === 0 ? '基准状态' : ''),
                 narrativeFunction: state?.narrativeFunction || state?.storyFunction || '',
@@ -3301,7 +3301,7 @@ export default function StoryboardGenerator() {
           : [{
               id: 'state-1',
               stateName: '基准状态',
-              description: item?.visualSummary || item?.functionSummary || `${name}的基准外观`,
+              description: item?.visualSummary || `${name}的基准外观`,
               visualChange: '基准状态',
               transitionEvent: '基准状态',
               narrativeFunction: item?.functionSummary || '',
@@ -3317,7 +3317,7 @@ export default function StoryboardGenerator() {
           mainPropName: name,
           type: item?.type || '普通道具',
           importance: item?.type === '背景道具' ? '背景道具' : '普通道具',
-          description: item?.visualSummary || item?.functionSummary || `${name}的外观待补充`,
+          description: item?.visualSummary || `${name}的外观待补充`,
           appearanceScenes: item?.appearanceScenes || [],
           owner: item?.owner || '公共/场景',
           function: item?.functionSummary || '按剧本场次使用',
@@ -10471,10 +10471,9 @@ export default function StoryboardGenerator() {
     prop.description,
     prop.visualDescription && prop.visualDescription !== prop.description ? `当前状态视觉：${prop.visualDescription}` : '',
     prop.stateVisualChange ? `相对前一状态的变化：${prop.stateVisualChange}` : '',
-    prop.stateTransitionEvent ? `状态形成原因：${prop.stateTransitionEvent}` : '',
-    prop.stateNarrativeFunction ? `剧情识别重点：${prop.stateNarrativeFunction}` : '',
     prop.referencePropName ? `严格参考前一状态「${prop.referencePropName}」，保留同一件道具的结构、材质、颜色和识别特征` : '建立该道具的首张身份基准图',
-    '单个道具、单一稳定状态、纯白背景，禁止完整与损坏状态同图对比，无人物、无字幕、无文字、水印',
+    '归属人物、人物关系、剧情作用、状态形成事件、场次和使用动作不参与生图',
+    '单个道具、单一稳定状态、纯白背景，禁止完整与损坏状态同图对比，无人物、无手部、无人体部位、无使用动作、无字幕、无文字、水印',
   ], '；');
 
   const getCompletedImages = (asset?: AssetImages) => (
