@@ -4176,6 +4176,13 @@ html[data-theme]:not([data-theme="gold"]) ::-webkit-scrollbar-thumb {
   margin-bottom: 8px;
 }
 
+.billing-note {
+  margin: -2px 0 9px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
 .billing-summary article {
   display: grid;
   gap: 4px;

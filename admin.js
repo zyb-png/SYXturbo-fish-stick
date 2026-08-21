@@ -28,6 +28,7 @@ function bindAdminEvents() {
     loadBillingRecords();
   });
   $('refreshBillingBtn').addEventListener('click', loadBillingRecords);
+  $('billingMatchStatus').addEventListener('change', loadBillingRecords);
   $('savePricingBtn').addEventListener('click', savePricing);
   $('syncPricingBtn').addEventListener('click', syncPricing);
   $('adminDialogBackdrop').addEventListener('click', closeAdminDialog);
@@ -396,7 +397,7 @@ function renderBillingRecords() {
     const project = item.project_name || '';
     const ownerCell = isMatched
       ? `<strong class="billing-owner">${escapeHtml(account || '未知账号')}</strong><small>${escapeHtml(item.account_username || '')}</small>`
-      : '<span class="billing-unmatched-badge">未匹配本地任务</span><small>无法判断操作账号</small>';
+      : `<span class="billing-unmatched-badge">未匹配本地任务</span><small>${escapeHtml(item.unmatched_reason || '无法判断操作账号')}</small>`;
     return `
       <tr class="${isMatched ? '' : 'billing-row-unmatched'}">
         <td>${escapeHtml(item.created_at || '')}</td>
@@ -408,10 +409,11 @@ function renderBillingRecords() {
         <td class="${amountClass}">${item.amount_rmb ?? 0} 元</td>
         <td>${formatBalanceChange(item)}</td>
         <td>${escapeHtml(item.request_id || '')}</td>
+        <td>${escapeHtml(isMatched ? '已匹配本地任务' : (item.unmatched_reason || '未匹配'))}</td>
       </tr>
     `;
   }).join('');
-  $('billingTable').innerHTML = table(['时间', '扣款类型', '任务ID', '操作人', '管理员', '项目', '金额', '余额变化', 'Request ID'], rows);
+  $('billingTable').innerHTML = table(['时间', '扣款类型', '任务ID', '操作人', '管理员', '项目', '金额', '余额变化', 'Request ID', '匹配说明'], rows);
 }
 
 function formatBalanceChange(item) {
@@ -425,6 +427,7 @@ function buildBillingQuery() {
   const params = new URLSearchParams();
   params.set('limit', '100');
   params.set('pages', '3');
+  if ($('billingMatchStatus').value) params.set('match_status', $('billingMatchStatus').value);
   if ($('dateFrom').value) params.set('date_from', $('dateFrom').value);
   if ($('dateTo').value) params.set('date_to', $('dateTo').value);
   if ($('filterAccount').value) params.set('account_id', $('filterAccount').value);

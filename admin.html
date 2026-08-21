@@ -15,7 +15,7 @@
       } catch {}
     })();
   </script>
-  <link rel="stylesheet" href="./styles.css?v=20260701-project-budget">
+  <link rel="stylesheet" href="./styles.css?v=20260822-billing-deploy">
 </head>
 <body>
   <main class="admin-app">
@@ -119,8 +119,16 @@
             <h2>Manfei 实时扣款记录</h2>
             <p>实时读取 Manfei API /v1/usage，每一笔扣费、退款和调差都会单独显示</p>
           </div>
-          <button id="refreshBillingBtn" type="button">刷新扣款记录</button>
+          <div class="admin-card-tools">
+            <select id="billingMatchStatus" title="扣款记录匹配状态">
+              <option value="">全部记录</option>
+              <option value="matched">只看已匹配</option>
+              <option value="unmatched">只看未匹配</option>
+            </select>
+            <button id="refreshBillingBtn" type="button">刷新扣款记录</button>
+          </div>
         </div>
+        <p class="billing-note">黄色记录表示 Manfei 有扣款，但本地没有对应任务卡片；通常是旧版本、外部调用、预扣记录或历史数据，不代表当前账号一定出错。</p>
         <div id="billingSummary" class="billing-summary"></div>
         <div id="billingTable" class="admin-table billing-table"></div>
       </section>
@@ -154,6 +162,6 @@
       </div>
     </form>
   </div>
-  <script src="./admin.js?v=20260713-api-balance-refresh"></script>
+  <script src="./admin.js?v=20260822-billing-deploy"></script>
 </body>
 </html>

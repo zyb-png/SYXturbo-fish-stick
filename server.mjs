@@ -45,17 +45,24 @@ const DEFAULT_ADMIN_ID = 'acct_default_admin';
 const DEFAULT_PROJECT_ID = 'proj_default';
 const MAX_ADMINS = 6;
 
+const MODEL_CAPABILITIES = {
+  'mini-manfei-new': { resolutions: ['480p', '720p'], minDuration: 4, maxDuration: 15 },
+  'moon-manfei-new': { resolutions: ['480p', '720p'], minDuration: 4, maxDuration: 15 },
+  'star-manfei-new': { resolutions: ['480p', '720p'], minDuration: 4, maxDuration: 30 },
+  'sun-manfei-new': { resolutions: ['480p', '720p', '1080p', '4k'], minDuration: 4, maxDuration: 15 },
+};
+
 const DOCUMENT_MODEL_PRICING = [
-  ['mini-manfei-new', '480p', 24],
-  ['mini-manfei-new', '720p', 32],
-  ['moon-manfei-new', '480p', 60],
-  ['moon-manfei-new', '720p', 90],
-  ['star-manfei-new', '480p', 140],
-  ['star-manfei-new', '720p', 170],
-  ['sun-manfei-new', '480p', 80],
-  ['sun-manfei-new', '720p', 120],
-  ['sun-manfei-new', '1080p', 180],
-  ['sun-manfei-new', '4k', 260],
+  ['mini-manfei-new', '480p', 10, 24],
+  ['mini-manfei-new', '720p', 13, 32],
+  ['moon-manfei-new', '480p', 35, 60],
+  ['moon-manfei-new', '720p', 55, 90],
+  ['star-manfei-new', '480p', 75, 140],
+  ['star-manfei-new', '720p', 90, 170],
+  ['sun-manfei-new', '480p', 50, 80],
+  ['sun-manfei-new', '720p', 105, 120],
+  ['sun-manfei-new', '1080p', 150, 180],
+  ['sun-manfei-new', '4k', 220, 260],
 ];
 
 const TOS_CONFIG = {
@@ -289,10 +296,17 @@ function initDb() {
 function seedPricing() {
   const count = db.prepare('SELECT COUNT(*) AS count FROM pricing_rules').get().count;
   const insert = db.prepare('INSERT INTO pricing_rules (id, model, resolution, duration, amount_cents) VALUES (?, ?, ?, ?, ?)');
-  const findPricing = db.prepare('SELECT id FROM pricing_rules WHERE model = ? AND resolution = ? AND duration = 1');
-  for (const [model, resolution, perSecond] of DOCUMENT_MODEL_PRICING) {
-    if (count > 0 && findPricing.get(model, resolution)) continue;
-    insert.run(id('price'), model, resolution, 1, perSecond);
+  const findPricing = db.prepare('SELECT id, amount_cents FROM pricing_rules WHERE model = ? AND resolution = ? AND duration = 1');
+  const update = db.prepare('UPDATE pricing_rules SET amount_cents = ? WHERE id = ?');
+  for (const [model, resolution, perSecond, legacyPerSecond] of DOCUMENT_MODEL_PRICING) {
+    const existing = findPricing.get(model, resolution);
+    if (!existing) {
+      insert.run(id('price'), model, resolution, 1, perSecond);
+      continue;
+    }
+    if (count > 0 && Number(existing.amount_cents) === Number(legacyPerSecond)) {
+      update.run(perSecond, existing.id);
+    }
   }
 }
 
@@ -1055,6 +1069,21 @@ function extractPrompt(content) {
   return String(textItem?.text || '').slice(0, 8000);
 }
 
+function validateVideoParams({ model, resolution, duration }) {
+  const config = MODEL_CAPABILITIES[model];
+  if (!config) {
+    throw Object.assign(new Error(`不支持的模型：${model || '未选择'}`), { status: 400 });
+  }
+  if (!config.resolutions.includes(resolution)) {
+    throw Object.assign(new Error(`${model} 不支持 ${resolution}，请选择 ${config.resolutions.join(' / ')}`), { status: 400 });
+  }
+  const seconds = Number(duration);
+  if (!Number.isFinite(seconds) || seconds < config.minDuration || seconds > config.maxDuration) {
+    throw Object.assign(new Error(`${model} 的时长必须为 ${config.minDuration}-${config.maxDuration} 秒`), { status: 400 });
+  }
+  return Math.round(seconds);
+}
+
 function getPricing(model, resolution, duration) {
   const seconds = Math.max(1, Math.round(Number(duration) || 1));
   const perSecond = db.prepare(`
@@ -1209,7 +1238,11 @@ async function handleCreateVideoTask(req, res, session, sync = false) {
     if (!projectId) throw Object.assign(new Error('生成视频前必须选择项目'), { status: 400 });
     const project = getVisibleProject(actor, projectId);
     if (!project || project.status !== 'active') throw Object.assign(new Error('项目不存在或已暂停'), { status: 403 });
-    const duration = Number(body.duration || 5);
+    const duration = validateVideoParams({
+      model: String(body.model || ''),
+      resolution: String(body.resolution || ''),
+      duration: body.duration || 5,
+    });
     const pricing = getPricing(body.model, body.resolution, duration);
     if (!pricing) {
       throw Object.assign(new Error('本地估算价格表缺少当前模型/分辨率/时长，请联系超级管理员配置后再提交'), { status: 400 });
@@ -1533,6 +1566,17 @@ async function handlePricingApi(req, res, session) {
   return sendJson(res, 405, { error: '方法不支持' });
 }
 
+function handleModelCapabilities(req, res) {
+  return sendJson(res, 200, {
+    models: Object.entries(MODEL_CAPABILITIES).map(([model, config]) => ({
+      model,
+      resolutions: config.resolutions,
+      min_duration: config.minDuration,
+      max_duration: config.maxDuration,
+    })),
+  });
+}
+
 async function handlePricingSyncApi(req, res, session) {
   if (session.account.role !== 'super_admin') return sendJson(res, 403, { error: '只有超级管理员可以同步价格表' });
   if (req.method !== 'POST') return sendJson(res, 405, { error: '方法不支持' });
@@ -1768,6 +1812,12 @@ function decorateBillingItem(item) {
     WHERE tasks.id = ?
   `).get(taskId) : null;
   const amount = Number(item.amount_rmb ?? item.amount ?? item.cost_rmb ?? 0) || 0;
+  let unmatchedReason = '';
+  if (!task) {
+    if (!taskId) unmatchedReason = 'Manfei 未返回 task_id';
+    else if (taskId.startsWith('pre:')) unmatchedReason = 'Manfei 预扣/预检查记录，无本地任务卡片';
+    else unmatchedReason = '本地数据库没有这条任务，可能来自旧版本、外部调用或历史数据';
+  }
   return {
     id: item.id,
     endpoint: item.endpoint || '',
@@ -1793,6 +1843,7 @@ function decorateBillingItem(item) {
     model: task?.model || '',
     task_status: task?.status || '',
     matched_local_task: Boolean(task),
+    unmatched_reason: unmatchedReason,
     raw: item,
   };
 }
@@ -1811,6 +1862,9 @@ async function handleBillingRecords(req, res, session, url) {
     const pages = Math.min(5, Math.max(1, Number(url.searchParams.get('pages') || 2)));
     const rawItems = await fetchManfeiUsagePages({ limit, offset, pages });
     let items = rawItems.map(decorateBillingItem).filter(item => canSeeBillingRecord(session.account, item));
+    const matchStatus = url.searchParams.get('match_status');
+    if (matchStatus === 'matched') items = items.filter(item => item.matched_local_task);
+    if (matchStatus === 'unmatched') items = items.filter(item => !item.matched_local_task);
 
     const accountId = url.searchParams.get('account_id');
     if (accountId) items = items.filter(item => item.account_id === accountId);
@@ -1902,6 +1956,7 @@ async function handleExport(req, res, session, url) {
         余额后: item.balance_after ?? '',
         RequestID: item.request_id || '',
         是否匹配本地任务: item.matched_local_task ? '是' : '否',
+        未匹配原因: item.matched_local_task ? '' : item.unmatched_reason || '',
       }));
     XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(billingItems), 'Manfei扣款明细');
   } catch {}
@@ -2101,6 +2156,7 @@ const server = http.createServer(async (req, res) => {
     if (pathname === '/api/projects' || pathname.startsWith('/api/projects/')) return handleProjectsApi(req, res, session, url);
     if (pathname === '/api/quotas') return handleQuotasApi(req, res, session);
     if (pathname === '/api/quotas/adjust') return handleQuotaAdjustApi(req, res, session);
+    if (pathname === '/api/model-capabilities') return handleModelCapabilities(req, res);
     if (pathname === '/api/pricing') return handlePricingApi(req, res, session);
     if (pathname === '/api/pricing/sync') return handlePricingSyncApi(req, res, session);
     if (pathname === '/api/usage-report') return handleUsageReport(req, res, session, url);
