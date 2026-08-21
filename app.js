@@ -880,7 +880,9 @@ function syncMentionBindings() {
 function normalizeDuration() {
   const input = $('duration');
   const value = Number(input.value);
-  input.value = String(Number.isFinite(value) ? Math.min(15, Math.max(4, Math.round(value))) : 5);
+  const max = $('model')?.value === 'star-manfei-new' ? 30 : 15;
+  input.max = String(max);
+  input.value = String(Number.isFinite(value) ? Math.min(max, Math.max(4, Math.round(value))) : 5);
 }
 
 function previewPromptPreset() {
@@ -1055,7 +1057,9 @@ function syncResolution() {
   const resolution = $('resolution');
   const old = resolution.value;
   resolution.innerHTML = '';
-  const values = model === 'moon-manfei-new' ? ['480p', '720p'] : ['480p', '720p', '1080p'];
+  const values = model === 'sun-manfei-new'
+    ? ['480p', '720p', '1080p', '4k']
+    : ['480p', '720p'];
   for (const value of values) {
     const option = document.createElement('option');
     option.value = value;
@@ -1063,6 +1067,14 @@ function syncResolution() {
     resolution.appendChild(option);
   }
   resolution.value = values.includes(old) ? old : '720p';
+
+  const duration = $('duration');
+  if (duration) {
+    const max = model === 'star-manfei-new' ? 30 : 15;
+    duration.max = String(max);
+    if (Number(duration.value || 5) > max) duration.value = String(max);
+    normalizeDuration();
+  }
 }
 
 function renderAssets() {
@@ -1119,8 +1131,9 @@ function buildContent() {
 
 function buildRequestBody() {
   const duration = Number($('duration').value || 5);
-  if (!Number.isFinite(duration) || duration < 4 || duration > 15) {
-    throw new Error('视频时长必须为 4–15 秒');
+  const maxDuration = $('model').value === 'star-manfei-new' ? 30 : 15;
+  if (!Number.isFinite(duration) || duration < 4 || duration > maxDuration) {
+    throw new Error(`视频时长必须为 4–${maxDuration} 秒`);
   }
   const projectId = $('projectId')?.value || '';
   if (!projectId) {

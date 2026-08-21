@@ -45,6 +45,19 @@ const DEFAULT_ADMIN_ID = 'acct_default_admin';
 const DEFAULT_PROJECT_ID = 'proj_default';
 const MAX_ADMINS = 6;
 
+const DOCUMENT_MODEL_PRICING = [
+  ['mini-manfei-new', '480p', 24],
+  ['mini-manfei-new', '720p', 32],
+  ['moon-manfei-new', '480p', 60],
+  ['moon-manfei-new', '720p', 90],
+  ['star-manfei-new', '480p', 140],
+  ['star-manfei-new', '720p', 170],
+  ['sun-manfei-new', '480p', 80],
+  ['sun-manfei-new', '720p', 120],
+  ['sun-manfei-new', '1080p', 180],
+  ['sun-manfei-new', '4k', 260],
+];
+
 const TOS_CONFIG = {
   accessKeyId: process.env.TOS_ACCESS_KEY_ID || process.env.VOLCENGINE_TOS_AK || '',
   accessKeySecret: process.env.TOS_ACCESS_KEY_SECRET || process.env.TOS_SECRET_ACCESS_KEY || process.env.VOLCENGINE_TOS_SK || '',
@@ -275,16 +288,10 @@ function initDb() {
 
 function seedPricing() {
   const count = db.prepare('SELECT COUNT(*) AS count FROM pricing_rules').get().count;
-  if (count > 0) return;
   const insert = db.prepare('INSERT INTO pricing_rules (id, model, resolution, duration, amount_cents) VALUES (?, ?, ?, ?, ?)');
-  const rates = [
-    ['moon-manfei-new', '480p', 60],
-    ['moon-manfei-new', '720p', 90],
-    ['sun-manfei-new', '480p', 80],
-    ['sun-manfei-new', '720p', 120],
-    ['sun-manfei-new', '1080p', 180],
-  ];
-  for (const [model, resolution, perSecond] of rates) {
+  const findPricing = db.prepare('SELECT id FROM pricing_rules WHERE model = ? AND resolution = ? AND duration = 1');
+  for (const [model, resolution, perSecond] of DOCUMENT_MODEL_PRICING) {
+    if (count > 0 && findPricing.get(model, resolution)) continue;
     insert.run(id('price'), model, resolution, 1, perSecond);
   }
 }
@@ -612,7 +619,7 @@ function mapApiUrl(pathname, search = '') {
   const asset = pathname.match(/^\/api\/assets\/([^/]+)$/);
   if (asset) return `/v1/assets/${encodeURIComponent(asset[1])}${search}`;
   if (pathname === '/api/video/tasks') return `/v1/video/tasks${search}`;
-  if (pathname === '/api/video/tasks/generate') return `/v1/video/tasks/generate${search}`;
+  if (pathname === '/api/video/tasks/generate') return `/v1/video/tasks:generate${search}`;
   const cancel = pathname.match(/^\/api\/video\/tasks\/([^/]+)\/cancel$/);
   if (cancel) return `/v1/video/tasks/${encodeURIComponent(cancel[1])}/cancel${search}`;
   const task = pathname.match(/^\/api\/video\/tasks\/([^/]+)$/);
@@ -1213,7 +1220,7 @@ async function handleCreateVideoTask(req, res, session, sync = false) {
     const upstreamBody = { ...body };
     delete upstreamBody.project_id;
     delete upstreamBody.projectId;
-    const upstream = await callManfei(sync ? '/v1/video/tasks/generate' : '/v1/video/tasks', {
+    const upstream = await callManfei(sync ? '/v1/video/tasks:generate' : '/v1/video/tasks', {
       method: 'POST',
       body: upstreamBody,
     });
