@@ -116,6 +116,17 @@
       <section class="admin-card admin-card-wide">
         <div class="admin-card-head">
           <div>
+            <h2>额度调整记录</h2>
+            <p>记录每一次充值、扣费、退款和管理员额度调整，方便查账</p>
+          </div>
+          <button id="refreshQuotaTransactionsBtn" type="button">刷新记录</button>
+        </div>
+        <div id="quotaTransactionsTable" class="admin-table"></div>
+      </section>
+
+      <section class="admin-card admin-card-wide">
+        <div class="admin-card-head">
+          <div>
             <h2>Manfei 实时扣款记录</h2>
             <p>实时读取 Manfei API /v1/usage，每一笔扣费、退款和调差都会单独显示</p>
           </div>

@@ -1443,10 +1443,12 @@ async function apiFetch(url, options = {}) {
 
 function getVideoErrorSummary(payload, context = {}) {
   const details = collectVideoErrorDetails(payload);
-  return details.message
+  const classification = classifyVideoError(details, context);
+  const reason = details.message
     || context.fallbackMessage
     || getStatusFallback(context.status)
     || '服务未返回具体失败原因';
+  return classification.label ? `${classification.label}：${reason}` : reason;
 }
 
 function collectVideoErrorDetails(payload) {
@@ -1488,8 +1490,63 @@ function getStatusFallback(status = '') {
   return '';
 }
 
+function classifyVideoError(details, context = {}) {
+  const status = String(context.status || '').toLowerCase();
+  const httpStatus = Number(context.httpStatus || 0);
+  const text = [
+    details.message,
+    details.reason,
+    details.code,
+    details.stage,
+    context.fallbackMessage,
+    status,
+  ].filter(Boolean).join(' ').toLowerCase();
+
+  if (httpStatus === 401 || httpStatus === 403 || /unauthorized|forbidden|token|auth|permission|无权|未登录|授权/.test(text)) {
+    return {
+      label: '登录或授权问题',
+      advice: '请重新登录；如果仍失败，请管理员检查 Manfei Token 或接口权限。',
+    };
+  }
+  if (httpStatus === 402 || /余额不足|额度不足|预算不足|insufficient|quota|balance|budget|402/.test(text)) {
+    return {
+      label: '余额或项目预算不足',
+      advice: '请联系管理员增加账号额度或项目预算后再提交。',
+    };
+  }
+  if (/invalidparameter|invalid parameter|parameter|参数|不支持|duration|resolution|ratio|model|模型|分辨率|比例|时长/.test(text)) {
+    return {
+      label: '生成参数不支持',
+      advice: '请检查模型、分辨率、比例和时长是否在当前模型支持范围内。',
+    };
+  }
+  if (/download|fetch object|object return status code|403|asset|media|url|素材|链接|tos|oss/.test(text)) {
+    return {
+      label: '素材读取失败',
+      advice: '请重新上传素材，确认缩略图可见后再提交；如果是外链素材，请确认链接可公开访问。',
+    };
+  }
+  if (/timeout|timed out|deadline|rate limit|busy|overloaded|超时|繁忙|限流|排队/.test(text)) {
+    return {
+      label: '上游服务繁忙或超时',
+      advice: '请稍后重试；也可以先缩短视频时长或减少参考素材。',
+    };
+  }
+  if (status === 'expired') {
+    return {
+      label: '任务已过期',
+      advice: '请重新提交任务；如果反复过期，请缩短时长或减少参考素材。',
+    };
+  }
+  return {
+    label: '上游返回失败',
+    advice: '请在任务卡片点击“调试”查看完整返回数据，或把错误截图发给管理员。',
+  };
+}
+
 function formatVideoErrorDetails(payload, context = {}) {
   const details = collectVideoErrorDetails(payload);
+  const classification = classifyVideoError(details, context);
   const status = context.status || (
     payload && typeof payload === 'object' ? payload.status : ''
   );
@@ -1499,7 +1556,9 @@ function formatVideoErrorDetails(payload, context = {}) {
       : ''
   );
   const lines = [
+    `分类：${classification.label}`,
     `原因：${details.message || details.reason || context.fallbackMessage || getStatusFallback(status) || '服务未返回具体失败原因'}`,
+    `建议：${classification.advice}`,
   ];
 
   if (details.reason && details.reason !== details.message) lines.push(`详细原因：${details.reason}`);
@@ -1509,9 +1568,6 @@ function formatVideoErrorDetails(payload, context = {}) {
   if (taskId) lines.push(`任务编号：${taskId}`);
   if (context.httpStatus) lines.push(`HTTP 状态：${context.httpStatus}`);
   if (details.requestId) lines.push(`请求 ID：${details.requestId}`);
-  if (!details.message && !details.reason) {
-    lines.push('建议：稍后重试；如持续失败，请在任务卡片中点击“调试”查看完整返回数据。');
-  }
   return lines.join('\n');
 }
 

@@ -4,6 +4,7 @@ const adminState = {
   projects: [],
   pricing: [],
   billing: null,
+  quotaTransactions: [],
   managementMode: 'accounts',
   balanceRefreshTimer: null,
 };
@@ -26,8 +27,10 @@ function bindAdminEvents() {
     event.preventDefault();
     loadUsage();
     loadBillingRecords();
+    loadQuotaTransactions();
   });
   $('refreshBillingBtn').addEventListener('click', loadBillingRecords);
+  $('refreshQuotaTransactionsBtn').addEventListener('click', loadQuotaTransactions);
   $('billingMatchStatus').addEventListener('change', loadBillingRecords);
   $('savePricingBtn').addEventListener('click', savePricing);
   $('syncPricingBtn').addEventListener('click', syncPricing);
@@ -47,7 +50,7 @@ async function loadAdminData() {
     switchManagementMode(adminState.managementMode);
     await Promise.all([loadAccounts(), loadProjects(), loadPricing()]);
     await loadUsage();
-    await loadBillingRecords();
+    await Promise.all([loadBillingRecords(), loadQuotaTransactions()]);
   } catch (error) {
     if (error.status === 401) location.href = '/login';
     toast(error.message, 'error');
@@ -242,6 +245,7 @@ async function handleAccountAction(action, accountId) {
     await refreshSession();
     await loadAccounts();
     await loadUsage();
+    await loadQuotaTransactions();
   } catch (error) {
     toast(`操作失败：${error.message}`, 'error');
   }
@@ -374,6 +378,50 @@ async function loadBillingRecords() {
     $('billingSummary').innerHTML = `<span class="admin-error">扣款记录读取失败：${escapeHtml(error.message)}</span>`;
     $('billingTable').innerHTML = table(['时间', '类型', '任务ID', '金额', '余额变化'], '');
   }
+}
+
+async function loadQuotaTransactions() {
+  try {
+    const params = new URLSearchParams();
+    params.set('limit', '80');
+    if ($('filterAccount').value) params.set('account_id', $('filterAccount').value);
+    const result = await api(`/api/quota-transactions?${params.toString()}`);
+    adminState.quotaTransactions = result.items || [];
+    renderQuotaTransactions();
+  } catch (error) {
+    $('quotaTransactionsTable').innerHTML = table(['时间', '操作人', '账号', '类型', '变化金额', '项目', '任务ID', '备注'], `
+      <tr><td colspan="8"><span class="admin-error">额度记录读取失败：${escapeHtml(error.message)}</span></td></tr>
+    `);
+  }
+}
+
+function renderQuotaTransactions() {
+  const rows = adminState.quotaTransactions.map(item => {
+    const amount = Number(item.amount_rmb) || 0;
+    const amountClass = amount < 0 ? 'billing-refund' : 'billing-charge';
+    return `
+      <tr>
+        <td>${escapeHtml(item.created_at || '')}</td>
+        <td>${escapeHtml(item.creator_name || '系统')}</td>
+        <td>${escapeHtml(item.account_name || '')}</td>
+        <td>${escapeHtml(quotaTypeName(item.type))}</td>
+        <td class="${amountClass}">${amount > 0 ? '+' : ''}${amount} 元</td>
+        <td>${escapeHtml(item.project_name || '')}</td>
+        <td>${escapeHtml(item.task_id || '')}</td>
+        <td>${escapeHtml(item.note || '')}</td>
+      </tr>
+    `;
+  }).join('');
+  $('quotaTransactionsTable').innerHTML = table(['时间', '操作人', '账号', '类型', '变化金额', '项目', '任务ID', '备注'], rows);
+}
+
+function quotaTypeName(type) {
+  return {
+    adjust: '额度调整',
+    freeze: '预冻结',
+    charge: '扣费',
+    refund: '退回',
+  }[type] || type || '';
 }
 
 function renderBillingRecords() {

@@ -1450,7 +1450,14 @@ async function handleAccountsApi(req, res, session, url) {
         total_cents: nextTotal,
         daily_limit_cents: nextDailyLimit,
       });
-      addQuotaTransaction({ accountId: target.id, adminId: target.admin_id || target.id, type: 'adjust', amountCents: nextTotal, note: '额度调整', createdBy: actor.id });
+      addQuotaTransaction({
+        accountId: target.id,
+        adminId: target.admin_id || target.id,
+        type: 'adjust',
+        amountCents: nextTotal - Number(currentQuota.total_cents || 0),
+        note: `额度调整：${yuanFromCents(currentQuota.total_cents)} 元 → ${yuanFromCents(nextTotal)} 元`,
+        createdBy: actor.id,
+      });
     }
     logOperation(actor.id, target.admin_id || target.id, 'account_update', { targetId: target.id });
     return sendJson(res, 200, { account: accountPublic(getAccountById(target.id)), quota: quotaSummary(target.id) });
@@ -1685,25 +1692,74 @@ async function handleQuotaAdjustApi(req, res, session) {
   const target = getAccountById(String(data.account_id || ''));
   if (!target || !canSeeAccount(actor, target) || target.deleted_at) return sendJson(res, 404, { error: '账号不存在' });
   if (target.role === 'super_admin' && actor.role !== 'super_admin') return sendJson(res, 403, { error: '无权调整超级管理员额度' });
+  const currentQuota = getQuota(target.id);
   const totalCents = normalizeCents(data.total_cents ?? centsFromYuan(data.total_rmb));
   const dailyLimitCents = ('daily_limit_cents' in data || 'daily_limit_rmb' in data)
     ? normalizeCents(data.daily_limit_cents ?? centsFromYuan(data.daily_limit_rmb))
-    : getQuota(target.id).daily_limit_cents;
-  await assertQuotaWithinApiBalance(totalCents, getQuota(target.id));
+    : currentQuota.daily_limit_cents;
+  await assertQuotaWithinApiBalance(totalCents, currentQuota);
   applyQuotaDelta(target.id, {
     total_cents: totalCents,
     daily_limit_cents: dailyLimitCents,
   });
+  const deltaCents = totalCents - Number(currentQuota.total_cents || 0);
   addQuotaTransaction({
     accountId: target.id,
     adminId: target.admin_id || target.id,
     type: 'adjust',
-    amountCents: totalCents,
-    note: data.note || '额度调整',
+    amountCents: deltaCents,
+    note: data.note || `额度调整：${yuanFromCents(currentQuota.total_cents)} 元 → ${yuanFromCents(totalCents)} 元`,
     createdBy: actor.id,
   });
   logOperation(actor.id, target.admin_id || target.id, 'quota_adjust', { targetId: target.id, totalCents });
   return sendJson(res, 200, { account: accountPublic(getAccountById(target.id)), quota: quotaSummary(target.id) });
+}
+
+async function handleQuotaTransactionsApi(req, res, session, url) {
+  const actor = session.account;
+  if (req.method !== 'GET') return sendJson(res, 405, { error: '方法不支持' });
+  const params = [];
+  const clauses = [];
+  if (actor.role === 'admin') {
+    clauses.push('(quota_transactions.account_id = ? OR quota_transactions.admin_id = ?)');
+    params.push(actor.id, actor.id);
+  } else if (actor.role === 'user') {
+    clauses.push('quota_transactions.account_id = ?');
+    params.push(actor.id);
+  }
+  const accountId = url.searchParams.get('account_id');
+  if (accountId) {
+    const target = getAccountById(accountId);
+    if (!target || !canSeeAccount(actor, target)) return sendJson(res, 403, { error: '无权查看该账号额度记录' });
+    clauses.push('quota_transactions.account_id = ?');
+    params.push(accountId);
+  }
+  const limit = Math.min(200, Math.max(1, Number(url.searchParams.get('limit') || 80)));
+  const where = clauses.length ? clauses.join(' AND ') : '1 = 1';
+  const rows = db.prepare(`
+    SELECT quota_transactions.*,
+      accounts.username AS account_username, accounts.display_name AS account_display_name,
+      admins.username AS admin_username, admins.display_name AS admin_display_name,
+      creators.username AS creator_username, creators.display_name AS creator_display_name,
+      projects.name AS project_name
+    FROM quota_transactions
+    LEFT JOIN accounts ON accounts.id = quota_transactions.account_id
+    LEFT JOIN accounts admins ON admins.id = quota_transactions.admin_id
+    LEFT JOIN accounts creators ON creators.id = quota_transactions.created_by
+    LEFT JOIN projects ON projects.id = quota_transactions.project_id
+    WHERE ${where}
+    ORDER BY quota_transactions.created_at DESC
+    LIMIT ?
+  `).all(...params, limit);
+  return sendJson(res, 200, {
+    items: rows.map(row => ({
+      ...row,
+      amount_rmb: yuanFromCents(row.amount_cents),
+      account_name: row.account_display_name || row.account_username || '',
+      admin_name: row.admin_display_name || row.admin_username || '',
+      creator_name: row.creator_display_name || row.creator_username || '',
+    })),
+  });
 }
 
 function scopedTaskWhere(actor, params = []) {
@@ -2156,6 +2212,7 @@ const server = http.createServer(async (req, res) => {
     if (pathname === '/api/projects' || pathname.startsWith('/api/projects/')) return handleProjectsApi(req, res, session, url);
     if (pathname === '/api/quotas') return handleQuotasApi(req, res, session);
     if (pathname === '/api/quotas/adjust') return handleQuotaAdjustApi(req, res, session);
+    if (pathname === '/api/quota-transactions') return handleQuotaTransactionsApi(req, res, session, url);
     if (pathname === '/api/model-capabilities') return handleModelCapabilities(req, res);
     if (pathname === '/api/pricing') return handlePricingApi(req, res, session);
     if (pathname === '/api/pricing/sync') return handlePricingSyncApi(req, res, session);
