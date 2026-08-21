@@ -1069,6 +1069,16 @@ function extractPrompt(content) {
   return String(textItem?.text || '').slice(0, 8000);
 }
 
+function hasVideoReference(content) {
+  if (!Array.isArray(content)) return false;
+  return content.some(item => {
+    const type = String(item?.type || '').toLowerCase();
+    if (type === 'video_url' || type === 'video') return true;
+    const url = item?.video_url?.url || item?.video?.url || item?.url || '';
+    return Boolean(url) && /\.(mp4|mov|m4v|webm)(\?|#|$)/i.test(String(url));
+  });
+}
+
 function validateVideoParams({ model, resolution, duration }) {
   const config = MODEL_CAPABILITIES[model];
   if (!config) {
@@ -1243,6 +1253,7 @@ async function handleCreateVideoTask(req, res, session, sync = false) {
       resolution: String(body.resolution || ''),
       duration: body.duration || 5,
     });
+    const shouldFollowSourceDuration = hasVideoReference(body.content);
     const pricing = getPricing(body.model, body.resolution, duration);
     if (!pricing) {
       throw Object.assign(new Error('本地估算价格表缺少当前模型/分辨率/时长，请联系超级管理员配置后再提交'), { status: 400 });
@@ -1253,6 +1264,7 @@ async function handleCreateVideoTask(req, res, session, sync = false) {
     const upstreamBody = { ...body };
     delete upstreamBody.project_id;
     delete upstreamBody.projectId;
+    if (shouldFollowSourceDuration) upstreamBody.duration = -1;
     const upstream = await callManfei(sync ? '/v1/video/tasks:generate' : '/v1/video/tasks', {
       method: 'POST',
       body: upstreamBody,
