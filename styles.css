@@ -1034,8 +1034,9 @@ h3 {
 }
 
 .resource-group {
+  position: relative;
   padding: 0;
-  overflow: hidden;
+  overflow: visible;
 }
 
 .resource-group.active {
@@ -1114,6 +1115,7 @@ h3 {
 }
 
 .resource-group .resource-items {
+  position: relative;
   display: grid;
   grid-template-columns: repeat(3, 72px);
   align-items: start;
@@ -1232,6 +1234,17 @@ h3 {
   overflow: hidden;
   border-radius: 6px;
   padding: 0;
+  transition:
+    border-color 140ms ease,
+    box-shadow 140ms ease;
+  z-index: 1;
+}
+
+.resource-group .resource-item:hover,
+.resource-group .resource-item:focus-within {
+  border-color: rgba(255, 218, 139, 0.96);
+  box-shadow: 0 0 18px rgba(226, 173, 72, 0.3);
+  z-index: 30;
 }
 
 .resource-group .resource-item .media-thumb {
@@ -1239,6 +1252,7 @@ h3 {
   height: 100%;
   border: 0;
   border-radius: 0;
+  background: #050705;
 }
 
 .resource-item-actions {
@@ -1275,6 +1289,7 @@ h3 {
   transform: translateY(5px);
   transition: opacity 140ms ease, transform 140ms ease;
   white-space: nowrap;
+  z-index: 2;
 }
 
 .resource-item:hover .resource-item-caption,
@@ -1347,6 +1362,62 @@ h3 {
   background: rgba(3, 5, 3, 0.88);
   color: #f0d69a;
   font-size: 8px;
+}
+
+.resource-hover-preview {
+  position: fixed;
+  top: 0;
+  left: 0;
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
+  width: 186px;
+  height: 232px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 218, 139, 0.92);
+  border-radius: 8px;
+  background:
+    linear-gradient(150deg, rgba(24, 21, 14, 0.92), rgba(4, 7, 5, 0.98)),
+    #050705;
+  box-shadow: 0 20px 44px rgba(0, 0, 0, 0.58), 0 0 24px rgba(226, 173, 72, 0.28);
+  opacity: 0;
+  pointer-events: none;
+  transform: translate3d(-9999px, -9999px, 0) scale(0.96);
+  transition: opacity 90ms ease, transform 90ms ease;
+  z-index: 9999;
+}
+
+.resource-hover-preview.visible {
+  opacity: 1;
+}
+
+.resource-hover-preview img,
+.resource-hover-preview video {
+  display: block;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  object-fit: contain;
+  background: #030503;
+}
+
+.resource-hover-preview .resource-hover-placeholder {
+  display: grid;
+  place-items: center;
+  color: var(--gold-bright);
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.resource-hover-preview-name {
+  overflow: hidden;
+  padding: 7px 9px;
+  border-top: 1px solid rgba(232, 187, 99, 0.24);
+  background: rgba(2, 4, 3, 0.9);
+  color: #f0dfb8;
+  font-size: 11px;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .asset-id-text {

@@ -2343,6 +2343,11 @@ function renderResources() {
             <button class="resource-action delete-resource-button" data-action="delete" type="button" title="从本地资源组移除" aria-label="从本地资源组移除">×</button>
           </div>
         `;
+        row.addEventListener('mouseenter', event => showResourceHoverPreview(item, event));
+        row.addEventListener('mousemove', moveResourceHoverPreview);
+        row.addEventListener('mouseleave', hideResourceHoverPreview);
+        row.addEventListener('focusin', event => showResourceHoverPreview(item, event));
+        row.addEventListener('focusout', hideResourceHoverPreview);
         row.querySelector('[data-action="add"]').addEventListener('click', () => {
           const type = assetTypeToKind(item.assetType);
           const assetId = normalizeAssetId(item.id) || normalizeAssetId(item.raw);
@@ -2374,6 +2379,61 @@ function renderResources() {
     box.appendChild(groupEl);
   });
   updateUploadTarget();
+}
+
+function getResourceHoverPreview() {
+  let preview = document.getElementById('resourceHoverPreview');
+  if (!preview) {
+    preview = document.createElement('div');
+    preview.id = 'resourceHoverPreview';
+    preview.className = 'resource-hover-preview';
+    document.body.appendChild(preview);
+  }
+  return preview;
+}
+
+function showResourceHoverPreview(item, event) {
+  const preview = getResourceHoverPreview();
+  const type = assetTypeToKind(item.assetType);
+  const url = normalizePlainUrl(item.url);
+  const name = item.name || item.id || labels[type] || '素材';
+  const media = type === 'image_url' && url
+    ? `<img src="${escapeHtml(url)}" alt="${escapeHtml(name)}">`
+    : type === 'video_url' && url
+      ? `<video src="${escapeHtml(url)}" muted playsinline preload="metadata"></video>`
+      : `<div class="resource-hover-placeholder">${escapeHtml(labels[type] || item.assetType || '素材')}</div>`;
+  preview.innerHTML = `${media}<div class="resource-hover-preview-name">${escapeHtml(name)}</div>`;
+  preview.classList.add('visible');
+  const video = preview.querySelector('video');
+  if (video) {
+    video.currentTime = 0;
+    video.play().catch(() => {});
+  }
+  moveResourceHoverPreview(event);
+}
+
+function moveResourceHoverPreview(event) {
+  const preview = document.getElementById('resourceHoverPreview');
+  if (!preview || !preview.classList.contains('visible')) return;
+  const padding = 14;
+  const width = preview.offsetWidth || 186;
+  const height = preview.offsetHeight || 232;
+  const rect = event.currentTarget?.getBoundingClientRect?.() || event.target?.getBoundingClientRect?.();
+  const anchorX = Number.isFinite(event.clientX) ? event.clientX : (rect ? rect.right : padding);
+  const anchorY = Number.isFinite(event.clientY) ? event.clientY : (rect ? rect.top : padding);
+  let left = anchorX + 16;
+  let top = anchorY + 16;
+  if (left + width + padding > window.innerWidth) left = anchorX - width - 16;
+  if (top + height + padding > window.innerHeight) top = anchorY - height - 16;
+  preview.style.transform = `translate3d(${Math.max(padding, left)}px, ${Math.max(padding, top)}px, 0) scale(1)`;
+}
+
+function hideResourceHoverPreview() {
+  const preview = document.getElementById('resourceHoverPreview');
+  if (!preview) return;
+  const video = preview.querySelector('video');
+  if (video) video.pause();
+  preview.classList.remove('visible');
 }
 
 async function deleteResourceGroup(groupId) {
